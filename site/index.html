@@ -1,3 +1,5 @@
+---
+---
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -26,20 +28,7 @@
 </head>
 <body>
 
-<header class="site-header">
-  <div class="wrap">
-    <a class="wordmark" href="./"><img class="wordmark-logo" src="https://github.com/doom-snapmap.png?size=64" alt="" onerror="this.style.display='none'">Snapmap<span class="plus">+</span></a>
-    <nav aria-label="Site">
-      <div class="navlinks">
-        <a href="./" aria-current="page">Home</a>
-        <a href="snapmap-plus-guide.html">Guide</a>
-        <a href="changelog.html">Changelog</a>
-        <a href="https://github.com/doom-snapmap/snapmap-plus">GitHub</a>
-      </div>
-      <a class="btn-nav" data-dl href="https://github.com/doom-snapmap/snapmap-plus/releases">Download</a>
-    </nav>
-  </div>
-</header>
+{% include header.html current="home" base="./" download="true" %}
 
 <main>
   <section class="hero">
@@ -288,7 +277,6 @@
     <canvas class="ghost-canvas" data-ghost data-ghost-opacity="0.9" aria-hidden="true"></canvas>
     <div class="wrap">
       <div class="section-head">
-        <span class="node-port" aria-hidden="true"></span><span class="node-wire" aria-hidden="true"></span>
         <h2 class="section-title">For the SnapMappers</h2>
       </div>
       <p class="big-line">

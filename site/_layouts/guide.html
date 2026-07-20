@@ -13,20 +13,8 @@
 </head>
 <body>
 
-<header class="site-header">
-  <div class="wrap">
-    <a class="wordmark" href="./"><img class="wordmark-logo" src="https://github.com/doom-snapmap.png?size=64" alt="" onerror="this.style.display='none'">Snapmap<span class="plus">+</span></a>
-    <nav aria-label="Site">
-      <div class="navlinks">
-        <a href="./">Home</a>
-        <a href="snapmap-plus-guide.html"{% if page.url == '/snapmap-plus-guide.html' %} aria-current="page"{% endif %}>Guide</a>
-        <a href="changelog.html">Changelog</a>
-        <a href="https://github.com/doom-snapmap/snapmap-plus">GitHub</a>
-      </div>
-      <a class="btn-nav" data-dl href="https://github.com/doom-snapmap/snapmap-plus/releases">Download</a>
-    </nav>
-  </div>
-</header>
+{% assign nav_current = "" %}{% if page.url == '/snapmap-plus-guide.html' %}{% assign nav_current = "guide" %}{% endif %}
+{% include header.html current=nav_current base="./" download="true" %}
 
 <main>
   <div class="wrap">

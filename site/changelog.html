@@ -1,3 +1,5 @@
+---
+---
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -19,20 +21,7 @@
 </head>
 <body>
 
-<header class="site-header">
-  <div class="wrap">
-    <a class="wordmark" href="./"><img class="wordmark-logo" src="https://github.com/doom-snapmap.png?size=64" alt="" onerror="this.style.display='none'">Snapmap<span class="plus">+</span></a>
-    <nav aria-label="Site">
-      <div class="navlinks">
-        <a href="./">Home</a>
-        <a href="snapmap-plus-guide.html">Guide</a>
-        <a href="changelog.html" aria-current="page">Changelog</a>
-        <a href="https://github.com/doom-snapmap/snapmap-plus">GitHub</a>
-      </div>
-      <a class="btn-nav" data-dl href="https://github.com/doom-snapmap/snapmap-plus/releases">Download</a>
-    </nav>
-  </div>
-</header>
+{% include header.html current="changelog" base="./" download="true" %}
 
 <main class="page-doc">
   <div class="wrap">

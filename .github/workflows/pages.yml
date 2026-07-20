@@ -2,7 +2,8 @@
 #
 # The site lives in site/ -- separate from docs/ (contributor documentation, not published).
 # Jekyll renders the markdown pages (the guide, the privacy policy) through site/_layouts/;
-# the HTML pages (index, changelog, 404) pass through verbatim.
+# the HTML pages (index, changelog, 404) carry empty front matter so Jekyll pulls in the
+# shared site/_includes/header.html (the sticky nav + mobile hamburger).
 #
 # Same supply-chain rules as ci.yml: every action pinned to a full commit SHA, no secrets
 # beyond the Pages deploy token GitHub scopes to this workflow.

@@ -225,6 +225,51 @@
     }
   }
 
+  /* ---------- 5. mobile nav ---------- */
+
+  function initNav() {
+    var header = document.querySelector(".site-header");
+    if (!header) return;
+    var toggle = header.querySelector(".nav-toggle");
+    var menu = header.querySelector(".nav-menu");
+    if (!toggle || !menu) return;
+
+    function setOpen(open) {
+      header.classList.toggle("nav-open", open);
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
+    toggle.addEventListener("click", function () {
+      setOpen(!header.classList.contains("nav-open"));
+    });
+
+    // a tap on any menu link dismisses the panel
+    menu.addEventListener("click", function (e) {
+      if (e.target.closest("a")) setOpen(false);
+    });
+
+    // Escape closes and returns focus to the toggle
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && header.classList.contains("nav-open")) {
+        setOpen(false);
+        toggle.focus();
+      }
+    });
+
+    // a tap outside the header closes the panel
+    document.addEventListener("click", function (e) {
+      if (header.classList.contains("nav-open") && !header.contains(e.target)) {
+        setOpen(false);
+      }
+    });
+
+    // widening back to the desktop layout resets state
+    var mq = window.matchMedia("(min-width: 761px)");
+    var onChange = function (e) { if (e.matches) setOpen(false); };
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+  }
+
   /* ---------- boot ---------- */
 
   function boot() {
@@ -232,6 +277,7 @@
     initLightbox();
     initChangelog();
     initToc();
+    initNav();
   }
 
   if (document.readyState === "loading") {

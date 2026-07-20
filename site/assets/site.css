@@ -158,6 +158,48 @@ code, pre { font-family: var(--mono); }
 }
 .btn-nav:hover { background: var(--argent-hi); color: #140f08; }
 
+/* the collapsible nav payload — a flat row on desktop, a slide-down panel on mobile */
+.nav-menu { display: flex; align-items: center; gap: 20px; }
+
+/* mobile menu toggle (hamburger) — a chamfered HUD chip, hidden until the nav collapses */
+.nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--wire);
+  cursor: pointer;
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.nav-toggle:hover { border-color: var(--wire-soft); background: var(--wire-faint); }
+
+.nav-toggle-lines,
+.nav-toggle-lines::before,
+.nav-toggle-lines::after {
+  content: "";
+  display: block;
+  width: 20px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  transition: transform 0.28s cubic-bezier(0.4, 0.01, 0.2, 1), opacity 0.2s ease;
+}
+.nav-toggle-lines { position: relative; }
+.nav-toggle-lines::before,
+.nav-toggle-lines::after { position: absolute; left: 0; }
+.nav-toggle-lines::before { top: -7px; }
+.nav-toggle-lines::after  { top: 7px; }
+
+/* open state: three bars fold into an X */
+.site-header.nav-open .nav-toggle-lines { background: transparent; }
+.site-header.nav-open .nav-toggle-lines::before { transform: translateY(7px) rotate(45deg); }
+.site-header.nav-open .nav-toggle-lines::after  { transform: translateY(-7px) rotate(-45deg); }
+
 /* ---------- buttons ---------- */
 
 .btn {
@@ -750,6 +792,7 @@ section.deck { background: var(--deck); border-top: 1px solid var(--line-soft); 
   border: 1px solid var(--line-soft);
   padding: 1px 5px;
   color: var(--wire);
+  overflow-wrap: anywhere; /* let long unbroken paths wrap instead of scrolling the page */
 }
 
 .guide-doc table {
@@ -808,9 +851,61 @@ section.deck { background: var(--deck); border-top: 1px solid var(--line-soft); 
   .hero-graph .wire-path { animation: none; stroke-dashoffset: 0; }
   .hero-graph .pulse { display: none; }
   .btn, .btn:active { transition: none; transform: none; }
+  .nav-menu, .nav-toggle-lines,
+  .nav-toggle-lines::before, .nav-toggle-lines::after { transition: none; }
 }
 
 /* ---------- responsive ---------- */
+
+/* collapse the nav into the hamburger before the links + download start to wrap */
+@media (max-width: 760px) {
+  .site-header .wrap { flex-wrap: nowrap; }
+  .nav-toggle { display: inline-flex; }
+
+  .nav-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 6px 24px 18px;
+    background: rgba(9, 13, 18, 0.97);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+    /* hidden until the header carries .nav-open */
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(-10px);
+    transition: opacity 0.24s ease,
+                transform 0.28s cubic-bezier(0.4, 0.01, 0.2, 1),
+                visibility 0s linear 0.28s;
+  }
+  .site-header.nav-open .nav-menu {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
+    transition: opacity 0.24s ease,
+                transform 0.28s cubic-bezier(0.4, 0.01, 0.2, 1),
+                visibility 0s;
+  }
+
+  .nav-menu .navlinks { flex-direction: column; align-items: stretch; gap: 0; }
+  .nav-menu .navlinks a {
+    padding: 13px 2px;
+    font-size: 15px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .nav-menu .btn-nav {
+    margin-top: 16px;
+    text-align: center;
+    padding: 12px 18px;
+  }
+}
 
 @media (max-width: 960px) {
   .hero-grid { grid-template-columns: 1fr; gap: 40px; }
