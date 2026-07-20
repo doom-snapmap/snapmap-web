@@ -121,10 +121,20 @@ code, pre { font-family: var(--mono); }
 }
 
 .wordmark {
+  display: inline-flex;
+  align-items: center;
   font-size: 21px;
   font-weight: 700;
   color: var(--ink);
   letter-spacing: 0.06em;
+}
+/* the doom-snapmap org avatar — served straight from GitHub so it tracks avatar changes */
+.wordmark-logo {
+  width: 22px;
+  height: 22px;
+  display: block;
+  margin-right: 10px;
+  clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
 }
 .wordmark .plus { color: var(--argent); }
 .wordmark:hover { color: var(--ink); }
