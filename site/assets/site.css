@@ -221,9 +221,9 @@ code, pre { font-family: var(--mono); }
   text-wrap: pretty;
 }
 
-.cta-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.cta-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 36px; }
 
-.dl-meta { margin-top: 16px; color: var(--muted); font-size: 14.5px; }
+.dl-meta { margin-top: 28px; color: var(--muted); font-size: 14.5px; }
 .dl-meta code { color: var(--ink); font-size: 13.5px; }
 .dl-meta .sep { margin: 0 8px; opacity: 0.5; }
 
@@ -303,8 +303,8 @@ code, pre { font-family: var(--mono); }
 
 @keyframes wiredraw { to { stroke-dashoffset: 0; } }
 
-/* the full-width hero screenshot */
-.hero-shot { margin: 52px auto 0; max-width: 1020px; }
+/* the full-width hero screenshot (extra specificity: .shot resets margin) */
+.hero figure.hero-shot { margin: 84px auto 0; max-width: 1020px; }
 
 /* ---------- framed screenshots (clickable -> lightbox) ---------- */
 
@@ -493,9 +493,25 @@ section.deck { background: var(--deck); border-top: 1px solid var(--line-soft); 
   object-position: top left;
 }
 
+/* ---------- the editor ghost (holographic demon backdrop) ---------- */
+
+.ghost-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+
 /* ---------- community ---------- */
 
-.community { text-align: center; }
+.community {
+  position: relative;
+  text-align: center;
+  padding: 110px 0 130px;
+  overflow: hidden;
+}
 .community .section-head { justify-content: center; }
 .community .big-line {
   font-family: var(--display);
@@ -772,7 +788,7 @@ section.deck { background: var(--deck); border-top: 1px solid var(--line-soft); 
 
 /* ---------- 404 ---------- */
 
-.notfound { text-align: center; padding: 110px 0 90px; }
+.notfound { position: relative; text-align: center; padding: 110px 0 90px; overflow: hidden; }
 .notfound .code {
   font-family: var(--display);
   font-size: clamp(4rem, 14vw, 8rem);
