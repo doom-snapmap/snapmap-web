@@ -100,24 +100,32 @@
               <rect class="port" x="444" y="346" width="8" height="8"/>
             </g>
 
-            <!-- signal pulses travelling the wires -->
-            <circle class="pulse" r="3.5">
-              <animateMotion dur="1.8s" begin="1.6s" repeatCount="indefinite">
+            <!-- Signal pulses travelling the wires. Every pulse shares dur=1.6s so their periods
+                 stay phase-locked: the left pulse (wire-a) reaches the SNAPMAP+ port at
+                 begin(1.6s)+dur(1.6s)=3.2s, which is exactly when the right pulses launch, on every
+                 loop. Each pulse holds opacity 0 until its begin so no dot sits at the SVG origin. -->
+            <circle class="pulse" r="3.5" opacity="0">
+              <set attributeName="opacity" to="1" begin="1.6s" fill="freeze"/>
+              <animateMotion dur="1.6s" begin="1.6s" repeatCount="indefinite">
                 <mpath href="#wire-a"/>
               </animateMotion>
             </circle>
-            <circle class="pulse" r="3.5">
-              <animateMotion dur="1.4s" begin="2.5s" repeatCount="indefinite">
+            <!-- Right pulses wait for the left pulse to reach the center container (begin 3.2s), then fan out in a slight cascade. -->
+            <circle class="pulse" r="3.5" opacity="0">
+              <set attributeName="opacity" to="1" begin="3.2s" fill="freeze"/>
+              <animateMotion dur="1.6s" begin="3.2s" repeatCount="indefinite">
                 <mpath href="#wire-b1"/>
               </animateMotion>
             </circle>
-            <circle class="pulse" r="3.5">
-              <animateMotion dur="1.4s" begin="2.9s" repeatCount="indefinite">
+            <circle class="pulse" r="3.5" opacity="0">
+              <set attributeName="opacity" to="1" begin="3.35s" fill="freeze"/>
+              <animateMotion dur="1.6s" begin="3.35s" repeatCount="indefinite">
                 <mpath href="#wire-b2"/>
               </animateMotion>
             </circle>
-            <circle class="pulse" r="3.5">
-              <animateMotion dur="1.4s" begin="3.3s" repeatCount="indefinite">
+            <circle class="pulse" r="3.5" opacity="0">
+              <set attributeName="opacity" to="1" begin="3.5s" fill="freeze"/>
+              <animateMotion dur="1.6s" begin="3.5s" repeatCount="indefinite">
                 <mpath href="#wire-b3"/>
               </animateMotion>
             </circle>
