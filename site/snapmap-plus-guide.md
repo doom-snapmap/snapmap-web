@@ -121,11 +121,12 @@ theme automatically — pick whichever you prefer. Snapmap+ remembers the choice
 window first appears on later launches, so a saved dark theme does not flash light while loading.
 
 `config.json` is safe to leave alone. If you deliberately delete it, Snapmap+ treats that as **Reset
-preferences** and recreates the default light setting, Show Hidden off, and Entity selection mode off on
-the next startup. If the file is damaged, Snapmap+ keeps a timestamped `.corrupt.json` backup, restores
-defaults, and tells you once; if it cannot save, any changed preference still works for the current
-session and the window explains that it was not remembered. Updates, uninstall, and reinstall preserve
-the file.
+preferences** and recreates the default light setting, Show Hidden off, Entity selection mode off, and user
+overrides enabled on the next startup. If the file is damaged, Snapmap+ keeps a timestamped `.corrupt.json`
+backup, restores defaults, and tells you once. If it cannot save a window setting, that setting still works
+for the current session and the window explains that it was not remembered. `sh_user_overrides` is different:
+a failed console write reports the failure, leaves this launch unchanged, and does not establish a change for
+the next launch. Updates, uninstall, and reinstall preserve the file.
 
 **Camera Origin** (top-right) shows your editor camera's live X/Y/Z position, and updates continuously
 while you move around — handy for finding coordinates to paste into a property. Check **Lock** to pin the
@@ -613,7 +614,7 @@ from DOOM's own Create menu — is itself built on this system: it's an override
 by default.
 
 To add your own, place files under `%LOCALAPPDATA%\snapmap-plus\overrides\`, matching the path/filename of
-the resource you want to replace — the same folder the built-in overrides live in.
+the resource you want to replace.
 
 Actually authoring an override's *contents* is a separate skill from placing the file — the format
 depends entirely on which resource you're replacing, and isn't covered in this guide.
@@ -622,18 +623,31 @@ depends entirely on which resource you're replacing, and isn't covered in this g
 
 Every time the game asks to open a resource, Snapmap+ resolves it in three steps, in order:
 
-1. **Your file**, if you've placed one at that path under `overrides\` — always wins.
+1. **Your file**, if you've placed one at that path under `overrides\` — wins while the player-file layer is enabled.
 2. **Snapmap+'s own built-in default** for that same path (this is how the Custom palette tab ships) —
    served from memory, never written into your `overrides\` folder. Because it's never written to disk,
    the built-in updates automatically with every new release, and you can always get back to the default
    by simply deleting your file at that name.
 3. **The game's own packaged resource** — used when neither of the above applies.
 
-If your `overrides` folder ever ends up with something broken in it and you want to rule overrides out
-while you track it down, set `sh_user_overrides` to `0` in the console — that skips straight to step
-2/3 for every file without you having to move or delete anything, and setting it back to `1` restores your
-files. Snapmap+ also writes a list of every active override it found to the log each time it starts, so
-you can always check what's currently shadowing what.
+If your `overrides` folder ever ends up with something broken in it and you want to rule out your files while
+you track it down, enter:
+
+```
+sh_user_overrides 0
+```
+
+If Snapmap+ confirms the save, this skips only step 1 after you restart DOOM. The built-in defaults and
+DOOM's packaged resources (steps 2 and 3) remain available. If the save fails, the console says so, this
+launch stays unchanged, and no next-launch change is guaranteed. Restore your files for the next launch with:
+
+```
+sh_user_overrides 1
+```
+
+Run `sh_user_overrides` with no argument to see this launch's state and either the saved next-launch state or
+a volatile value that is not confirmed saved. Snapmap+ also writes a list of every active override it found to
+the log each time it starts, so you can always check what's currently shadowing what.
 
 ---
 
@@ -679,6 +693,12 @@ Five toggles for your own player, mainly useful while testing a map solo:
 | `noPlayerKill` | You can't be killed outright. |
 | `noTarget` | Enemies ignore you. |
 
+### Override controls
+
+| Command | What it does |
+|---|---|
+| `sh_user_overrides [0\|1]` | On a successful save, controls whether player [override](#overrides) files load on the next DOOM launch. `0` disables and `1` enables only the first resource layer; restart DOOM to apply either value. A failed save is reported and leaves this launch unchanged, with no next-launch change guaranteed. With no argument, reports this launch's state plus either the saved next-launch state or a volatile value not confirmed saved. |
+
 ### Cvars
 
 Settings you read or change with `<name>` or `<name> <value>` in the console:
@@ -688,7 +708,6 @@ Settings you read or change with `<name>` or `<name> <value>` in the console:
 | `sh_pretty_on` | `0` | Pretty-print the JSON Snapmap+ writes for [rawmaps](#rawmaps). |
 | `sh_show_rmcount` | `0` | Draw the current number of active rendermodels on-screen. |
 | `sh_copy_reslist_to_clipboard` | `0` | Copy `sh_listres` output to the clipboard automatically. |
-| `sh_user_overrides` | `1` | Set to `0` to temporarily ignore your [override](#overrides) files. |
 
 ### Developer and diagnostic tools
 
