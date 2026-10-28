@@ -685,7 +685,23 @@ or logic object. **Snap to Grid** moves the held object to the editing grid;
 it does not toggle this display. The custom blocking-volume navigation preview
 is a separate overlay.
 
-### Map bounds and Blueprint zoom
+### Placing objects anywhere
+
+With Snapmap+ installed you can place or move any object anywhere in Object Mode, including in
+open air. Demons, the player start, encounter spawners, AI path and combat points, item hints and
+pickups normally turn red and refuse to be put down unless they touch a floor; with Snapmap+ they
+stay green and are placed exactly where you hold them. A floor or wall under the object still
+works as before, and **Z (Drop to Floor)** still drops it straight down. An object that overlaps
+another one, or that is outside every module, is still refused.
+
+The map stores only each object's position, so it opens normally without Snapmap+. There, a
+floating object stays where you put it, but if someone picks it up it turns red and can only be
+put down again on a floor.
+
+In Play, a player start in the air starts the player on the floor below it, and demons placed in
+the air are on the floor once they become active.
+
+## Map bounds and Blueprint zoom
 
 Snapmap+ adds a third tab to DOOM's **Settings > Properties** panel. Switch
 tabs with the bumpers (or Q / E) or click the third diamond at the top of the
