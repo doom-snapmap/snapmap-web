@@ -3,14 +3,12 @@ build/
 node_modules/
 *.log
 
-# Keep the shared Claude instructions; ignore all other local agent state.
-.claude/*
-!.claude/CLAUDE.md
+# Local agent state. AGENTS.md is the only tracked agent file.
+.claude/
 .codex/
 
 # Wrangler account caches and local Worker secrets.
 .wrangler/
-api/.wrangler/
 .dev.vars
 
 # Local Jekyll output.
