@@ -29,153 +29,6 @@ Snapmap+ on the player's PC** and cannot be delivered to vanilla or console play
 
 ---
 
-## Resizing Grid Rooms
-
-Highlight a **classic or modern Grid Room** in DOOM's editor and press **X** to
-open **Module Properties**. Change **Grid Room Size** X, Y and Z. This works in
-Blueprint mode and keeps the Blueprint camera. Left Ctrl opens the action menu;
-the size controls are in DOOM itself.
-
-Each room keeps its own dimensions. Doors and frames stay their original size,
-and all of the room's built-in lights follow the resized room: they spread with
-the walls, the ceiling light stays just under the roof, and the room looks the
-same after you save and reload it. Brightness and color do not change. Objects
-you placed keep their module-local positions and sizes, so inspect objects near
-the walls after shrinking. Connected branches move to retain their doorways;
-conflicting connection loops and new overlaps can prevent an edit.
-
-| Grid Room | Original X / Y / Z | Minimum X / Y / Z |
-|---|---|---|
-| Classic | 2560 / 2560 / 2048 | 416 / 416 / 304 |
-| Modern | 5120 / 5120 / 3392 | 864 / 272 / 432 |
-
-Out-of-range values clamp and the panel shows the applied dimensions. Only the
-value you changed is adjusted. If a room cannot grow further on that axis, the
-panel keeps the size that fits; the Snapmap+ log (`sh_backend.log`) says which
-room or connected module reached which limit. A room that already extends past
-the limit can always be made smaller. The maximum
-follows the current `snapEdit_environmentModuleBounds` cvar, the room's world
-position and its connected neighbors. Raising that cvar allows larger rooms
-without restarting, up to native collision and navigation coordinate limits.
-Snapmap+ does not change the cvar for you. The current process retains up to
-64 distinct size/type combinations; restart DOOM if that cache fills.
-Keep the world cvar large enough when reopening or playing a map authored with
-a raised limit; the room dimensions are saved, but this cvar is not stored in
-the map. For example, `snapEdit_environmentModuleBounds 30000` permits a larger
-world box, while each room still has to fit at its actual position.
-
-Save and load normally. Collision, navigation and marked blocking-volume
-navigation use the resized room. **Players need Snapmap+ to load these maps.**
-The resizing feature is included in the existing backend DLL; it needs no
-separate file beside the map.
-
-To return a map to vanilla compatibility, restore every Grid Room to its
-original dimensions, turn **Unlock View Distance** off, and remove any
-other mod-only content. Save again.
-
-The faint green surface grid appears when placing or moving objects that use
-the game's navigation placement display, such as demons. Its brightness pulses,
-so it can become very faint while still enabled. It follows the room's native
-display surfaces, rather than covering every wall or appearing for every prop
-or logic object. **Snap to Grid** moves the held object to the editing grid;
-it does not toggle this display. The custom blocking-volume navigation preview
-is a separate overlay.
-
-## Unlock view distance
-
-Open **Settings > Properties** in DOOM's SnapMap editor and switch to the
-**SNAPMAP+ MOD SETTINGS** tab; the setting is **Unlock View Distance**. Choose
-**Apply**, then save your map normally. Cancel discards unapplied changes. The
-setting is saved into this map and works with both OpenGL and Vulkan. Loading
-another map uses that map's own setting.
-
-| Setting | Default | Values |
-|---|---|---|
-| Unlock View Distance | Off | Off or On |
-
-- **Off (default):** the map is drawn exactly as the unmodified game draws it.
-  Each environment keeps its own far-clip distance and its own fog, and
-  modules, **Set Environment** and **Player Set Environment** logic nodes and
-  campaign environments such as the Lazarus archive (15000) all keep control.
-  A room on the **Default** Environment FX draws to 60000 units in the editor,
-  darkening into fog after about 32000, but only 8192 units in Play. Many other
-  Environment FX stop at 8000, 8192, 10000 or 32768.
-- **On:** the map draws to 200000 units, the farthest the game allows, in the
-  editor (every camera, Blueprint included) and in Play. Each Environment FX
-  keeps its look: its fog, color, grading and lighting stay, and its fog is
-  stretched by the same factor as its distance, so fog that used to close in at
-  the old far clip now closes in at 200000 instead. Set Environment and Player
-  Set Environment nodes still change the environment; only the distance is
-  replaced and the fog stretched to match. It is not infinite.
-
-Turning the setting on modifies the map: it is stored in the map as a string
-variable named `smp.render.v1`. Turning it off and applying removes that
-variable again, so the next save writes the map exactly as the unmodified game
-would. Players without Snapmap+ can load a map saved with it on; they see the
-map with its original environments.
-
-On a four-room test map, frame times were the same with the setting on and off
-(the game stayed at its 60 frames per second limit in the editor and 200 in
-Play either way), but a large open room with many objects in view can still
-cost more, because nothing past the old distance is cut away any more.
-
-Fog is not a map setting. Use environments and Set Environment nodes for fog;
-with this setting on their fog is kept but drawn farther out.
-
-Maps saved with earlier Snapmap+ versions, which stored a View Distance number,
-read as follows: a distance of 8192 (the old default) reads as **Off**, and its
-variable is removed the next time the map is saved; any other distance,
-including 0, reads as **On**. Their old map fog values are ignored. Maps saved
-with the former enable switch off read as **Off**.
-
-## Map bounds and Blueprint zoom
-
-Snapmap+ adds a third tab to DOOM's **Settings > Properties** panel. Switch
-tabs with the bumpers (or Q / E) or click the third diamond at the top of the
-panel; the tab is titled **SNAPMAP+ MOD SETTINGS**. Every setting on it is a
-Snapmap+ mod. Stepping a number past either end of its range stops at that end.
-If the tab cannot be installed on your game build, the same controls appear at
-the end of the first tab.
-
-| Setting | Default value | Values |
-|---|---|---|
-| Unlock Map Bounds | Off (16000, native) | Off or On (32671 game units) |
-
-**Unlock Map Bounds** is an on/off setting. SnapMap normally marks any module
-that reaches beyond 16000 units from the map center in X, Y or Z as an invalid
-placement. Turning it on widens that box to the largest size the game can
-handle, 32671 units, for this map; the editor camera, the Blueprint floor grid
-and the Blueprint floor range follow. Choose **Apply**, then save the map; the
-setting is stored inside the map and is used whenever the map is edited, played
-or loaded directly. A map saved by an earlier Snapmap+ version with a number
-between the two keeps that number and shows the setting as On until you change
-it.
-
-The highest value is 32671. Collision and AI navigation store world positions
-as 16-bit numbers that end at 32767, and navigation reaches up to 96 units
-beyond a module, so modules cannot go farther even with Snapmap+.
-
-Only Snapmap+ can open the extra space. Each PC checks module positions with
-its own limit when it loads a map, so players without Snapmap+ see the modules
-past 16000 as invalid and the game can crash loading the map. Keep the default
-for maps you want everyone to play. Turning the setting off removes the
-requirement, as long as no module still sits outside the native box.
-
-Snapmap+ also lets the Blueprint camera zoom out until the whole map fits on
-screen, on any map: up to 44000 units above the floor instead of DOOM's 16000,
-or about 90000 when the map uses **Unlock Map Bounds**. While you are zoomed
-out in Blueprint the game draws far enough to keep the floor in view, and the
-editor's fog-free space is enlarged so the camera never ends up looking through
-a thick blue fog. This is an editor convenience on your PC only and changes
-nothing in your maps.
-
-Because the zoom-out limit grows with the map bounds, a fully zoomed-out map
-with **Unlock Map Bounds** fills the screen just as a native map does: the
-floor grid and the space for modules are about twice as wide in game units,
-but they look the same size on screen. Compare the two at the same camera
-height to see the difference. Modules can be hovered, grabbed and placed from
-any zoom level.
-
 ## Installing Snapmap+
 
 ### Get the pre-patch DOOM files
@@ -301,6 +154,254 @@ The **status bar** along the bottom stays visible on every tab too:
 - **Updated** (far right) is a live timestamp of the last change Snapmap+ picked up from the map.
 - The **?** icon next to it opens the feedback dialog — see [Reporting Bugs and Requesting
   Features](#reporting-bugs-and-requesting-features).
+
+---
+
+## Inside DOOM's Editor
+
+Some of Snapmap+'s features live inside DOOM's own editor rather than in the
+Snapmap+ window: the **Module Properties** panel, the **SNAPMAP+ MOD SETTINGS**
+tab under **Settings > Properties**, and the Start menu. They change what a map
+can be before you touch a single entity, so they are a good place to start.
+Each one says whether a map that uses it still plays for people without
+Snapmap+. The rest of this guide covers the Snapmap+ window tab by tab, from
+reading entities to editing many of them at once.
+
+### Resizing Grid Rooms
+
+Highlight a **classic or modern Grid Room** in DOOM's editor and press **X** to
+open **Module Properties**. Change **Grid Room Size** X, Y and Z. This works in
+Blueprint mode and keeps the Blueprint camera. Left Ctrl opens the action menu;
+the size controls are in DOOM itself.
+
+Each room keeps its own dimensions. Doors and frames stay their original size,
+and all of the room's built-in lights follow the resized room: they spread with
+the walls, the ceiling light stays just under the roof, and the room looks the
+same after you save and reload it. Brightness and color do not change. Objects
+you placed keep their module-local positions and sizes, so inspect objects near
+the walls after shrinking. Connected branches move to retain their doorways;
+conflicting connection loops and new overlaps can prevent an edit.
+
+| Grid Room | Original X / Y / Z | Minimum X / Y / Z |
+|---|---|---|
+| Classic | 2560 / 2560 / 2048 | 416 / 416 / 304 |
+| Modern | 5120 / 5120 / 3392 | 864 / 272 / 432 |
+
+Out-of-range values clamp and the panel shows the applied dimensions. Only the
+value you changed is adjusted. If a room cannot grow further on that axis, the
+panel keeps the size that fits; the Snapmap+ log (`sh_backend.log`) says which
+room or connected module reached which limit. A room that already extends past
+the limit can always be made smaller. The maximum
+follows the current `snapEdit_environmentModuleBounds` cvar, the room's world
+position and its connected neighbors. Raising that cvar allows larger rooms
+without restarting, up to native collision and navigation coordinate limits.
+Snapmap+ does not change the cvar for you. The current process retains up to
+64 distinct size/type combinations; restart DOOM if that cache fills.
+Keep the world cvar large enough when reopening or playing a map authored with
+a raised limit; the room dimensions are saved, but this cvar is not stored in
+the map. For example, `snapEdit_environmentModuleBounds 30000` permits a larger
+world box, while each room still has to fit at its actual position.
+
+Save and load normally. Collision, navigation and marked blocking-volume
+navigation use the resized room. **Players need Snapmap+ to load these maps.**
+The resizing feature is included in the existing backend DLL; it needs no
+separate file beside the map.
+
+To return a map to vanilla compatibility, restore every Grid Room to its
+original dimensions, turn **Unlock View Distance** off, and remove any
+other mod-only content. Save again.
+
+The faint green surface grid appears when placing or moving objects that use
+the game's navigation placement display, such as demons. Its brightness pulses,
+so it can become very faint while still enabled. It follows the room's native
+display surfaces, rather than covering every wall or appearing for every prop
+or logic object. **Snap to Grid** moves the held object to the editing grid;
+it does not toggle this display. The custom blocking-volume navigation preview
+is a separate overlay.
+
+### Map bounds and Blueprint zoom
+
+Snapmap+ adds a third tab to DOOM's **Settings > Properties** panel. Switch
+tabs with the bumpers (or Q / E) or click the third diamond at the top of the
+panel; the tab is titled **SNAPMAP+ MOD SETTINGS**. Every setting on it is a
+Snapmap+ mod. Stepping a number past either end of its range stops at that end.
+If the tab cannot be installed on your game build, the same controls appear at
+the end of the first tab.
+
+| Setting | Default value | Values |
+|---|---|---|
+| Unlock Map Bounds | Off (16000, native) | Off or On (32671 game units) |
+
+**Unlock Map Bounds** is an on/off setting. SnapMap normally marks any module
+that reaches beyond 16000 units from the map center in X, Y or Z as an invalid
+placement. Turning it on widens that box to the largest size the game can
+handle, 32671 units, for this map; the editor camera, the Blueprint floor grid
+and the Blueprint floor range follow. Choose **Apply**, then save the map; the
+setting is stored inside the map and is used whenever the map is edited, played
+or loaded directly. A map saved by an earlier Snapmap+ version with a number
+between the two keeps that number and shows the setting as On until you change
+it.
+
+The highest value is 32671. Collision and AI navigation store world positions
+as 16-bit numbers that end at 32767, and navigation reaches up to 96 units
+beyond a module, so modules cannot go farther even with Snapmap+.
+
+Only Snapmap+ can open the extra space. Each PC checks module positions with
+its own limit when it loads a map, so players without Snapmap+ see the modules
+past 16000 as invalid and the game can crash loading the map. Keep the default
+for maps you want everyone to play. Turning the setting off removes the
+requirement, as long as no module still sits outside the native box.
+
+Snapmap+ also lets the Blueprint camera zoom out until the whole map fits on
+screen, on any map: up to 44000 units above the floor instead of DOOM's 16000,
+or about 90000 when the map uses **Unlock Map Bounds**. While you are zoomed
+out in Blueprint the game draws far enough to keep the floor in view, and the
+editor's fog-free space is enlarged so the camera never ends up looking through
+a thick blue fog. This is an editor convenience on your PC only and changes
+nothing in your maps.
+
+Because the zoom-out limit grows with the map bounds, a fully zoomed-out map
+with **Unlock Map Bounds** fills the screen just as a native map does: the
+floor grid and the space for modules are about twice as wide in game units,
+but they look the same size on screen. Compare the two at the same camera
+height to see the difference. Modules can be hovered, grabbed and placed from
+any zoom level.
+
+### Unlock view distance
+
+Open **Settings > Properties** in DOOM's SnapMap editor and switch to the
+**SNAPMAP+ MOD SETTINGS** tab; the setting is **Unlock View Distance**. Choose
+**Apply**, then save your map normally. Cancel discards unapplied changes. The
+setting is saved into this map and works with both OpenGL and Vulkan. Loading
+another map uses that map's own setting.
+
+| Setting | Default | Values |
+|---|---|---|
+| Unlock View Distance | Off | Off or On |
+
+- **Off (default):** the map is drawn exactly as the unmodified game draws it.
+  Each environment keeps its own far-clip distance and its own fog, and
+  modules, **Set Environment** and **Player Set Environment** logic nodes and
+  campaign environments such as the Lazarus archive (15000) all keep control.
+  A room on the **Default** Environment FX draws to 60000 units in the editor,
+  darkening into fog after about 32000, but only 8192 units in Play. Many other
+  Environment FX stop at 8000, 8192, 10000 or 32768.
+- **On:** the map draws to 200000 units, the farthest the game allows, in the
+  editor (every camera, Blueprint included) and in Play. Each Environment FX
+  keeps its look: its fog, color, grading and lighting stay, and its fog is
+  stretched by the same factor as its distance, so fog that used to close in at
+  the old far clip now closes in at 200000 instead. Set Environment and Player
+  Set Environment nodes still change the environment; only the distance is
+  replaced and the fog stretched to match. It is not infinite.
+
+Turning the setting on modifies the map: it is stored in the map as a string
+variable named `smp.render.v1`. Turning it off and applying removes that
+variable again, so the next save writes the map exactly as the unmodified game
+would. Players without Snapmap+ can load a map saved with it on; they see the
+map with its original environments.
+
+On a four-room test map, frame times were the same with the setting on and off
+(the game stayed at its 60 frames per second limit in the editor and 200 in
+Play either way), but a large open room with many objects in view can still
+cost more, because nothing past the old distance is cut away any more.
+
+Fog is not a map setting. Use environments and Set Environment nodes for fog;
+with this setting on their fog is kept but drawn farther out.
+
+Maps saved with earlier Snapmap+ versions, which stored a View Distance number,
+read as follows: a distance of 8192 (the old default) reads as **Off**, and its
+variable is removed the next time the map is saved; any other distance,
+including 0, reads as **On**. Their old map fog values are ignored. Maps saved
+with the former enable switch off read as **Off**.
+
+### AI navigation on Blocking Boxes
+
+Enable **AI Navigation** and **Block Demons** on a Blocking Box to use its exposed,
+walkable surfaces for demon navigation. Rotating a box can make one of its sides
+the new walking surface. Slopes retain their actual angle, and overlapping boxes
+contribute their exposed surfaces.
+
+Default-sized boxes work too, including in maps created before Snapmap+ was
+installed, and they keep their navigation preview after you save. You do not need
+to resize a box or recreate the map to enable navigation.
+
+For a wall that demons should go around, leave **AI Navigation** off and keep
+**Block Demons** on. Ordinary Blocking Boxes already participate as obstacles,
+including where they overlap custom navigation. Enable AI Navigation when the
+box should also provide a walkable top or slope. Vertical walls and downward
+faces do not become walking surfaces; climbing uses approach and landing
+connections between valid surfaces.
+
+The green preview shows the smallest demon navigation size. Larger demons need
+more standing room and clearance, so a narrow green surface may still be too small
+for a hell knight. Climbing also requires an available traversal animation and
+clear approach and landing positions; the floor-side positions account for the
+whole rotated box, including an overhanging slope.
+
+A map can hold up to 65,536 boxes with **AI Navigation** or **Block Demons** and
+8,192 placed modules. Each module copy (a "room" in the messages) bakes up to
+2,048 boxes, and up to 2,048 walkable pieces per demon size. Past any of these the
+extra boxes are left out and named, and the rest of the map keeps its navigation.
+
+When something does not fit, Snapmap+ leaves out the smallest part it can instead
+of refusing the map:
+
+- A box whose size, rotation or room cannot be read, or that two rooms claim, is
+  left out on its own. A box in a room whose position cannot be read is left out
+  with that room's other boxes only.
+- The engine allows at most 256 routes out of one navigation area. When a busy
+  floor would pass that, the boxes adding the most routes there give up just
+  enough of them.
+- The engine loads no navigation tree deeper than 128. A room that would pass it
+  keeps three quarters of its floor boxes at a time until it fits.
+- One room's navigation file is kept within 16 MiB. Very many boxes close
+  together (hundreds within jumping range of each other) can pass that, because
+  every pair gets its own leaps. The room then keeps the shortest moves out of
+  each box and gives up the longest leaps until it fits; only if that is not
+  enough does it give up floor boxes, three quarters at a time.
+- Each demon size is baked on its own. If the smallest size cannot be built,
+  larger demons still use the boxes, and a size that failed is not baked again
+  at Play unless the map changed.
+- A room that cannot be built at all keeps its normal navmesh; the other rooms
+  are still built.
+
+Boxes that lost routes or were left out this way are drawn amber in the preview.
+The completion toast says **Navmesh Built**, **Navmesh Partly Built** with how
+many rooms were built and the first room that kept or lost something and why, or
+**Navmesh Build Failed** when no room could be built or the map could not be read.
+The View menu shows the same summary. Run `sh_navmesh` in the game console for
+every room, demon size and box with its reason; `sh_backend.log` has the same
+lines. The one route refusal left is a module whose own navigation already fills
+an area; the boxes routing into it are marked red. An obstructed or disconnected
+route can also stop a demon without removing the navigation mesh. Leave enough
+room around wall ends for the intended demon size and keep spawn, approach and
+landing points clear.
+
+Build navigation from the editor's Start menu with **Build Navmesh**, beside
+**Save**. The game shows **Building Navmesh** while the worker runs, then a
+native completion toast, just like ordinary Save. This does not save or name
+the map, and it does not require a player start. It also works in Blueprint mode
+and with the green preview turned off.
+
+The same operation is available through **View > Update Navmesh** in Snapmap+.
+The preview is read when the map opens and when you request an update.
+Editing does not read the map. When you add, delete, move or change
+the flags of a box with **AI Navigation** or **Block Demons**, the View menu says
+**Navmesh is out of date**. Other edits do not change it. The preview hides while
+geometry is held. Play always uses the current map: if it changed since the last
+update, Play bakes it again, but only the rooms that changed. Each room's
+navigation for all three demon sizes is kept after it is built, so a room whose
+boxes and position are unchanged is not baked again at the next Play, after
+reloading the map, or when it is launched from outside the editor. The first
+Play of a session bakes the two larger demon sizes, which Build Navmesh does not. If the View menu says **Could not read this map**,
+run `sh_navmesh` for the reason.
+
+Duplicated boxes that share an ID keep their navigation when the map assigns
+that ID to one module. An ID assigned to different modules is ambiguous, so the
+boxes carrying it are left out; the rest of the map keeps its navigation.
+Baking runs in the background, so the previous lines can remain briefly while the new
+result arrives. `sh_perf` reports time spent reading the map and building the
+preview; `sh_perf reset` clears those counters.
 
 ---
 
@@ -471,95 +572,6 @@ references and experimentation, since there isn't a single authoritative list.
 
 ---
 
-## AI navigation on Blocking Boxes
-
-Enable **AI Navigation** and **Block Demons** on a Blocking Box to use its exposed,
-walkable surfaces for demon navigation. Rotating a box can make one of its sides
-the new walking surface. Slopes retain their actual angle, and overlapping boxes
-contribute their exposed surfaces.
-
-Default-sized boxes work too, including in maps created before Snapmap+ was
-installed, and they keep their navigation preview after you save. You do not need
-to resize a box or recreate the map to enable navigation.
-
-For a wall that demons should go around, leave **AI Navigation** off and keep
-**Block Demons** on. Ordinary Blocking Boxes already participate as obstacles,
-including where they overlap custom navigation. Enable AI Navigation when the
-box should also provide a walkable top or slope. Vertical walls and downward
-faces do not become walking surfaces; climbing uses approach and landing
-connections between valid surfaces.
-
-The green preview shows the smallest demon navigation size. Larger demons need
-more standing room and clearance, so a narrow green surface may still be too small
-for a hell knight. Climbing also requires an available traversal animation and
-clear approach and landing positions; the floor-side positions account for the
-whole rotated box, including an overhanging slope.
-
-A map can hold up to 65,536 boxes with **AI Navigation** or **Block Demons** and
-8,192 placed modules. Each module copy (a "room" in the messages) bakes up to
-2,048 boxes, and up to 2,048 walkable pieces per demon size. Past any of these the
-extra boxes are left out and named, and the rest of the map keeps its navigation.
-
-When something does not fit, Snapmap+ leaves out the smallest part it can instead
-of refusing the map:
-
-- A box whose size, rotation or room cannot be read, or that two rooms claim, is
-  left out on its own. A box in a room whose position cannot be read is left out
-  with that room's other boxes only.
-- The engine allows at most 256 routes out of one navigation area. When a busy
-  floor would pass that, the boxes adding the most routes there give up just
-  enough of them.
-- The engine loads no navigation tree deeper than 128. A room that would pass it
-  keeps three quarters of its floor boxes at a time until it fits.
-- One room's navigation file is kept within 16 MiB. Very many boxes close
-  together (hundreds within jumping range of each other) can pass that, because
-  every pair gets its own leaps. The room then keeps the shortest moves out of
-  each box and gives up the longest leaps until it fits; only if that is not
-  enough does it give up floor boxes, three quarters at a time.
-- Each demon size is baked on its own. If the smallest size cannot be built,
-  larger demons still use the boxes, and a size that failed is not baked again
-  at Play unless the map changed.
-- A room that cannot be built at all keeps its normal navmesh; the other rooms
-  are still built.
-
-Boxes that lost routes or were left out this way are drawn amber in the preview.
-The completion toast says **Navmesh Built**, **Navmesh Partly Built** with how
-many rooms were built and the first room that kept or lost something and why, or
-**Navmesh Build Failed** when no room could be built or the map could not be read.
-The View menu shows the same summary. Run `sh_navmesh` in the game console for
-every room, demon size and box with its reason; `sh_backend.log` has the same
-lines. The one route refusal left is a module whose own navigation already fills
-an area; the boxes routing into it are marked red. An obstructed or disconnected
-route can also stop a demon without removing the navigation mesh. Leave enough
-room around wall ends for the intended demon size and keep spawn, approach and
-landing points clear.
-
-Build navigation from the editor's Start menu with **Build Navmesh**, beside
-**Save**. The game shows **Building Navmesh** while the worker runs, then a
-native completion toast, just like ordinary Save. This does not save or name
-the map, and it does not require a player start. It also works in Blueprint mode
-and with the green preview turned off.
-
-The same operation is available through **View > Update Navmesh** in Snapmap+.
-The preview is read when the map opens and when you request an update.
-Editing does not read the map. When you add, delete, move or change
-the flags of a box with **AI Navigation** or **Block Demons**, the View menu says
-**Navmesh is out of date**. Other edits do not change it. The preview hides while
-geometry is held. Play always uses the current map: if it changed since the last
-update, Play bakes it again, but only the rooms that changed. Each room's
-navigation for all three demon sizes is kept after it is built, so a room whose
-boxes and position are unchanged is not baked again at the next Play, after
-reloading the map, or when it is launched from outside the editor. The first
-Play of a session bakes the two larger demon sizes, which Build Navmesh does not. If the View menu says **Could not read this map**,
-run `sh_navmesh` for the reason.
-
-Duplicated boxes that share an ID keep their navigation when the map assigns
-that ID to one module. An ID assigned to different modules is ambiguous, so the
-boxes carrying it are left out; the rest of the map keeps its navigation.
-Baking runs in the background, so the previous lines can remain briefly while the new
-result arrives. `sh_perf` reports time spent reading the map and building the
-preview; `sh_perf reset` clears those counters.
-
 ## The Assets Tab
 
 The Assets tab is a searchable browser over **everything DOOM's own shipped files contain** — every
@@ -727,44 +739,6 @@ feature as such, so it's covered separately rather than here.
 
 ---
 
-## The Prefabs Tab
-
-![Prefabs tab: folder tree on the left, a selected prefab's interactive 3D preview and details on the right](images/prefabs-tab-dark.png)
-
-The Prefabs tab saves a group of entities so you can reuse it later, or share it with someone else
-running Snapmap+.
-
-**Creating one:** select the entities in the SnapMap editor, then click **Create from selection**. Give
-it a name, and it's added to the list. **Your cursor must be hovering one of the selected objects when
-you do this** — whichever object that is becomes the one centered on your cursor when you later paste
-the prefab back in. SnapMap anchors the prefab on the line through the **centre of your view**, not on
-the cursor. If that line misses the hovered object, Snapmap+ anchors the prefab on the hovered object
-itself instead and says **grab point corrected** when it saves. Without this the saved positions could
-come out scrambled. When you paste, the prefab appears in front of the camera, turned by however much
-your heading has changed since you created it.
-
-**Using one:** select a prefab in the list to see its details on the right — its name, description, and
-tags, plus an **interactive 3D preview** of what you're about to place: drag to orbit, scroll to zoom,
-double-click to frame it. The preview colors entities by what they do — solid, blocking, AI Navigation,
-interactable, logic/I/O, triggers — so you can tell what a prefab actually contains before you drop it in.
-It shows the prefab level and upright, the way it pastes, even when it was created while hovering a tilted
-ramp. Blocking Boxes ticked for **AI Navigation** are tinted green, and their number appears beside the
-entity count. Click **Load / Place** to stage the prefab for placement with SnapMap's built-in paste
-function, then switch to the editor and press **Ctrl+V** to actually drop it into the map. When the
-placed prefab brings in AI Navigation boxes, Snapmap+ updates the navmesh by itself once you drop
-it, just as **View > Update Navmesh** would.
-
-**Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter prefabs...** narrows
-the list by name. Selecting a prefab and clicking **Delete** removes it permanently.
-
-Prefabs are stored as individual files under `%LOCALAPPDATA%\snapmap-plus\prefabs\` — sharing one is just
-sending someone that file; they drop it into their own `prefabs` folder (or the matching subfolder, to
-land it in the same folder on their end) and it shows up in their list. You can drop a file into that
-folder from Windows while Snapmap+ is already running — no restart needed, it picks the new prefab up
-right away.
-
----
-
 ## The Timelines Tab
 
 A **Timeline** is a single entity that can run multiple scripted actions, on multiple other entities, at
@@ -808,6 +782,44 @@ directly, or by turning on `sh_target_any` and wiring it up with the native wire
 
 ---
 
+## The Prefabs Tab
+
+![Prefabs tab: folder tree on the left, a selected prefab's interactive 3D preview and details on the right](images/prefabs-tab-dark.png)
+
+The Prefabs tab saves a group of entities so you can reuse it later, or share it with someone else
+running Snapmap+.
+
+**Creating one:** select the entities in the SnapMap editor, then click **Create from selection**. Give
+it a name, and it's added to the list. **Your cursor must be hovering one of the selected objects when
+you do this** — whichever object that is becomes the one centered on your cursor when you later paste
+the prefab back in. SnapMap anchors the prefab on the line through the **centre of your view**, not on
+the cursor. If that line misses the hovered object, Snapmap+ anchors the prefab on the hovered object
+itself instead and says **grab point corrected** when it saves. Without this the saved positions could
+come out scrambled. When you paste, the prefab appears in front of the camera, turned by however much
+your heading has changed since you created it.
+
+**Using one:** select a prefab in the list to see its details on the right — its name, description, and
+tags, plus an **interactive 3D preview** of what you're about to place: drag to orbit, scroll to zoom,
+double-click to frame it. The preview colors entities by what they do — solid, blocking, AI Navigation,
+interactable, logic/I/O, triggers — so you can tell what a prefab actually contains before you drop it in.
+It shows the prefab level and upright, the way it pastes, even when it was created while hovering a tilted
+ramp. Blocking Boxes ticked for **AI Navigation** are tinted green, and their number appears beside the
+entity count. Click **Load / Place** to stage the prefab for placement with SnapMap's built-in paste
+function, then switch to the editor and press **Ctrl+V** to actually drop it into the map. When the
+placed prefab brings in AI Navigation boxes, Snapmap+ updates the navmesh by itself once you drop
+it, just as **View > Update Navmesh** would.
+
+**Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter prefabs...** narrows
+the list by name. Selecting a prefab and clicking **Delete** removes it permanently.
+
+Prefabs are stored as individual files under `%LOCALAPPDATA%\snapmap-plus\prefabs\` — sharing one is just
+sending someone that file; they drop it into their own `prefabs` folder (or the matching subfolder, to
+land it in the same folder on their end) and it shows up in their list. You can drop a file into that
+folder from Windows while Snapmap+ is already running — no restart needed, it picks the new prefab up
+right away.
+
+---
+
 ## Rawmaps
 
 A **rawmap** is a human-readable JSON copy of a map. Use one to share a map
@@ -847,6 +859,16 @@ opens it, and `sh_rawmaps save [path]` exports the live map. Console loads
 discard unsaved edits without a confirmation prompt. The advanced command
 `sh_rawmaps overwrite on` allows DOOM's Save to replace the borrowed saved map;
 that choice lasts only until DOOM closes. Keep it off to preserve that map.
+
+---
+
+## Packages
+
+The package system is being rebuilt for the April 2024 DOOM update (Steam build 13954591). This
+release reads, installs and carries no packages: nothing is loaded from
+`%LOCALAPPDATA%\snapmap-plus\overrides\`, no `package-cache` or `package-staging` folder is created,
+and a map saved or published with packages by an earlier release loads as a plain map without them.
+Folders that earlier releases left are not touched; you can keep or delete them.
 
 ---
 
@@ -957,16 +979,6 @@ guessing what's in them:
 | `sh chkgrp [name]` | Inspect a group's ids; omit `name` to list every group and its count. |
 | `sh clrgrp <name>` or `sh clrgrp *` | Delete a named group entirely (`*` deletes all of them). |
 | `sh snapstack_diag` | Diagnostic: reports which SnapStack implementation is currently handling commands. |
-
----
-
-## Packages
-
-The package system is being rebuilt for the April 2024 DOOM update (Steam build 13954591). This
-release reads, installs and carries no packages: nothing is loaded from
-`%LOCALAPPDATA%\snapmap-plus\overrides\`, no `package-cache` or `package-staging` folder is created,
-and a map saved or published with packages by an earlier release loads as a plain map without them.
-Folders that earlier releases left are not touched; you can keep or delete them.
 
 ---
 
