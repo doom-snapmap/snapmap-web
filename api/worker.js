@@ -12,8 +12,6 @@ const API = 'https://api.github.com';
 
 const SITE_ORIGIN = 'https://www.snapmapplus.com';
 const SITE_BASE = SITE_ORIGIN;
-/* The retired GitHub Pages origin stays allowed while its redirect stubs exist. */
-const LEGACY_ORIGINS = new Set(['https://doom-snapmap.github.io']);
 const CLIENT_ID = 'Iv23liFSVvbqF4r8a2uK';   // public identifier of the snapmap-plus-community App
 
 /* Hide reserved categories from lists and composition; new unlisted categories
@@ -62,7 +60,7 @@ function randomHex(bytes) {
 function corsOrigin(req) {
   const origin = req.headers.get('Origin');
   if (!origin) return null;
-  if (origin === SITE_ORIGIN || LEGACY_ORIGINS.has(origin)) return origin;
+  if (origin === SITE_ORIGIN) return origin;
   /* local development of the static site */
   if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return origin;
   return null;
