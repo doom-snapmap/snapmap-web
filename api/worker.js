@@ -1,17 +1,19 @@
-/* Community API for GitHub Discussions, OAuth sessions and screenshot uploads.
+/* Snapmap+ website API: GitHub Discussions, OAuth sessions and screenshot uploads.
  * Reads use an App token; writes use the signed-in user token held in SESSIONS KV.
  * The browser receives only an opaque session ID. MEDIA R2 stores uploaded images.
  * See README.md for setup, routes and operational limits. */
 
-import { RequestError, readBody, readJsonObject } from '../src/workers/request_body.js';
+import { RequestError, readBody, readJsonObject } from './request_body.js';
 export { CommunityQuota } from './quota.js';
 
 const REPO_OWNER = 'doom-snapmap';
-const REPO_NAME = 'snapmap-plus';
+const REPO_NAME = 'snapmap-web';
 const API = 'https://api.github.com';
 
-const SITE_ORIGIN = 'https://doom-snapmap.github.io';
-const SITE_BASE = SITE_ORIGIN + '/snapmap-plus';
+const SITE_ORIGIN = 'https://www.snapmapplus.com';
+const SITE_BASE = SITE_ORIGIN;
+/* The retired GitHub Pages origin stays allowed while its redirect stubs exist. */
+const LEGACY_ORIGINS = new Set(['https://doom-snapmap.github.io']);
 const CLIENT_ID = 'Iv23liFSVvbqF4r8a2uK';   // public identifier of the snapmap-plus-community App
 
 /* Hide reserved categories from lists and composition; new unlisted categories
@@ -60,7 +62,7 @@ function randomHex(bytes) {
 function corsOrigin(req) {
   const origin = req.headers.get('Origin');
   if (!origin) return null;
-  if (origin === SITE_ORIGIN) return origin;
+  if (origin === SITE_ORIGIN || LEGACY_ORIGINS.has(origin)) return origin;
   /* local development of the static site */
   if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return origin;
   return null;
@@ -773,7 +775,7 @@ async function handleRequest(req, env) {
 
     /* browser-navigation endpoints (no CORS needed) */
     if (req.method === 'GET' && path === '/') {
-      return new Response('snapmap-plus community service: OK\n', { headers: { 'Content-Type': 'text/plain' } });
+      return new Response('snapmap-plus community service: OK (api.snapmapplus.com)\n', { headers: { 'Content-Type': 'text/plain' } });
     }
     if (req.method === 'GET' && path === '/auth/login') return authLogin(env, req);
     if (req.method === 'GET' && path === '/auth/callback') return authCallback(env, req, url);

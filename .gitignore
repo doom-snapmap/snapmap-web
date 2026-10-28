@@ -1,0 +1,17 @@
+# Local test dependencies and build output.
+build/
+node_modules/
+*.log
+
+# Keep the shared Claude instructions; ignore all other local agent state.
+.claude/*
+!.claude/CLAUDE.md
+.codex/
+
+# Wrangler account caches and local Worker secrets.
+.wrangler/
+api/.wrangler/
+.dev.vars
+
+# Local Jekyll output.
+site/_site/

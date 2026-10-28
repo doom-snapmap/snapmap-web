@@ -6,7 +6,7 @@ const path = require('node:path');
 const { Miniflare } = require(process.argv[2] ? path.resolve(process.argv[2]) : 'miniflare');
 
 const root = path.join(__dirname, '..');
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'snapmap-plus-workers-'));
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'snapmap-web-worker-'));
 const sidA = 'a'.repeat(64), sidB = 'b'.repeat(64), sidC = 'c'.repeat(64);
 const image = new Uint8Array(16);
 image.set([0x89, 0x50, 0x4e, 0x47]);
@@ -14,7 +14,7 @@ image.set([0x89, 0x50, 0x4e, 0x47]);
 function community() {
   return new Miniflare({
     name: 'community-runtime-test',
-    modules: true, modulesRoot: root, scriptPath: path.join(root, 'community/worker.js'),
+    modules: true, modulesRoot: root, scriptPath: path.join(root, 'api/worker.js'),
     modulesRules: [{ type: 'ESModule', include: ['**/*.js'] }],
     compatibilityDate: '2026-07-01',
     durableObjects: { WRITE_QUOTAS: { className: 'CommunityQuota', useSQLite: true } },
@@ -33,7 +33,7 @@ async function seed(mf) {
 
 function upload(mf, sid) {
   return mf.dispatchFetch('http://local.test/media/upload', { method: 'POST', body: image,
-    headers: { Authorization: 'Bearer ' + sid, Origin: 'https://doom-snapmap.github.io' } });
+    headers: { Authorization: 'Bearer ' + sid, Origin: 'https://www.snapmapplus.com' } });
 }
 
 async function run() {
@@ -43,7 +43,7 @@ async function run() {
     const replies = await Promise.all(Array.from({ length: 45 }, (_, i) => upload(mf, i % 2 ? sidA : sidB)));
     assert.equal(replies.filter(response => response.status === 200).length, 30);
     assert.equal(replies.filter(response => response.status === 429).length, 15);
-    assert.ok(replies.every(response => response.headers.get('Access-Control-Allow-Origin') === 'https://doom-snapmap.github.io'));
+    assert.ok(replies.every(response => response.headers.get('Access-Control-Allow-Origin') === 'https://www.snapmapplus.com'));
     for (const response of replies) await response.arrayBuffer();
     const other = await upload(mf, sidC);
     assert.equal(other.status, 200);
@@ -60,37 +60,7 @@ async function run() {
     await retained.arrayBuffer();
   } finally { await mf.dispose(); }
 
-  let issueWrites = 0;
-  const feedback = new Miniflare({
-    name: 'feedback-runtime-test',
-    modules: true, modulesRoot: root, scriptPath: path.join(root, 'feedback/worker.js'),
-    modulesRules: [{ type: 'ESModule', include: ['**/*.js'] }],
-    compatibilityDate: '2026-07-01', bindings: { GITHUB_TOKEN: 'local-test-token' },
-    outboundService: async request => {
-      const url = new URL(request.url);
-      assert.equal(url.hostname, 'api.github.com');
-      if (request.method === 'GET' && url.pathname.endsWith('/issues')) return Response.json([]);
-      assert.equal(request.method, 'POST');
-      assert.ok(url.pathname.endsWith('/issues'));
-      const issue = await request.json();
-      assert.equal(issue.title, '[Bug] Local runtime test');
-      assert.ok(issue.labels.includes('vulkan'));
-      issueWrites++;
-      return Response.json({ number: 123 });
-    },
-  });
-  try {
-    const response = await feedback.dispatchFetch('http://local.test/report', { method: 'POST',
-      body: JSON.stringify({ category: 'bug', title: 'Local runtime test', body: 'A synthetic report for the local runtime.',
-                             version: 'v1.0.0', renderer: 'vulkan' }) });
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { ok: true, mode: 'created', number: 123 });
-    const oversized = await feedback.dispatchFetch('http://local.test/report', { method: 'POST', body: new Uint8Array(3 * 65536 + 1) });
-    assert.equal(oversized.status, 413);
-    await oversized.arrayBuffer();
-    assert.equal(issueWrites, 1);
-  } finally { await feedback.dispose(); }
-  console.log('worker runtime: concurrent per-account quotas, restart persistence, R2 and feedback relay passed');
+  console.log('worker runtime: concurrent per-account quotas, restart persistence and R2 passed');
 }
 
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {

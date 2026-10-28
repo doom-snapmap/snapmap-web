@@ -5,7 +5,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 
 const root = path.join(__dirname, '..');
-const bodySource = fs.readFileSync(path.join(root, 'src/workers/request_body.js'), 'utf8');
+const bodySource = fs.readFileSync(path.join(root, 'api/request_body.js'), 'utf8');
 const bodyURL = 'data:text/javascript;base64,' + Buffer.from(bodySource).toString('base64');
 const shared = import(bodyURL);
 
@@ -24,7 +24,7 @@ function streamed(chunks, declared) {
 
 async function loadWorker(name) {
   let source = fs.readFileSync(path.join(root, name, 'worker.js'), 'utf8');
-  source = source.replace('../src/workers/request_body.js', bodyURL);
+  source = source.replace('./request_body.js', bodyURL);
   // The Cloudflare-only class export is exercised by worker_runtime_test.js.
   source = source.replace("export { CommunityQuota } from './quota.js';", '');
   return (await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'))).default;
@@ -32,7 +32,7 @@ async function loadWorker(name) {
 
 function requestFor(url, body, method = 'POST', extra = {}) {
   return new Request('https://service.test' + url, { method, body, duplex: 'half', headers: {
-    Authorization: 'Bearer ' + 'a'.repeat(64), Origin: 'https://doom-snapmap.github.io', ...extra,
+    Authorization: 'Bearer ' + 'a'.repeat(64), Origin: 'https://www.snapmapplus.com', ...extra,
   } });
 }
 
@@ -98,20 +98,20 @@ test('read errors become client errors and release the stream lock', async () =>
 });
 
 test('all Community JSON writes reject excess bytes with CORS before an upstream write', async () => {
-  const worker = await loadWorker('community');
+  const worker = await loadWorker('api');
   for (const [method, route] of [['POST', '/community/discussions'], ['POST', '/community/discussions/1/comments'],
     ['POST', '/community/reactions'], ['POST', '/community/preview'], ['PATCH', '/community/discussions/1'],
     ['PATCH', '/community/comments/example'], ['DELETE', '/community/discussions/1'], ['POST', '/auth/logout']]) {
     const env = communityEnv();
     const response = await worker.fetch(requestFor(route, new Uint8Array(384 * 1024 + 1), method), env);
     assert.equal(response.status, 413, method + ' ' + route);
-    assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://doom-snapmap.github.io');
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://www.snapmapplus.com');
     assert.deepEqual(env.calls.names, []);
   }
 });
 
 test('Community rejects malformed JSON and preserves session refusal', async () => {
-  const worker = await loadWorker('community');
+  const worker = await loadWorker('api');
   for (const body of ['null', '[]', '{', new Uint8Array([0xff])]) {
     assert.equal((await worker.fetch(requestFor('/community/reactions', body), communityEnv())).status, 400);
   }
@@ -121,7 +121,7 @@ test('Community rejects malformed JSON and preserves session refusal', async () 
 });
 
 test('upload overflow cancels before R2 and valid media retains its API shape', async () => {
-  const worker = await loadWorker('community');
+  const worker = await loadWorker('api');
   const input = streamed([new Uint8Array(8 * 1024 * 1024), new Uint8Array(1), new Uint8Array(10)], '1');
   const env = communityEnv();
   const response = await worker.fetch(requestFor('/media/upload', input.body, 'POST', { 'Content-Length': '1' }), env);
@@ -138,7 +138,7 @@ test('upload overflow cancels before R2 and valid media retains its API shape', 
 });
 
 test('quota exhaustion remains 429 and missing coordination fails closed with 503', async () => {
-  const worker = await loadWorker('community');
+  const worker = await loadWorker('api');
   assert.equal((await worker.fetch(requestFor('/community/reactions', '{}'), communityEnv(false))).status, 429);
   const env = communityEnv();
   delete env.WRITE_QUOTAS;
@@ -146,7 +146,7 @@ test('quota exhaustion remains 429 and missing coordination fails closed with 50
 });
 
 test('legacy sessions resolve a stable account id before quota admission', async () => {
-  const worker = await loadWorker('community');
+  const worker = await loadWorker('api');
   const env = communityEnv(false);
   env.SESSIONS.get = async () => JSON.stringify({ token: 'local-test-token', login: 'tester' });
   let saved;
@@ -173,7 +173,7 @@ test('legacy sessions resolve a stable account id before quota admission', async
 });
 
 test('comment edits retain the user credential and GitHub ownership refusal', async () => {
-  const worker = await loadWorker('community');
+  const worker = await loadWorker('api');
   const originalFetch = globalThis.fetch;
   let authorized = true;
   globalThis.fetch = async (url, options) => {
@@ -189,20 +189,4 @@ test('comment edits retain the user credential and GitHub ownership refusal', as
     authorized = false;
     assert.equal((await edit()).status, 403);
   } finally { globalThis.fetch = originalFetch; }
-});
-
-test('feedback keeps its character limit, bounds encoded bytes and rejects non-object reports', async () => {
-  const worker = await loadWorker('feedback');
-  for (const [body, status] of [['null', 400], ['[]', 400], ['{', 400], [new Uint8Array([0xff]), 400],
-    [JSON.stringify({ website: 'trap', extra: 'x'.repeat(65536) }), 413]]) {
-    assert.equal((await worker.fetch(requestFor('/report', body), {})).status, status);
-  }
-  const input = streamed([new Uint8Array(3 * 65536), new Uint8Array(1), new Uint8Array(10)]);
-  assert.equal((await worker.fetch(requestFor('/report', input.body), {})).status, 413);
-  assert.equal(input.cancelled(), true);
-  const accepted = await worker.fetch(requestFor('/report', JSON.stringify({ website: 'trap', extra: '\u4e00'.repeat(60000) })), {});
-  assert.equal(accepted.status, 200);
-  assert.deepEqual(await accepted.json(), { ok: true, mode: 'created', number: 0 });
-  const inherited = await worker.fetch(requestFor('/report', JSON.stringify({ category: 'constructor', title: 'Title', body: 'A valid-length description' })), {});
-  assert.equal(inherited.status, 400);
 });

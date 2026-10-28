@@ -5,7 +5,7 @@ const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { test } = require('node:test');
 
-const source = fs.readFileSync(path.join(__dirname, '../community/quota_store.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../api/quota_store.js'), 'utf8');
 const quotaModule = import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 
 function immediateStorage(db) {

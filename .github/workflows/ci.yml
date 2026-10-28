@@ -1,0 +1,47 @@
+# Check pull requests and main without repository secrets.
+# Keep pull_request rather than pull_request_target for untrusted fork code.
+# Pin third-party actions to commit SHAs with readable version comments.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: Worker tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Unit tests
+        run: |
+          node tests/worker_body_test.js
+          node tests/worker_quota_test.js
+      - name: Local runtime tests
+        run: |
+          npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0
+          node tests/worker_runtime_test.js build/worker-tests/node_modules/miniflare
+      - name: Secret scan (gitleaks)
+        run: |
+          VER=8.30.1
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" | tar -xz gitleaks
+          ./gitleaks detect --no-git --source . --redact --no-banner --exit-code 1
+
+  site:
+    name: Site builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build with Jekyll
+        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1.0.13
+        with:
+          source: ./site
+          destination: ./_site

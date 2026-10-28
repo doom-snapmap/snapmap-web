@@ -1,6 +1,8 @@
 /* Shared download links, screenshot lightbox, guide navigation, mobile menu and
- * release-note copying. Start each feature only when its markup exists.
- * Jekyll renders release notes from CHANGELOG.md; JavaScript adds copying. */
+ * the changelog. Start each feature only when its markup exists.
+ * Release notes come from the product's published GitHub Releases: each body is
+ * the reviewed CHANGELOG.md entry for that tag, in the changelog grammar
+ * (headline, summary, New/Improved/Fixed groups, collapsed line). */
 
 (function () {
   "use strict";
@@ -196,7 +198,125 @@
     else if (mq.addListener) mq.addListener(onChange);
   }
 
-  /* ---------- 5. changelog copy ---------- */
+  /* ---------- 5. changelog ---------- */
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  /* Inline Markdown as the changelog grammar allows it: code spans, bold,
+   * italics and links. Everything is escaped first. */
+  function inline(md) {
+    var codes = [];
+    var s = esc(md).replace(/`([^`]+)`/g, function (_, code) {
+      codes.push(code);
+      return "\u0000" + (codes.length - 1) + "\u0000";
+    });
+    s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\s][^*]*)\*(?!\*)/g, "$1<em>$2</em>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" rel="noopener">$1</a>');
+    return s.replace(/\u0000(\d+)\u0000/g, function (_, i) { return "<code>" + codes[i] + "</code>"; });
+  }
+
+  /* The same grammar tools/changelog.py parses in snapmap-plus. */
+  function parseNotes(body) {
+    var out = { headline: "", summary: "", added: [], improved: [], fixed: [], collapsed: "" };
+    var groups = { New: "added", Improved: "improved", Fixed: "fixed" };
+    var group = null;
+    var summary = [];
+    String(body || "").split(/\r?\n/).forEach(function (raw) {
+      var line = raw.replace(/\s+$/, "");
+      if (!line.trim()) return;
+      var m = /^### +(New|Improved|Fixed)\s*$/.exec(line);
+      if (m) { group = groups[m[1]]; return; }
+      m = /^- +(.*\S)\s*$/.exec(line);
+      if (m && group) { out[group].push(m[1]); return; }
+      if (group && out[group].length && /^[ \t]/.test(raw)) {
+        out[group][out[group].length - 1] += " " + line.trim();
+        return;
+      }
+      m = /^\*\*(.+?)\*\*\s*$/.exec(line);
+      if (m && !out.headline) { out.headline = m[1]; return; }
+      m = /^_(.+?)_\s*$/.exec(line);
+      if (m) { out.collapsed = m[1]; return; }
+      if (group === null) summary.push(line.trim());
+    });
+    out.summary = summary.join(" ");
+    return out;
+  }
+
+  function longDate(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+  }
+
+  var COPY_BUTTON =
+    '<button class="release-copy" type="button" aria-label="Copy changelog" title="Copy changelog" hidden>' +
+    /* Lucide copy and check icons; license: assets/lucide-license.txt */
+    '<svg class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>' +
+    '<svg class="check-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m20 6-11 11-5-5"/></svg>' +
+    '</button>';
+
+  function releaseHtml(rel, isLatest) {
+    var notes = parseNotes(rel.body);
+    var h = '<article class="release"><div class="release-head">';
+    h += "<h2>" + esc(rel.tag_name) + "</h2>";
+    h += '<time datetime="' + esc(rel.published_at || "") + '">' + esc(longDate(rel.published_at)) + "</time>";
+    if (rel.prerelease) h += '<span class="tag-pill tag-beta">Beta</span>';
+    if (isLatest) h += '<span class="tag-pill tag-latest">Latest</span>';
+    h += '</div><div class="release-notes">';
+    if (notes.headline) h += "<p><strong>" + inline(notes.headline) + "</strong></p>";
+    if (notes.summary) h += "<p>" + inline(notes.summary) + "</p>";
+    [["added", "New"], ["improved", "Improved"], ["fixed", "Fixed"]].forEach(function (g) {
+      var items = notes[g[0]];
+      if (!items.length) return;
+      h += "<p><strong>" + g[1] + "</strong></p><ul>";
+      items.forEach(function (item) { h += "<li>" + inline(item) + "</li>"; });
+      h += "</ul>";
+    });
+    if (!notes.headline && !notes.summary && !notes.added.length && !notes.improved.length && !notes.fixed.length) {
+      /* a body outside the grammar still shows, as plain paragraphs */
+      String(rel.body || "").split(/\r?\n\s*\r?\n/).forEach(function (para) {
+        if (para.trim()) h += "<p>" + inline(para.trim()) + "</p>";
+      });
+    }
+    if (notes.collapsed) h += "<p><em>" + inline(notes.collapsed) + "</em></p>";
+    h += "</div>";
+    h += '<pre class="release-markdown" hidden>' + esc(String(rel.body || "").trim()) + "</pre>";
+    h += '<div class="release-links"><a href="' + esc(rel.html_url) + '">View on GitHub</a>' + COPY_BUTTON +
+      '<span class="release-copy-status" role="status"></span></div>';
+    return h + "</article>";
+  }
+
+  function initChangelog() {
+    var host = document.querySelector("[data-releases]");
+    if (!host) return;
+    var releasesUrl = "https://github.com/" + REPO + "/releases";
+    fetchReleases().then(function (rels) {
+      if (!rels) {
+        host.innerHTML = '<div class="changelog-fallback">Couldn\u2019t load the release list. See ' +
+          '<a href="' + releasesUrl + '">GitHub releases</a>.</div>';
+        return;
+      }
+      var shown = rels.filter(function (r) { return !r.draft; });
+      if (!shown.length) {
+        host.innerHTML = '<div class="changelog-fallback">No releases yet. Watch ' +
+          '<a href="' + releasesUrl + '">GitHub releases</a> for the first one.</div>';
+        return;
+      }
+      var latest = null;
+      for (var i = 0; i < shown.length; i++) {
+        if (!shown[i].prerelease) { latest = shown[i].tag_name; break; }
+      }
+      host.innerHTML = shown.map(function (r) { return releaseHtml(r, r.tag_name === latest); }).join("");
+      initChangelogCopy();
+    });
+  }
+
+  /* ---------- 6. changelog copy ---------- */
 
   function releaseAnnouncement(release) {
     var parts = [
@@ -256,7 +376,7 @@
     initLightbox();
     initToc();
     initNav();
-    initChangelogCopy();
+    initChangelog();
   }
 
   if (document.readyState === "loading") {

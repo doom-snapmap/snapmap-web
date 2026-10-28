@@ -1,0 +1,2 @@
+# Embedded Bash scripts require LF even when Git uses autocrlf.
+*.yml text eol=lf

@@ -1,7 +1,9 @@
-# Community Worker entry point and storage bindings. See README.md for setup.
+# API Worker entry point, custom domain and storage bindings. See README.md for setup.
+# The Worker keeps its original Cloudflare name so its secrets and bindings carry over.
 name = "snapmap-plus-community"
 main = "worker.js"
 compatibility_date = "2026-07-01"
+routes = [{ pattern = "api.snapmapplus.com", custom_domain = true }]
 
 # Session store (opaque session id -> GitHub user token, server-side only)
 [[kv_namespaces]]

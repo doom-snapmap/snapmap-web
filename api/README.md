@@ -1,21 +1,21 @@
-# Community service
+# API service
 
 ## Purpose
 
-Serves the website's Community pages through GitHub Discussions, handles GitHub sign-in and stores uploaded screenshots.
+Serves the website's Community pages through GitHub Discussions on this repository, handles GitHub sign-in and stores uploaded screenshots. Deployed as the Cloudflare Worker `snapmap-plus-community` at `https://api.snapmapplus.com`.
 
 ## Contents
 
 - `worker.js` defines the HTTP API, authentication, discussion operations and media handling.
 - `quota.js` and `quota_store.js` coordinate write limits across a user's sessions.
 - `wrangler.toml` binds `SESSIONS` KV, `MEDIA` R2 and the SQLite `WRITE_QUOTAS` Durable Object.
-- `../src/workers/request_body.js` bounds request bodies before parsing or uploading.
+- `request_body.js` bounds request bodies before parsing or uploading.
 
 ## Working here
 
 Reads use a GitHub App installation token, with an optional `GITHUB_TOKEN` fallback. Writes use the signed-in user's token stored in KV; the browser receives an opaque session ID. Configure `APP_ID`, `APP_PRIVATE_KEY` (PKCS#8) and `CLIENT_SECRET` as Worker secrets. `TURNSTILE_SECRET` enables the optional challenge on supported write routes.
 
-For a fork, provision your own KV namespace and R2 bucket, set the App callback URL to this Worker's `/auth/callback`, and update the repository, App client ID and site-origin constants. Keep the Worker URL in `site/assets/community.js` aligned. CORS admits the configured site and local HTTP development origins.
+For a fork, provision your own KV namespace and R2 bucket, set the App callback URL to this Worker's `/auth/callback`, and update the repository, App client ID and site-origin constants, and point the `routes` custom domain in `wrangler.toml` at a zone on your Cloudflare account. Keep the Worker URL in `site/assets/community.js` aligned. CORS admits the configured site and local HTTP development origins.
 
 Writes share a fixed UTC-hour quota per GitHub account: 10 posts, 60 comments,
 120 reactions, 30 uploads, 120 previews and 60 edits/deletions. Counters are atomic
@@ -28,6 +28,8 @@ JSON requests are limited to 384 KiB and images to 8 MiB of actual streamed byte
 Malformed JSON or UTF-8 returns 400; oversize bodies return 413. Health is exposed
 at `GET /`. Preview locally before a maintainer deploys. See the
 [service inventory](../docs/services.md) and [website source](../site/README.md).
+
+Deploy from this directory with `npx wrangler deploy` after `npx wrangler login`. Secrets (`APP_ID`, `APP_PRIVATE_KEY`, `CLIENT_SECRET`, optional `GITHUB_TOKEN` and `TURNSTILE_SECRET`) are set once with `npx wrangler secret put` and survive redeploys.
 
 From the repository root, run `node tests/worker_body_test.js` and
 `node tests/worker_quota_test.js` with Node 22.13 or newer. The optional local

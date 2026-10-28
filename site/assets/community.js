@@ -5,9 +5,8 @@
 (function () {
   "use strict";
 
-  var WORKER = "https://snapmap-plus-community.doom-snapmap.workers.dev";
-  var REPO_URL = "https://github.com/doom-snapmap/snapmap-plus";
-  var DISCUSSIONS_URL = REPO_URL + "/discussions";
+  var WORKER = "https://api.snapmapplus.com";
+  var DISCUSSIONS_URL = "https://github.com/doom-snapmap/snapmap-web/discussions";
   var SESSION_KEY = "smp_session";
   var DRAFT_KEY = "smp_draft2";
 
