@@ -70,7 +70,7 @@ The resizing feature is included in the existing backend DLL; it needs no
 separate file beside the map.
 
 To return a map to vanilla compatibility, restore every Grid Room to its
-original dimensions, restore **View Distance** to 8192, and remove any
+original dimensions, turn **Unlock View Distance** off, and remove any
 other mod-only content. Save again.
 
 The faint green surface grid appears when placing or moving objects that use
@@ -81,50 +81,52 @@ or logic object. **Snap to Grid** moves the held object to the editing grid;
 it does not toggle this display. The custom blocking-volume navigation preview
 is a separate overlay.
 
-## Map view distance
+## Unlock view distance
 
 Open **Settings > Properties** in DOOM's SnapMap editor and switch to the
-**SNAPMAP+ MOD SETTINGS** tab; the setting is **Map View Distance**. Choose
-**Apply**, then save your map normally. Cancel
-discards unapplied changes. The value is stored inside this map and works with
-both OpenGL and Vulkan. Loading another map uses that map's own setting.
+**SNAPMAP+ MOD SETTINGS** tab; the setting is **Unlock View Distance**. Choose
+**Apply**, then save your map normally. Cancel discards unapplied changes. The
+setting is saved into this map and works with both OpenGL and Vulkan. Loading
+another map uses that map's own setting.
 
-| Setting | Default value | Range |
+| Setting | Default | Values |
 |---|---|---|
-| Map View Distance | 8192 (original environment) | 0 (maximum), or 256 to 200000 game units |
+| Unlock View Distance | Off | Off or On |
 
-**View Distance** decides how far the game draws before the black far-clip
-cutoff. It follows one rule:
+- **Off (default):** the map is drawn exactly as the unmodified game draws it.
+  Each environment keeps its own far-clip distance and its own fog, and
+  modules, **Set Environment** and **Player Set Environment** logic nodes and
+  campaign environments such as the Lazarus archive (15000) all keep control.
+  A room on the **Default** Environment FX draws to 60000 units in the editor,
+  darkening into fog after about 32000, but only 8192 units in Play. Many other
+  Environment FX stop at 8000, 8192, 10000 or 32768.
+- **On:** the map draws to 200000 units, the farthest the game allows, in the
+  editor (every camera, Blueprint included) and in Play. Each Environment FX
+  keeps its look: its fog, color, grading and lighting stay, and its fog is
+  stretched by the same factor as its distance, so fog that used to close in at
+  the old far clip now closes in at 200000 instead. Set Environment and Player
+  Set Environment nodes still change the environment; only the distance is
+  replaced and the fog stretched to match. It is not infinite.
 
-- **8192 (default):** the map uses each environment's own distance.
-  Modules, **Set Environment** and **Player Set Environment** logic nodes and
-  campaign environments such as the Lazarus archive (15000) all keep control,
-  so your logic can still change the distance during play.
-- **0 (maximum):** the map draws to 200000 units, the farthest the game
-  allows. It is not infinite. Press left at 0 to jump to 200000; right at
-  200000 stays there.
-- **Any other value:** the map's View Distance is used everywhere the map is
-  drawn, in the editor and in Play. It overrides module environments, Set
-  Environment and Player Set Environment nodes, and campaign environments.
-  Environment effects such as fog, color and lighting still come from those
-  environments; only the distance is replaced.
+Turning the setting on modifies the map: it is stored in the map as a string
+variable named `smp.render.v1`. Turning it off and applying removes that
+variable again, so the next save writes the map exactly as the unmodified game
+would. Players without Snapmap+ can load a map saved with it on; they see the
+map with its original environments.
 
-The editor's own camera limits are separate and are not changed by this
-setting. An extended view distance such as 60000 removes the nearby black
-cutoff in large Grid Rooms. A room on the **Default** Environment FX draws
-to 60000 units in the editor, darkening into fog after about 32000, but only
-8192 units in Play. Many other Environment FX stop at 8000, 8192, 10000 or
-32768. Use 0 to see the whole room in both the editor and Play. Larger distances can increase rendering cost, so
-check the result from several positions in Play mode, especially in large open
-rooms. Players need Snapmap+ for a custom value to take effect.
+On a four-room test map, frame times were the same with the setting on and off
+(the game stayed at its 60 frames per second limit in the editor and 200 in
+Play either way), but a large open room with many objects in view can still
+cost more, because nothing past the old distance is cut away any more.
 
-Fog is not a map setting. Use environments and Set Environment nodes for fog.
-Maps saved with earlier Snapmap+ versions keep their view distance; their old
-map fog values are ignored when the map loads and dropped the next time it is
-saved, whether or not you open the settings. Maps
-saved with the former enable switch off load with the default distance. A map
-saved with 0 when 0 meant "follow the environment" now draws to the maximum;
-set 8192 to return it to the environments.
+Fog is not a map setting. Use environments and Set Environment nodes for fog;
+with this setting on their fog is kept but drawn farther out.
+
+Maps saved with earlier Snapmap+ versions, which stored a View Distance number,
+read as follows: a distance of 8192 (the old default) reads as **Off**, and its
+variable is removed the next time the map is saved; any other distance,
+including 0, reads as **On**. Their old map fog values are ignored. Maps saved
+with the former enable switch off read as **Off**.
 
 ## Map bounds and Blueprint zoom
 
