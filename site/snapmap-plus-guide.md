@@ -839,8 +839,7 @@ shadows the faces of the step below it, so a fanned stair may keep floor climbs
 on only two or three faces of its first step. Run `sh_navmesh` to see, for each
 box and demon size, which faces have a climb and why the others do not
 ("blocked" means another box overhangs the run-up, "inside" means the face is
-buried in another box). The Build Navmesh toast tells you how many box faces
-demons can climb from the floor.
+buried in another box).
 
 Once the navmesh has been built, the faint green placement grid you see while
 holding a demon follows it: the grid stops around every AI Navigation box the
