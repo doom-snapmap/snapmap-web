@@ -820,6 +820,36 @@ for a hell knight. Climbing also requires an available traversal animation and
 clear approach and landing positions; the floor-side positions account for the
 whole rotated box, including an overhanging slope.
 
+Demons climb a marked box from any side whose foot is open floor, not only from
+the side whose floor strip happens to match the box's: a box set across one of a
+room's floor seams gets climbs on all of its free faces. Each long face carries
+several climbing points, roughly every 192 units of edge, so a demon standing
+beside a step uses the nearest one instead of walking to the middle of a far
+face. The room's own floor is cut around every box that stands on it, or that
+hangs over it lower than the demon is tall, the same way a box top is cut around
+a box standing on it: a demon routes around the box to a climbing point rather
+than walking into its side. A box high enough to walk under leaves the floor
+alone. Every climb, drop and leap is also checked along the path the animation
+takes, so a demon never climbs or drops through a box, a floor slab or a
+neighbouring step; where a run-up would start under an overhang it is moved
+into the open, and a climb with no clear path is left out.
+
+When you build a staircase from overlapping, floating boxes, the step above
+shadows the faces of the step below it, so a fanned stair may keep floor climbs
+on only two or three faces of its first step. Run `sh_navmesh` to see, for each
+box and demon size, which faces have a climb and why the others do not
+("blocked" means another box overhangs the run-up, "inside" means the face is
+buried in another box). The Build Navmesh toast tells you how many box faces
+demons can climb from the floor.
+
+Once the navmesh has been built, the faint green placement grid you see while
+holding a demon follows it: the grid stops around every AI Navigation box the
+demon would have to walk around, leaving a margin as wide as that demon's
+clearance, and carries on under a box that is high enough for it to walk
+beneath. Larger demons leave wider gaps, so pick up the demon you intend to
+place to see exactly where it can stand; unticking AI Navigation on every box
+in a room brings back the room's normal grid.
+
 A map can hold up to 65,536 boxes with **AI Navigation** or **Block Demons** and
 8,192 placed modules. Each module copy (a "room" in the messages) bakes up to
 2,048 boxes, and up to 2,048 walkable pieces per demon size. Past any of these the
@@ -834,13 +864,17 @@ of refusing the map:
 - The engine allows at most 256 routes out of one navigation area. When a busy
   floor would pass that, the boxes adding the most routes there give up just
   enough of them.
-- The engine loads no navigation tree deeper than 128. A room that would pass it
-  keeps three quarters of its floor boxes at a time until it fits.
+- The engine loads no navigation tree deeper than 128. The generated part of
+  the tree is rebuilt balanced after every route is placed, so even hundreds of
+  boxes stay well inside that; a room that would still pass it keeps three
+  quarters of its floor boxes at a time until it fits.
 - One room's navigation file is kept within 16 MiB. Very many boxes close
-  together (hundreds within jumping range of each other) can pass that, because
-  every pair gets its own leaps. The room then keeps the shortest moves out of
-  each box and gives up the longest leaps until it fits; only if that is not
-  enough does it give up floor boxes, three quarters at a time.
+  together (hundreds within jumping range of each other) can pass that. A leap
+  to a far box top is dropped when a nearer landing already reaches the same
+  box with a shorter leap, so every top stays reachable with far fewer links.
+  The room then keeps the shortest moves out of each box and gives up the
+  longest leaps until it fits; only if that is not enough does it give up floor
+  boxes, three quarters at a time.
 - Each demon size is baked on its own. If the smallest size cannot be built,
   larger demons still use the boxes, and a size that failed is not baked again
   at Play unless the map changed.
@@ -851,9 +885,10 @@ Boxes that lost routes or were left out this way are drawn amber in the preview.
 The completion toast says **Navmesh Built**, **Navmesh Partly Built** with how
 many rooms were built and the first room that kept or lost something and why, or
 **Navmesh Build Failed** when no room could be built or the map could not be read.
-The View menu shows the same summary. Run `sh_navmesh` in the game console for
-every room, demon size and box with its reason; `sh_backend.log` has the same
-lines. The one route refusal left is a module whose own navigation already fills
+The View menu shows the same summary. Run `sh_navmesh` in the game console: it
+prints one block per room and demon size with the counts, one reason per line
+and a table of which box faces demons can climb from the floor;
+`sh_backend.log` has the same facts on single lines. The one route refusal left is a module whose own navigation already fills
 an area; the boxes routing into it are marked red. An obstructed or disconnected
 route can also stop a demon without removing the navigation mesh. Leave enough
 room around wall ends for the intended demon size and keep spawn, approach and
@@ -874,8 +909,8 @@ geometry is held. Play always uses the current map: if it changed since the last
 update, Play bakes it again, but only the rooms that changed. Each room's
 navigation for all three demon sizes is kept after it is built, so a room whose
 boxes and position are unchanged is not baked again at the next Play, after
-reloading the map, or when it is launched from outside the editor. The first
-Play of a session bakes the two larger demon sizes, which Build Navmesh does not. If the View menu says **Could not read this map**,
+reloading the map, or when it is launched from outside the editor. Build Navmesh and the preview bake all three demon sizes, so the first Play
+reuses them. If the View menu says **Could not read this map**,
 run `sh_navmesh` for the reason.
 
 Duplicated boxes that share an ID keep their navigation when the map assigns
