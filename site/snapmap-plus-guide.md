@@ -562,7 +562,13 @@ placed prefab brings in AI Navigation boxes, Snapmap+ updates the navmesh by its
 it, just as **View > Update Navmesh** would.
 
 **Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter prefabs...** narrows
-the list by name. Selecting a prefab and clicking **Delete** removes it permanently.
+the list by name or tag. Folders start closed, and the ones you open stay open when you switch tabs or
+restart the game; a filter shows every folder that has a match. **Shift-click** selects a run of rows and
+**Ctrl-click** adds or removes one (folders too). With more than one prefab selected the details pane
+steps aside: drag the set onto a folder, or onto the blank space below the list to move it back to the
+root, and it moves in one go. Dragging a folder onto another folder moves its prefabs across. Selecting a
+prefab and clicking **Delete** removes it permanently; with several selected, the **Delete** key or the
+right-click menu removes them all after one confirmation.
 
 Prefabs are stored as individual files under `%LOCALAPPDATA%\snapmap-plus\prefabs\` — sharing one is just
 sending someone that file; they drop it into their own `prefabs` folder (or the matching subfolder, to
