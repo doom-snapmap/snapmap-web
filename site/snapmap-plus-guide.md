@@ -505,12 +505,21 @@ gives them a dedicated editor.
 
 ![Timelines tab: list on the left, an open Timeline with eventcalls on the right](images/timelines-tab-dark.png)
 
-**Getting a Timeline into your map:** place one from the **\*Custom** palette tab (see
-[The Custom Palette Tab](#the-custom-palette-tab)) — this is the reliable way to do it, since it comes
-with a valid module location already baked in. It's worth giving each Timeline a unique **Displayname**
-so you can tell them apart in the list.
+**Getting a Timeline into your map:** press **+** (Create New Timeline) at the top of the list while
+you are in Object mode. Snapmap+ stages a fresh Timeline for the editor's paste: click in the 3D view to
+drop it where you like, and it appears in the list, already selected and open. You can still place one
+from the **\*Custom** palette tab (see [The Custom Palette Tab](#the-custom-palette-tab)) if you prefer.
+It's worth giving each Timeline a unique **Displayname** so you can tell them apart in the list.
 
-Once it's placed, it shows up here automatically — find it in the list and double-click to open it in the
+**Folders:** the list groups Timelines by the part of their name before the first slash, so a Timeline
+called `Arena/Wave 1` sits in an **Arena** folder (and shows that way in the in-game logic view too). Press
+**New Folder** to start one, then drag Timelines into it; drag them back onto the blank space below the
+list to take them out, or right-click a Timeline for **Move to** choices. Shift-click and Ctrl-click
+select several at once. Renaming a folder renames the Timelines inside it; deleting one moves them back
+out. Folders start closed and remember which ones you leave open. Because a folder is just a naming
+convention, it travels with the map and with anyone you share it with.
+
+Once a Timeline is placed, it shows up here automatically — click it in the list to open it in the
 editor on the right.
 
 A Timeline is organized into **entity events** and **eventcalls**. For every entity you want to script,
@@ -566,6 +575,17 @@ entity count. Click **Load / Place** to stage the prefab for placement with Snap
 function, then switch to the editor and press **Ctrl+V** to actually drop it into the map. When the
 placed prefab brings in AI Navigation boxes, Snapmap+ updates the navmesh by itself once you drop
 it, just as **View > Update Navmesh** would.
+
+**Blueprint prefabs:** a prefab can also be whole rooms. In Blueprint mode, select one or more modules
+and click **Create from selection**: the modules are saved together with every object inside them, their
+door and cap slots, the wires and references that stay inside the set, and the map variables those
+objects use (a wire that leaves the set is dropped and counted in the details). These prefabs carry a
+**Blueprint** badge in the list, and the details pane shows a top-down footprint of the modules with the
+first module marked as the anchor, plus the module, object and door counts. **Place in Blueprint** is
+only enabled in Blueprint mode: the rooms appear under your cursor already grabbed, like SnapMap's own
+Duplicate, so move them, rotate with **Q** and **E**, press **Space** to drop them (one undo step) or
+**Esc** to discard them. A placement that would push the map over the editor's limits is refused and
+taken back.
 
 **Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter prefabs...** narrows
 the list by name or tag. Folders start closed, and the ones you open stay open when you switch tabs or
