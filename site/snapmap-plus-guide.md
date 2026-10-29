@@ -893,8 +893,8 @@ route can also stop a demon without removing the navigation mesh. Leave enough
 room around wall ends for the intended demon size and keep spawn, approach and
 landing points clear.
 
-Build navigation from the editor's Start menu with **Build Navmesh**, beside
-**Save**. The game shows **Building Navmesh** while the worker runs, then a
+Build navigation from the editor's Start menu with **Build Navmesh**, below
+**Save As** and above **Play**. The game shows **Building Navmesh** while the worker runs, then a
 native completion toast, just like ordinary Save. This does not save or name
 the map, and it does not require a player start. It also works in Blueprint mode
 and with the green preview turned off.
