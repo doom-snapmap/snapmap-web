@@ -194,6 +194,12 @@ Right-clicking one or more selected rows gives you:
   [SnapStack](#snapstack-bulk-editing)).
 - **Clear stack 0** — empties stack 0 out, regardless of what's currently selected.
 
+**Fly to entity:** select one entity and press the crosshair button beside **Revert**, or right-click
+the row and choose **Fly to entity**. Snapmap+ switches the editor to Object mode if you are in
+Blueprint and moves the camera in front of the entity with the cursor resting on it, so you can grab it
+or open its properties right away. The camera drops to the floor beneath you as it does after Tab; if
+you had **Lock position** on, it is released first.
+
 Entities that ship as part of the map's module (rather than ones you placed yourself) also show up in
 this list — editing or deleting those isn't permanent; they reset the next time the map reloads. If you
 need one gone for good, deleting it directly won't stick — instead, signal it (via a `targets` list, or a
