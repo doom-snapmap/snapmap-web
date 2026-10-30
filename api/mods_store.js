@@ -13,7 +13,7 @@ export const MAX_FILES = 4096;
 export const MAX_TOTAL = 256 * 1024 * 1024;
 export const MAX_QUERY = 4096;
 export const MAX_CLAIM_BUNDLES = 256;
-export const CLAIM_WINDOW_MS = 7 * 86400000;
+export const CLAIM_WINDOW_MS = 3600000;   // upload-before-claim window (one hour), as in mods_registry_store.js
 const MAX_MISSING_JSON = 512 * 1024;
 const MAX_CLAIM_JSON = 64 * 1024;
 const MISSING_SHOWN = 100;
@@ -511,6 +511,7 @@ async function postClaim(req, env) {
   });
   if (result.forbidden) return refuse('no claim matches this ref and secret', 403);
   if (result.missing) return refuse('unknown bundles', 409, { missing: result.missing.slice(0, MISSING_SHOWN), missingCount: result.missing.length });
+  await deleteReleased(env, result.deleted);
   return reply({ claim: result.claim, secret }, result.created ? 201 : 200);
 }
 
@@ -522,7 +523,50 @@ async function postRelease(req, env) {
   const result = await registry(env, 'release', body.claim, await sha256Hex(body.secret));
   if (result.notFound) return refuse('no such claim', 404);
   if (result.forbidden) return refuse('wrong secret', 403);
+  await deleteReleased(env, result.deleted);
   return new Response(null, { status: 204 });
+}
+
+/* A bundle whose last claim was just released is gone already from the index; delete its
+ * object now and sweep blobs nothing names any more (those past the upload window, so an
+ * upload between its blob PUTs and its bundle PUT is never swept from under it). */
+async function deleteReleased(env, hashes) {
+  if (!Array.isArray(hashes) || !hashes.length) return;
+  await env.MODS.delete(hashes.map(hash => 'bundle/' + hash));
+  await purgeBlobObjects(env, PURGE_BATCH, PURGE_ROUNDS);
+}
+
+/* ---------------- maintainer reset ---------------- */
+
+/* Deletes every stored blob and bundle and empties the index. Hidden unless the
+ * MODS_ADMIN_TOKEN secret is set, and refused without exactly that bearer token. */
+async function postReset(req, env) {
+  const expected = env.MODS_ADMIN_TOKEN === undefined ? '' : String(env.MODS_ADMIN_TOKEN);
+  if (!expected) { await discard(req); return refuse('not found', 404); }
+  const given = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!given || !(await sameToken(given, expected))) { await discard(req); return refuse('forbidden', 403); }
+  await discard(req);
+  const deleted = { blobs: 0, bundles: 0 };
+  for (const kind of ['blob', 'bundle']) {
+    let cursor;
+    do {
+      const page = await env.MODS.list({ prefix: kind + '/', limit: 1000, cursor });
+      const keys = page.objects.map(object => object.key);
+      if (keys.length) await env.MODS.delete(keys);
+      deleted[kind + 's'] += keys.length;
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+  }
+  const index = await registry(env, 'reset');
+  console.log('mods reset: deleted ' + deleted.blobs + ' blobs and ' + deleted.bundles + ' bundles');
+  return reply({ deleted, index });
+}
+
+async function sameToken(given, expected) {
+  const [a, b] = await Promise.all([sha256Hex(new TextEncoder().encode(given)), sha256Hex(new TextEncoder().encode(expected))]);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 /* ---------------- routing ---------------- */
@@ -542,7 +586,7 @@ export async function handleMods(req, env, path) {
     if (req.method === 'PUT') return kind === 'blob' ? putBlob(req, env, raw) : putBundle(req, env, raw);
     return notAllowed(req, 'GET, HEAD, PUT');
   }
-  const action = { '/mods/missing': postMissing, '/mods/claim': postClaim, '/mods/release': postRelease }[path];
+  const action = { '/mods/missing': postMissing, '/mods/claim': postClaim, '/mods/release': postRelease, '/mods/admin/reset': postReset }[path];
   if (action) return req.method === 'POST' ? action(req, env) : notAllowed(req, 'POST');
   await discard(req);
   return refuse('not found', 404);
@@ -550,16 +594,24 @@ export async function handleMods(req, env, path) {
 
 /* ---------------- scheduled purge ---------------- */
 
-/* Deletes unclaimed bundles older than the claim window, then blobs older than the window
- * that no remaining bundle names. Bounded per run; the next run continues. */
+/* Deletes unclaimed bundles older than the upload window (uploads nothing ever claimed), then
+ * blobs older than the window that no remaining bundle names. Bounded per run; the next run
+ * continues. Released bundles do not wait for this: their last release deletes them. */
 export async function purgeMods(env, { batch = PURGE_BATCH, rounds = PURGE_ROUNDS } = {}) {
-  let bundles = 0, blobs = 0;
+  let bundles = 0;
   for (let i = 0; i < rounds; i++) {
     const doomed = await registry(env, 'purgeBundles', batch);
     if (doomed.length) await env.MODS.delete(doomed.map(hash => 'bundle/' + hash));
     bundles += doomed.length;
     if (doomed.length < batch) break;
   }
+  const blobs = await purgeBlobObjects(env, batch, rounds);
+  console.log('mods purge: deleted ' + bundles + ' bundles and ' + blobs + ' blobs');
+  return { bundles, blobs };
+}
+
+async function purgeBlobObjects(env, batch, rounds) {
+  let blobs = 0;
   for (let i = 0; i < rounds; i++) {
     const doomed = await registry(env, 'purgeBlobs', batch);
     if (doomed.length) {
@@ -569,6 +621,5 @@ export async function purgeMods(env, { batch = PURGE_BATCH, rounds = PURGE_ROUND
     blobs += doomed.length;
     if (doomed.length < batch) break;
   }
-  console.log('mods purge: deleted ' + bundles + ' bundles and ' + blobs + ' blobs');
-  return { bundles, blobs };
+  return blobs;
 }

@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
   initializeRegistry, missingBlobs, noteBlob, registerBundle, bundleServed, blobClaimed,
-  claimBundles, releaseClaim, purgeBundles, purgeBlobs, finishBlobs,
+  claimBundles, releaseClaim, purgeBundles, purgeBlobs, finishBlobs, resetRegistry,
 } from './mods_registry_store.js';
 
 // The single mod store index (named "registry"); see mods_registry_store.js.
@@ -21,4 +21,5 @@ export class ModRegistry extends DurableObject {
   purgeBundles(limit) { return purgeBundles(this.ctx.storage, Date.now(), limit); }
   purgeBlobs(limit) { return purgeBlobs(this.ctx.storage, Date.now(), limit); }
   finishBlobs(hashes) { return finishBlobs(this.ctx.storage, hashes); }
+  reset() { return resetRegistry(this.ctx.storage); }
 }

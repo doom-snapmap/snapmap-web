@@ -109,16 +109,25 @@ decided in one transaction.
 - `POST /mods/release` takes `{"claim","secret"}` and returns 204; a wrong secret is
   403 and an unknown claim 404. Releasing drops the claim and its counts.
 
-A bundle is served while its claim count is positive or while it was uploaded,
-or re-uploaded, within the last seven days. A blob is served within seven days of
-its upload, and afterwards while any claimed bundle names it. Otherwise both
-answer 404. The daily cron (`[triggers]` in `wrangler.toml`) runs the scheduled
-handler, which deletes unclaimed bundles past the window first, then blobs past
-the window that no remaining bundle names. Blobs are marked in the registry
-before deletion; marked blobs read as missing, refuse new bundle registrations
-with 409 and answer blob uploads with 503 and `Retry-After`, so a new bundle can
-never come to depend on a blob that is about to disappear. Each run handles at
-most 10,000 bundles and 10,000 blobs and the next run continues.
+A bundle is served while its claim count is positive or for one hour after its
+upload (the time a publish needs between its `PUT`s and its claim). A blob is
+served for one hour after its upload, and afterwards while any claimed bundle
+names it. Otherwise both answer 404. Deletion is immediate: the release that
+drops a bundle's last claim (`POST /mods/release`, or a re-claim that leaves the
+bundle out) removes it from the index and the bucket at once and sweeps blobs
+past the hour that no remaining bundle names. The daily cron (`[triggers]` in
+`wrangler.toml`) only collects uploads nothing ever claimed: unclaimed bundles
+past the hour first, then blobs past the hour that no bundle names. Blobs are
+marked in the registry before deletion; marked blobs read as missing, refuse new
+bundle registrations with 409 and answer blob uploads with 503 and `Retry-After`,
+so a new bundle can never come to depend on a blob that is about to disappear.
+Each run handles at most 10,000 bundles and 10,000 blobs and the next run
+continues.
+
+`POST /mods/admin/reset` empties the store: every blob and bundle object and the
+whole index. It exists only when the `MODS_ADMIN_TOKEN` secret is set
+(`npx wrangler secret put MODS_ADMIN_TOKEN`) and needs `Authorization: Bearer
+<token>`; otherwise it answers 404 or 403. It returns the counts deleted.
 
 Hourly limits per client address and UTC hour: 2048 blob uploads, 4 GiB of
 declared upload bytes, 64 bundle uploads, 20,000 reads (blob and bundle `GET` or

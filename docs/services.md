@@ -18,7 +18,7 @@ per month at plausible scale.
 | R2 | Screenshot uploads | `MEDIA` binding | Uploads and media retrieval fail. |
 | R2 (mod store) | Anonymous Snapmap+ mod blobs and bundle manifests, bucket `snapmap-plus-mods`; billed per use for storage, Class A writes and Class B reads, with free egress | `MODS` binding | Players cannot fetch the mods a map needs; installed mods and vanilla maps are unaffected. |
 | SQLite Durable Object (mod index) | Index of stored mod objects and their anonymous claims; per-address limits use `WRITE_QUOTAS` | `MOD_REGISTRY` binding and its `v2-mod-registry` migration; optional secret `MODS_ADDRESS_KEY` | Mod store routes fail closed with HTTP 503. |
-| Workers Cron Trigger | Daily purge of unclaimed mod objects older than seven days | `[triggers]` in `api/wrangler.toml` | Unclaimed objects stay stored and unserved. |
+| Workers Cron Trigger | Daily purge of mod objects nothing ever claimed (released bundles are deleted at release) | `[triggers]` in `api/wrangler.toml` | Unclaimed objects stay stored and unserved. |
 | Turnstile | Optional write challenge | Worker secret `TURNSTILE_SECRET` and matching site setup | The Worker skips the challenge when the secret is absent. |
 
 ## DNS

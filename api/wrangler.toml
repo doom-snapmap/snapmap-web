@@ -42,6 +42,7 @@ new_sqlite_classes = ["ModRegistry"]
 [vars]
 MODS_BLOCKED = "[]"
 
-# Daily purge of unclaimed mod objects older than seven days (scheduled handler in worker.js).
+# Daily purge of mod objects nothing ever claimed, older than one hour (scheduled handler in worker.js);
+# a released bundle is deleted at its release, not here.
 [triggers]
 crons = ["23 4 * * *"]

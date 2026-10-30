@@ -3,7 +3,7 @@
  * counts, references and purges are decided in single transactions. The clock comes
  * from the Durable Object, never from an HTTP client. */
 
-export const CLAIM_WINDOW_MS = 7 * 86400000;   // upload-before-claim window
+export const CLAIM_WINDOW_MS = 3600000;   // upload-before-claim window (one hour)
 
 const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS mod_blob (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, created INTEGER NOT NULL, deleting INTEGER NOT NULL DEFAULT 0)',
@@ -90,6 +90,22 @@ function claimedBundles(storage, id) {
   return rows(storage, 'SELECT bundle FROM mod_claim_bundle WHERE claim = ?', id).map(row => row.bundle);
 }
 
+/* Drops every listed bundle whose claim count has reached zero, so a bundle disappears the
+ * moment its last claim is released instead of waiting for the purge. Returns the hashes
+ * dropped; the caller deletes their objects. Blobs are left to the purge, whose window
+ * protects an upload still in flight. */
+function dropUnclaimed(storage, hashes) {
+  const dropped = [];
+  for (const hash of new Set(hashes)) {
+    const found = rows(storage, 'SELECT claims FROM mod_bundle WHERE hash = ?', hash);
+    if (!found.length || found[0].claims > 0) continue;
+    storage.sql.exec('DELETE FROM mod_bundle_blob WHERE bundle = ?', hash);
+    storage.sql.exec('DELETE FROM mod_bundle WHERE hash = ?', hash);
+    dropped.push(hash);
+  }
+  return dropped;
+}
+
 /* Creates a claim, or replaces the bundle set of the claim matching ref and the presented
  * secret. Secrets are stored and compared only as SHA-256 digests. */
 export function claimBundles(storage, { ref, bundles, id, secretHash, presentedHash }, now) {
@@ -110,17 +126,19 @@ export function claimBundles(storage, { ref, bundles, id, secretHash, presentedH
     const after = new Set(list);
     if (existing) storage.sql.exec('UPDATE mod_claim SET updated = ? WHERE id = ?', now, claim);
     else storage.sql.exec('INSERT INTO mod_claim (id, ref, secret, created, updated) VALUES (?, ?, ?, ?, ?)', claim, ref, secretHash, now, now);
+    const released = [];
     for (const bundle of before) {
       if (after.has(bundle)) continue;
       storage.sql.exec('DELETE FROM mod_claim_bundle WHERE claim = ? AND bundle = ?', claim, bundle);
       storage.sql.exec('UPDATE mod_bundle SET claims = claims - 1 WHERE hash = ?', bundle);
+      released.push(bundle);
     }
     for (const bundle of after) {
       if (before.has(bundle)) continue;
       storage.sql.exec('INSERT INTO mod_claim_bundle (claim, bundle) VALUES (?, ?)', claim, bundle);
       storage.sql.exec('UPDATE mod_bundle SET claims = claims + 1 WHERE hash = ?', bundle);
     }
-    return { claim, created: !existing };
+    return { claim, created: !existing, deleted: dropUnclaimed(storage, released) };
   });
 }
 
@@ -130,10 +148,11 @@ export function releaseClaim(storage, id, presentedHash) {
     const found = rows(storage, 'SELECT secret FROM mod_claim WHERE id = ?', id);
     if (!found.length) return { notFound: true };
     if (found[0].secret !== presentedHash) return { forbidden: true };
-    for (const bundle of claimedBundles(storage, id)) storage.sql.exec('UPDATE mod_bundle SET claims = claims - 1 WHERE hash = ?', bundle);
+    const held = claimedBundles(storage, id);
+    for (const bundle of held) storage.sql.exec('UPDATE mod_bundle SET claims = claims - 1 WHERE hash = ?', bundle);
     storage.sql.exec('DELETE FROM mod_claim_bundle WHERE claim = ?', id);
     storage.sql.exec('DELETE FROM mod_claim WHERE id = ?', id);
-    return { ok: true };
+    return { ok: true, deleted: dropUnclaimed(storage, held) };
   });
 }
 
@@ -171,5 +190,18 @@ export function finishBlobs(storage, hashes) {
   return storage.transactionSync(() => {
     for (const hash of list) storage.sql.exec('DELETE FROM mod_blob WHERE hash = ? AND deleting = 1', hash);
     return list.length;
+  });
+}
+
+/* Empties the whole index. Only the maintainer's reset route calls it, after deleting
+ * every stored object. */
+export function resetRegistry(storage) {
+  return storage.transactionSync(() => {
+    const counts = {};
+    for (const table of ['mod_claim_bundle', 'mod_claim', 'mod_bundle_blob', 'mod_bundle', 'mod_blob']) {
+      counts[table] = rows(storage, 'SELECT count(*) AS n FROM ' + table)[0].n;
+      storage.sql.exec('DELETE FROM ' + table);
+    }
+    return counts;
   });
 }

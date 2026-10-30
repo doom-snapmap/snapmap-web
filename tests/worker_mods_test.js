@@ -19,6 +19,7 @@ const quotaModule = import(dataURL(read('quota_store.js')));
 const registryModule = import(dataURL(read('mods_registry_store.js')));
 
 const DAY = 86400000;
+const HOUR = 3600000;
 const MIB = 1024 * 1024;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 
@@ -99,6 +100,14 @@ function memoryBucket() {
     async delete(keys) {
       for (const key of [].concat(keys)) { log.push(['delete', key]); objects.delete(key); }
     },
+    async list({ prefix = '', limit = 1000, cursor } = {}) {
+      log.push(['list', prefix]);
+      const keys = [...objects.keys()].filter(key => key.startsWith(prefix)).sort();
+      const start = cursor ? Number(cursor) : 0;
+      const page = keys.slice(start, start + limit);
+      const truncated = start + limit < keys.length;
+      return { objects: page.map(key => ({ key })), truncated, cursor: truncated ? String(start + limit) : undefined };
+    },
   };
 }
 
@@ -135,6 +144,7 @@ async function modsEnv(extra = {}) {
           release: async (id, hash) => registry.releaseClaim(storage, id, hash),
           purgeBundles: async limit => registry.purgeBundles(storage, clock.now(), limit),
           purgeBlobs: async limit => registry.purgeBlobs(storage, clock.now(), limit),
+          reset: async () => registry.resetRegistry(storage),
           finishBlobs: async hashes => registry.finishBlobs(storage, hashes),
         };
       },
@@ -643,20 +653,20 @@ test('claim, re-claim with the secret, and release with wrong and right secrets'
   assert.equal((await fetchWorker(env, postJson('/mods/release', { claim: 'nothex', secret }))).status, 400);
   const released = await fetchWorker(env, postJson('/mods/release', { claim, secret }));
   assert.equal(released.status, 204);
-  assert.equal(claims(env, second.hash), 0);
+  assert.equal(claims(env, second.hash), undefined, 'its last release removes the bundle from the index');
   assert.equal(claims(env, first.hash), 1);
   assert.equal((await fetchWorker(env, postJson('/mods/release', { claim, secret }))).status, 404);
 });
 
-test('serving is gated by claim count once the seven-day window has passed', async () => {
+test('serving is gated by claim count once the one-hour upload window has passed', async () => {
   const env = await modsEnv();
   const { first, second } = await publishTwoBundles(env);
   const get = route => fetchWorker(env, call('GET', route));
   assert.equal((await get('/mods/bundle/' + first.hash)).status, 200, 'fresh bundle serves unclaimed');
   assert.equal((await get('/mods/blob/' + sha(blobA))).status, 200, 'fresh blob serves unclaimed');
 
-  env.clock.offset = 8 * DAY;
-  for (const object of env.MODS.objects.values()) object.uploaded = new Date(Date.now() - 8 * DAY);
+  env.clock.offset = 2 * HOUR;
+  for (const object of env.MODS.objects.values()) object.uploaded = new Date(Date.now() - 2 * HOUR);
   assert.equal((await get('/mods/bundle/' + first.hash)).status, 404);
   assert.equal((await fetchWorker(env, call('HEAD', '/mods/bundle/' + first.hash))).status, 404);
   assert.equal((await get('/mods/blob/' + sha(blobA))).status, 404);
@@ -668,9 +678,15 @@ test('serving is gated by claim count once the seven-day window has passed', asy
   assert.equal((await get('/mods/blob/' + sha(blobA))).status, 404, 'blob named only by the unclaimed bundle');
   assert.equal((await fetchWorker(env, call('HEAD', '/mods/blob/' + sha(blobC)))).status, 200);
 
+  env.MODS.log.length = 0;
   assert.equal((await fetchWorker(env, postJson('/mods/release', { claim, secret }))).status, 204);
   assert.equal((await get('/mods/bundle/' + second.hash)).status, 404);
   assert.equal((await get('/mods/blob/' + sha(blobC))).status, 404);
+  const gone = env.MODS.log.filter(([op]) => op === 'delete').map(([, key]) => key);
+  assert.ok(gone.includes('bundle/' + second.hash), 'the last release deletes the bundle object at once');
+  assert.ok(gone.includes('blob/' + sha(blobC)), 'and sweeps the blob only it named');
+  assert.ok(!env.MODS.objects.has('bundle/' + second.hash));
+  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM mod_bundle WHERE hash = ?', second.hash).toArray()[0].n, 0);
 
   assert.equal((await fetchWorker(env, putBundleRequest(first.text, first.hash))).status, 200);
   assert.equal((await get('/mods/bundle/' + first.hash)).status, 200, 're-upload reopens the claim window');
@@ -685,7 +701,7 @@ test('purge deletes unclaimed bundles before blobs and keeps blobs a claimed bun
   await storeBlobs(env, orphan);
 
   assert.deepEqual(await purgeMods(env), { bundles: 0, blobs: 0 }, 'nothing is purged inside the window');
-  env.clock.offset = 8 * DAY;
+  env.clock.offset = 2 * HOUR;
   env.MODS.log.length = 0;
   assert.deepEqual(await purgeMods(env), { bundles: 1, blobs: 2 });
   const deletes = env.MODS.log.filter(([op]) => op === 'delete').map(([, key]) => key);
@@ -696,12 +712,12 @@ test('purge deletes unclaimed bundles before blobs and keeps blobs a claimed bun
   assert.deepEqual(await (await fetchWorker(env, postJson('/mods/missing', { blobs: [sha(blobA), sha(blobB)] }))).json(),
     { missing: [sha(blobA)] });
 
-  assert.equal((await fetchWorker(env, postJson('/mods/release', { claim, secret }))).status, 204);
   env.MODS.log.length = 0;
-  assert.deepEqual(await purgeMods(env), { bundles: 1, blobs: 2 });
+  assert.equal((await fetchWorker(env, postJson('/mods/release', { claim, secret }))).status, 204);
   const order = env.MODS.log.filter(([op]) => op === 'delete').map(([, key]) => key.split('/')[0]);
-  assert.deepEqual(order, ['bundle', 'blob', 'blob']);
+  assert.deepEqual(order, ['bundle', 'blob', 'blob'], 'the release itself deletes the bundle, then the blobs nothing names');
   assert.equal(env.MODS.objects.size, 0);
+  assert.deepEqual(await purgeMods(env), { bundles: 0, blobs: 0 }, 'nothing is left for the purge');
   assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM mod_blob').toArray()[0].n, 0);
 });
 
@@ -709,7 +725,7 @@ test('blobs marked for purge read missing, refuse new bundles and ask uploads to
   const registry = await registryModule;
   const env = await modsEnv();
   await storeBlobs(env, blobA);
-  env.clock.offset = 8 * DAY;
+  env.clock.offset = 2 * HOUR;
   assert.deepEqual(registry.purgeBlobs(env.registryStorage, env.clock.now(), 10), [sha(blobA)]);
   assert.deepEqual(await (await fetchWorker(env, postJson('/mods/missing', { blobs: [sha(blobA)] }))).json(), { missing: [sha(blobA)] });
   const { text, hash } = bundleOf(sampleManifest([declFile('alex.pink-imp', 'pink_imp', blobA)]));
@@ -741,4 +757,24 @@ test('mod routes keep the site CORS allowlist and need no Origin', async () => {
   const unconfigured = await modsEnv();
   delete unconfigured.MODS;
   assert.equal((await fetchWorker(unconfigured, call('GET', '/mods/blob/' + sha(blobA)))).status, 503);
+});
+
+test('the maintainer reset route is hidden without the secret and empties the store with it', async () => {
+  const env = await modsEnv();
+  await publishTwoBundles(env);
+  await (await fetchWorker(env, postJson('/mods/claim', { ref: 'item-3', bundles: [[...env.MODS.objects.keys()].find(k => k.startsWith('bundle/')).slice(7)] }))).json();
+  assert.equal((await fetchWorker(env, call('POST', '/mods/admin/reset'))).status, 404, 'no secret configured');
+  env.MODS_ADMIN_TOKEN = 'correct horse battery staple';
+  assert.equal((await fetchWorker(env, call('POST', '/mods/admin/reset'))).status, 403);
+  assert.equal((await fetchWorker(env, call('POST', '/mods/admin/reset', { headers: { Authorization: 'Bearer nope' } }))).status, 403);
+  assert.equal((await fetchWorker(env, call('GET', '/mods/admin/reset'))).status, 405);
+  const response = await fetchWorker(env, call('POST', '/mods/admin/reset', { headers: { Authorization: 'Bearer correct horse battery staple' } }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.deleted, { blobs: 3, bundles: 2 });
+  assert.equal(body.index.mod_claim, 1);
+  assert.equal(env.MODS.objects.size, 0);
+  for (const table of ['mod_blob', 'mod_bundle', 'mod_bundle_blob', 'mod_claim', 'mod_claim_bundle']) {
+    assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM ' + table).toArray()[0].n, 0, table);
+  }
 });
