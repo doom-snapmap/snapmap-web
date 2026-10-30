@@ -378,13 +378,27 @@ test('bundle PUT refuses mismatch, non-canonical text, missing blobs and every m
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/X.json')] }, /lowercase/);
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.exe')] }, /extension not allowed/);
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.bswf')] }, /extension not allowed/);
-  for (const request of ['generated/swf/mods/alex.pink-imp/x.bswf', 'generated/spirv/mods/alex.pink-imp/x.cspv', 'generated/discreteanimation/mods/alex.pink-imp/x.dmodel']) {
-    const b = bundleOf({ ...good, files: [withRequest(request)] });
-    assert.equal((await fetchWorker(env, putBundleRequest(b.text, b.hash))).status, 201, request + ' is accepted');
+  {
+    /* One accepted PUT covers the newer kinds: the per-address upload budget is shared with the rules below. */
+    const kinds = ['generated/swf/mods/alex.pink-imp/x.bswf', 'generated/spirv/mods/alex.pink-imp/x.cspv', 'generated/discreteanimation/mods/alex.pink-imp/x.dmodel'];
+    const b = bundleOf({ ...good, files: [file, ...kinds.map(request => withRequest(request)),
+      { path: 'assets/mods/alex.pink-imp/pointer.tome', request: 'mods/alex.pink-imp/pointer.tome', provides: { type: 'file', name: 'mods/alex.pink-imp/pointer.tome' },
+        stock: { source: 'generated/decls/entitydef/ai/demon/imp.decl', sha256: 'ab'.repeat(32) } }] });
+    assert.equal((await fetchWorker(env, putBundleRequest(b.text, b.hash))).status, 201, 'movies, compute stages, dmodels and a stock pointer are accepted');
   }
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.json', { path: 'mods/alex.pink-imp/x.json' })] }, /path does not match/);
   await expectRule({ ...good, files: [{ ...file, provides: { type: 'entityDef', name: 'mods/alex.pink-imp/other' } }] }, /provides does not match/);
   await expectRule({ ...good, files: [{ ...file, extra: true }] }, /unknown file key/);
+  const pointer = (request, stock, extra = {}) => ({ path: 'assets/' + request, request, provides: { type: 'file', name: request }, stock, ...extra });
+  const goodStock = { source: 'generated/decls/entitydef/ai/demon/imp.decl', sha256: 'ab'.repeat(32) };
+  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', goodStock, { blob: 'cd'.repeat(32) })] }, /unknown file key blob/);
+  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', goodStock, { size: 1 })] }, /unknown file key size/);
+  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', { source: goodStock.source })] }, /bad stock pointer/);
+  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', { ...goodStock, extra: 1 })] }, /bad stock pointer/);
+  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', { ...goodStock, sha256: 'zz' })] }, /bad stock hash/);
+  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', { ...goodStock, source: '/abs/path.decl' })] }, /bad stock source/);
+  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', { ...goodStock, source: 'Upper/Case.decl' })] }, /bad stock source/);
+  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', goodStock, { extra: true })] }, /unknown file key/);
   await expectRule({ ...good, files: [{ ...file, size: 64 * MIB + 1 }] }, /file too large/);
 
   const stock = 'generated/decls/entitydef/monster/imp.decl';

@@ -35,6 +35,9 @@ const MAX_EXTRA_JSON = 256 * 1024;
 const EXTRA_KEY_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const EXTRA_OBJECT_KEYS = new Set(['strings', 'hud', 'legacy']);
 const FILE_KEYS = new Set(['path', 'blob', 'size', 'request', 'provides', 'needs']);
+/* A stock pointer names installed game content instead of carrying it: no blob, no size. */
+const STOCK_FILE_KEYS = new Set(['path', 'request', 'provides', 'needs', 'stock']);
+const STOCK_KEYS = new Set(['sha256', 'source']);
 
 /* ---------------- responses ---------------- */
 
@@ -190,7 +193,7 @@ export function validId(id) {
 /* Request paths are lowercase, relative and made of plain segments: no leading slash, no
  * backslash, no empty, "." or ".." segment, no segment ending in a dot or space, and a
  * whitelisted extension. */
-export function requestPathError(path) {
+export function requestPathError(path, options) {
   if (typeof path !== 'string' || path.length < 1 || path.length > 512) return 'bad request path';
   if (path.startsWith('/')) return 'absolute request path';
   if (path.includes('\\')) return 'backslash in request path';
@@ -203,6 +206,7 @@ export function requestPathError(path) {
   const last = segments[segments.length - 1];
   const dot = last.lastIndexOf('.');
   const ext = dot > 0 ? last.slice(dot + 1) : '';
+  if (options && options.extension === false) return null;
   if (ext === 'bswf') return path.startsWith('generated/swf/') ? null : 'extension not allowed';
   if (!EXTENSIONS.has(ext) && !/^baas_[a-z0-9]+$/.test(ext)) return 'extension not allowed';
   return null;
@@ -278,20 +282,33 @@ export function manifestError(manifest) {
   let total = 0;
   for (const file of manifest.files) {
     if (!plainObject(file)) return 'bad file entry';
-    for (const key of Object.keys(file)) if (!FILE_KEYS.has(key)) return 'unknown file key ' + key;
+    const stock = file.stock !== undefined;
+    for (const key of Object.keys(file)) if (!(stock ? STOCK_FILE_KEYS : FILE_KEYS).has(key)) return 'unknown file key ' + key;
     const { path, request } = file;
     if (typeof request !== 'string') return 'bad request path';
-    const error = requestPathError(request);
+    const error = requestPathError(request, { extension: !stock });
     if (error) return error + ': ' + request.slice(0, 200);
     if (path !== 'assets/' + request) return 'path does not match request: ' + request.slice(0, 200);
     if (paths.has(path)) return 'duplicate path: ' + path.slice(0, 200);
     paths.add(path);
     requests.add(request);
-    if (typeof file.blob !== 'string' || !HEX64.test(file.blob)) return 'bad blob hash';
-    if (!Number.isSafeInteger(file.size) || file.size < 0) return 'bad size';
-    if (file.size > MAX_BLOB) return 'file too large: ' + request.slice(0, 200);
-    total += file.size;
-    if (total > MAX_TOTAL) return 'bundle too large';
+    if (stock) {
+      /* blob and size are not stock keys, so a pointer that carries them is refused above. */
+      const pointer = file.stock;
+      if (!plainObject(pointer)) return 'bad stock pointer: ' + request.slice(0, 200);
+      const keys = Object.keys(pointer);
+      if (keys.length !== 2 || !keys.every(key => STOCK_KEYS.has(key))) return 'bad stock pointer: ' + request.slice(0, 200);
+      if (typeof pointer.sha256 !== 'string' || !HEX64.test(pointer.sha256)) return 'bad stock hash: ' + request.slice(0, 200);
+      if (typeof pointer.source !== 'string' || pointer.source.length > 400) return 'bad stock source: ' + request.slice(0, 200);
+      const sourceError = requestPathError(pointer.source, { extension: false });
+      if (sourceError) return 'bad stock source: ' + request.slice(0, 200);
+    } else {
+      if (typeof file.blob !== 'string' || !HEX64.test(file.blob)) return 'bad blob hash';
+      if (!Number.isSafeInteger(file.size) || file.size < 0) return 'bad size';
+      if (file.size > MAX_BLOB) return 'file too large: ' + request.slice(0, 200);
+      total += file.size;
+      if (total > MAX_TOTAL) return 'bundle too large';
+    }
     if (!logicalRef(file.provides)) return 'bad provides: ' + request.slice(0, 200);
     const expected = logicalName(request);
     if ((expected.type !== null && file.provides.type.toLowerCase() !== expected.type.toLowerCase()) ||
@@ -445,9 +462,10 @@ async function putBundle(req, env, hash) {
   if (text !== canonical && !(manifest.bundle !== undefined && text === canonicalText(manifest, true))) {
     return refuse('body is not the canonical manifest text', 422);
   }
-  const blocked = [...new Set(manifest.files.map(file => file.blob))].filter(blob => blockedSet(env).has(blob));
+  const carried = manifest.files.filter(file => file.blob !== undefined);
+  const blocked = [...new Set(carried.map(file => file.blob))].filter(blob => blockedSet(env).has(blob));
   if (blocked.length) return blockedResponse(blocked);
-  const registered = await registry(env, 'registerBundle', hash, manifest.files.map(file => ({ blob: file.blob, size: file.size })));
+  const registered = await registry(env, 'registerBundle', hash, carried.map(file => ({ blob: file.blob, size: file.size })));
   if (registered.missing?.length) {
     return refuse('missing blobs', 409, { missing: registered.missing.slice(0, MISSING_SHOWN), missingCount: registered.missing.length });
   }
