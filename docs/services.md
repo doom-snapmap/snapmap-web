@@ -2,7 +2,9 @@
 
 The services behind the website and its API, who holds their credentials, and
 what a fork must provision. None of them is billed today; hosting charges depend
-on the account plan and usage.
+on the account plan and usage. The mod store is the first service whose cost grows
+with community use; at Cloudflare's listed R2 prices it is expected to cost dollars
+per month at plausible scale.
 
 | Service | Purpose | Credentials or bindings | Without it |
 |---|---|---|---|
@@ -14,6 +16,9 @@ on the account plan and usage.
 | Workers KV | Sessions and OAuth state | `SESSIONS` binding | Sign-in and authenticated routes fail. |
 | SQLite Durable Objects | Per-account write quotas | `WRITE_QUOTAS` binding and its migration | Authenticated writes fail closed with HTTP 503. |
 | R2 | Screenshot uploads | `MEDIA` binding | Uploads and media retrieval fail. |
+| R2 (mod store) | Anonymous Snapmap+ mod blobs and bundle manifests, bucket `snapmap-plus-mods`; billed per use for storage, Class A writes and Class B reads, with free egress | `MODS` binding | Players cannot fetch the mods a map needs; installed mods and vanilla maps are unaffected. |
+| SQLite Durable Object (mod index) | Index of stored mod objects and their anonymous claims; per-address limits use `WRITE_QUOTAS` | `MOD_REGISTRY` binding and its `v2-mod-registry` migration; optional secret `MODS_ADDRESS_KEY` | Mod store routes fail closed with HTTP 503. |
+| Workers Cron Trigger | Daily purge of unclaimed mod objects older than seven days | `[triggers]` in `api/wrangler.toml` | Unclaimed objects stay stored and unserved. |
 | Turnstile | Optional write challenge | Worker secret `TURNSTILE_SECRET` and matching site setup | The Worker skips the challenge when the secret is absent. |
 
 ## DNS

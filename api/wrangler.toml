@@ -22,3 +22,26 @@ class_name = "CommunityQuota"
 [[migrations]]
 tag = "v1-write-quotas"
 new_sqlite_classes = ["CommunityQuota"]
+
+# Anonymous mod asset store: blob/<sha256> and bundle/<hash>, served through /mods/*.
+# Provisioned by the maintainer (npx wrangler r2 bucket create snapmap-plus-mods).
+[[r2_buckets]]
+bucket_name = "snapmap-plus-mods"
+binding = "MODS"
+
+# Single index of stored blobs and bundles plus their anonymous claims.
+[[durable_objects.bindings]]
+name = "MOD_REGISTRY"
+class_name = "ModRegistry"
+
+[[migrations]]
+tag = "v2-mod-registry"
+new_sqlite_classes = ["ModRegistry"]
+
+# Takedown list: JSON array of blocked blob and bundle hashes; edit and redeploy to block.
+[vars]
+MODS_BLOCKED = "[]"
+
+# Daily purge of unclaimed mod objects older than seven days (scheduled handler in worker.js).
+[triggers]
+crons = ["23 4 * * *"]

@@ -1,10 +1,13 @@
 /* Snapmap+ website API: GitHub Discussions, OAuth sessions and screenshot uploads.
  * Reads use an App token; writes use the signed-in user token held in SESSIONS KV.
  * The browser receives only an opaque session ID. MEDIA R2 stores uploaded images.
+ * Paths under /mods are the anonymous mod asset store in mods_store.js.
  * See README.md for setup, routes and operational limits. */
 
 import { RequestError, readBody, readJsonObject } from './request_body.js';
+import { handleMods, purgeMods } from './mods_store.js';
 export { CommunityQuota } from './quota.js';
+export { ModRegistry } from './mods_registry.js';
 
 const REPO_OWNER = 'doom-snapmap';
 const REPO_NAME = 'snapmap-web';
@@ -771,6 +774,8 @@ async function handleRequest(req, env) {
     const url = new URL(req.url);
     const path = url.pathname.replace(/\/+$/, '') || '/';
 
+    if (path === '/mods' || path.startsWith('/mods/')) return withCors(req, await handleMods(req, env, path));
+
     /* browser-navigation endpoints (no CORS needed) */
     if (req.method === 'GET' && path === '/') {
       return new Response('snapmap-plus community service: OK (api.snapmapplus.com)\n', { headers: { 'Content-Type': 'text/plain' } });
@@ -854,5 +859,8 @@ export default {
       return withCors(req, json({ error: error instanceof RequestError ? error.message : 'service unavailable' },
                                error instanceof RequestError ? error.status : 503));
     }
+  },
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(purgeMods(env));
   },
 };

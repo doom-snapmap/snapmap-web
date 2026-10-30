@@ -35,6 +35,7 @@ Run the Worker tests from the repository root with Node 22.13 or newer:
 ```text
 node tests/worker_body_test.js
 node tests/worker_quota_test.js
+node tests/worker_mods_test.js
 npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0
 node tests/worker_runtime_test.js build/worker-tests/node_modules/miniflare
 ```

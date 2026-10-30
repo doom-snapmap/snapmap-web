@@ -25,6 +25,7 @@ jobs:
         run: |
           node tests/worker_body_test.js
           node tests/worker_quota_test.js
+          node tests/worker_mods_test.js
       - name: Local runtime tests
         run: |
           npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0

@@ -22,11 +22,15 @@ function streamed(chunks, declared) {
   return { body, headers, pulls: () => pulls, cancelled: () => cancelled };
 }
 
+const modsSource = fs.readFileSync(path.join(root, 'api/mods_store.js'), 'utf8').replace('./request_body.js', bodyURL);
+const modsURL = 'data:text/javascript;base64,' + Buffer.from(modsSource).toString('base64');
+
 async function loadWorker(name) {
   let source = fs.readFileSync(path.join(root, name, 'worker.js'), 'utf8');
-  source = source.replace('./request_body.js', bodyURL);
-  // The Cloudflare-only class export is exercised by worker_runtime_test.js.
+  source = source.replace('./request_body.js', bodyURL).replace('./mods_store.js', modsURL);
+  // The Cloudflare-only class exports are exercised by worker_runtime_test.js.
   source = source.replace("export { CommunityQuota } from './quota.js';", '');
+  source = source.replace("export { ModRegistry } from './mods_registry.js';", '');
   return (await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'))).default;
 }
 
