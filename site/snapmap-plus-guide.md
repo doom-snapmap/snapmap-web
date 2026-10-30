@@ -71,8 +71,8 @@ is touched, and the installer keeps a record so uninstall reverses exactly what 
 are separate: Snapmap+ creates `%LOCALAPPDATA%\snapmap-plus\config.json` the first time it starts,
 rather than shipping one in the installer.
 
-<details>
-<summary>Still on the DOOM version from before the April 2024 patch? (no longer supported)</summary>
+<details class="legacy-note" markdown="1">
+<summary><span class="legacy-tag">Legacy</span> Still on the DOOM version from before the April 2024 patch? No longer supported.</summary>
 
 Earlier Snapmap+ releases needed DOOM downgraded to the Steam depot from before the April 2024 patch.
 That is no longer the case, and that version of the game is no longer supported: new Snapmap+ releases
@@ -92,7 +92,6 @@ reference only:
 
 Multiplayer and co-op matchmaking with other players does not work on that depot, and Verify integrity
 in Steam pulls the game back to the current version.
-
 </details>
 
 ---

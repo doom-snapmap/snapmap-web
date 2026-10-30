@@ -1654,6 +1654,63 @@ dialog.smp-modal[open] { animation: modal-in 0.18s cubic-bezier(0.22, 1, 0.36, 1
   overflow-wrap: anywhere; /* let long unbroken paths wrap instead of scrolling the page */
 }
 
+/* A collapsed legacy note: a disclaimer about the game version that is no longer
+   supported. Muted, dashed, with a tag on its summary; the content renders as
+   ordinary guide prose once opened. */
+.guide-doc details.legacy-note {
+  margin: 26px 0;
+  padding: 0 18px;
+  border: 1px dashed var(--line);
+  border-left: 3px solid var(--muted);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 15px;
+}
+.guide-doc details.legacy-note > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  color: var(--ink);
+  font-weight: 600;
+}
+.guide-doc details.legacy-note > summary::-webkit-details-marker { display: none; }
+.guide-doc details.legacy-note > summary::after {
+  content: "";
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform 160ms ease;
+  flex: none;
+}
+.guide-doc details.legacy-note[open] > summary::after { transform: rotate(-135deg); }
+.guide-doc details.legacy-note[open] > summary {
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 10px;
+}
+.guide-doc details.legacy-note .legacy-tag {
+  font-family: var(--display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--argent-hi);
+  border: 1px solid var(--argent-faint);
+  background: var(--argent-faint);
+  padding: 2px 7px;
+  flex: none;
+}
+.guide-doc details.legacy-note p,
+.guide-doc details.legacy-note li { color: var(--muted); }
+.guide-doc details.legacy-note strong { color: var(--ink); }
+.guide-doc details.legacy-note code { overflow-wrap: anywhere; }
+.guide-doc details.legacy-note > :last-child { margin-bottom: 14px; }
+
 .guide-doc table {
   display: block;
   overflow-x: auto;
