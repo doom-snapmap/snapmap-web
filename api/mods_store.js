@@ -27,7 +27,7 @@ const ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
 const SEGMENT_RE = /^[a-z0-9_.~$#@+=,()&!' -]+$/;
 const CVAR_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const TYPE_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
-const EXTENSIONS = new Set(['decl', 'bmd6model', 'bmd6skl', 'bmd6anim', 'bimage', 'bmodel', 'bcm', 'bnk', 'json', 'bin', 'vspv', 'fspv', 'mrpr']);
+const EXTENSIONS = new Set(['decl', 'bmd6model', 'bmd6skl', 'bmd6anim', 'bimage', 'bmodel', 'bcm', 'bnk', 'json', 'bin', 'vspv', 'fspv', 'cspv', 'mrpr']);
 const TOP_KEYS = new Set(['format', 'id', 'build', 'version', 'name', 'author', 'homepage', 'requirements', 'shadows', 'extra', 'files', 'bundle']);
 /* Descriptor keys the builder preserves verbatim (strings, hud, legacy, composes, ...). */
 const MAX_EXTRA_KEYS = 64;
@@ -203,6 +203,7 @@ export function requestPathError(path) {
   const last = segments[segments.length - 1];
   const dot = last.lastIndexOf('.');
   const ext = dot > 0 ? last.slice(dot + 1) : '';
+  if (ext === 'bswf') return path.startsWith('generated/swf/') ? null : 'extension not allowed';
   if (!EXTENSIONS.has(ext) && !/^baas_[a-z0-9]+$/.test(ext)) return 'extension not allowed';
   return null;
 }

@@ -377,6 +377,11 @@ test('bundle PUT refuses mismatch, non-canonical text, missing blobs and every m
   await expectRule({ ...good, files: [withRequest('mods\\alex.pink-imp\\x.json')] }, /backslash/);
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/X.json')] }, /lowercase/);
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.exe')] }, /extension not allowed/);
+  await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.bswf')] }, /extension not allowed/);
+  for (const request of ['generated/swf/mods/alex.pink-imp/x.bswf', 'generated/spirv/mods/alex.pink-imp/x.cspv']) {
+    const b = bundleOf({ ...good, files: [withRequest(request)] });
+    assert.equal((await fetchWorker(env, putBundleRequest(b.text, b.hash))).status, 201, request + ' is accepted');
+  }
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.json', { path: 'mods/alex.pink-imp/x.json' })] }, /path does not match/);
   await expectRule({ ...good, files: [{ ...file, provides: { type: 'entityDef', name: 'mods/alex.pink-imp/other' } }] }, /provides does not match/);
   await expectRule({ ...good, files: [{ ...file, extra: true }] }, /unknown file key/);
