@@ -6,20 +6,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Snapmap+ — the DOOM (2016) SnapMap editor, unchained</title>
-<meta name="description" content="Snapmap+ is a free, open-source mod for DOOM (2016) SnapMap: edit every entity property, bypass editor limits, and place anything in the engine — while your maps stay playable for everyone, consoles included.">
-<meta name="keywords" content="Snapmap+, snapmap plus, DOOM 2016, DOOM SnapMap, SnapMap editor, DOOM mod, DOOM modding, snapmap mod, snapmap-plus, level editor">
+<meta name="description" content="Snapmap+ is a free, open-source mod for DOOM (2016) SnapMap: edit every entity property, bypass editor limits, place anything in the engine, and bring campaign bosses, weapons and arenas into your maps with mods that travel with the map.">
+<meta name="keywords" content="Snapmap+, snapmap plus, DOOM 2016, DOOM SnapMap, SnapMap editor, DOOM mod, DOOM modding, snapmap mod, snapmap mods, cyberdemon snapmap, spider mastermind snapmap, snapmap-plus, level editor">
 <meta name="author" content="Snapmap+ contributors">
 <link rel="canonical" href="https://www.snapmapplus.com/">
 <link rel="icon" type="image/png" href="https://github.com/doom-snapmap.png?size=64">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Snapmap+">
 <meta property="og:title" content="Snapmap+ — the DOOM (2016) SnapMap editor, unchained">
-<meta property="og:description" content="A free, open-source mod that opens up DOOM (2016) SnapMap: full decl editing, no editor limits, anything the engine knows is placeable — and maps stay playable for everyone.">
+<meta property="og:description" content="A free, open-source mod that opens up DOOM (2016) SnapMap: full decl editing, no editor limits, anything the engine knows is placeable, and mods that put campaign bosses in your maps and travel with them.">
 <meta property="og:url" content="https://www.snapmapplus.com/">
 <meta property="og:image" content="https://www.snapmapplus.com/images/snapmap-window-and-doom.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Snapmap+ — the DOOM (2016) SnapMap editor, unchained">
-<meta name="twitter:description" content="A free, open-source mod that opens up DOOM (2016) SnapMap — full decl editing, no editor limits, maps stay playable for everyone.">
+<meta name="twitter:description" content="A free, open-source mod that opens up DOOM (2016) SnapMap — full decl editing, no editor limits, and mods that bring campaign bosses into your maps.">
 <meta name="twitter:image" content="https://www.snapmapplus.com/images/snapmap-window-and-doom.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,8 +39,10 @@
           <h1>The SnapMap editor, <em>unchained</em>.</h1>
           <p class="lede">
             Edit every property the engine knows. Bypass the stock editor's size, name, and palette
-            limits. Place entities SnapMap was never built to expose. Your maps stay fully playable
-            for everyone &mdash; console players included, nothing to install on their end.
+            limits. Place entities SnapMap was never built to expose. Drop in mods that put the
+            Cyberdemon, the Hell Guards and the Spider Mastermind in your Toybox &mdash; and let them
+            travel with your published map, so other Snapmap+ players download them when they play it.
+            Maps without mods stay fully playable for everyone, console players included.
           </p>
           <div class="cta-row">
             <a class="btn btn-primary" data-dl href="https://github.com/doom-snapmap/snapmap-plus/releases">
@@ -193,6 +195,27 @@
 
       <div class="feature-row">
         <div class="feature-copy">
+          <h3>Mods: campaign bosses, weapons and arenas in your Toybox.</h3>
+          <p>
+            A mod is a folder of game content dropped into your Snapmap+ mods folder. Install one and
+            its demons, weapons, props or whole multiplayer arenas appear in DOOM's own Toybox with
+            their names and descriptions, ready to place. Publish a map that uses them and the mods
+            travel with it: other Snapmap+ players are offered the download when they open your map.
+          </p>
+          <ul class="feature-points">
+            <li>Cyberdemon, Hell Guards and Spider Mastermind, placeable and fighting</li>
+            <li>The Mods tab shows what each mod adds, what your map uses, and removes either cleanly</li>
+            <li>Edit a mod and hit refresh &mdash; the running game picks it up, no restart</li>
+          </ul>
+        </div>
+        <figure class="shot">
+          <img src="images/mods-toybox-demons.jpg" alt="DOOM's Toybox showing the Hell Guard, Cyberdemon and Spider Mastermind tiles added by mods, with a Hell Guard preview in the room" loading="lazy">
+          <figcaption>Mod demons in DOOM's own Toybox, with names, descriptions and placement previews.</figcaption>
+        </figure>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-copy">
           <h3>Direct your map like a stage play.</h3>
           <p>
             Timelines are the engine's most powerful scripting entity &mdash; multiple actions on
@@ -218,6 +241,7 @@
 <div class="ln"><span class="prompt">&gt;</span> <span class="cmd">sh_target_any</span>           <span class="out">reveal the normally-hidden placeable decls in the palette</span></div>
 <div class="ln"><span class="prompt">&gt;</span> <span class="cmd">bss</span> / <span class="cmd">bsi</span> / <span class="cmd">bsf</span>         <span class="out">bulk-set a property across every stacked entity at once</span></div>
 <div class="ln"><span class="prompt">&gt;</span> <span class="cmd">sh_type</span> idPlayer -v     <span class="out">runtime class introspection &mdash; fields, offsets, enums</span></div>
+<div class="ln"><span class="prompt">&gt;</span> <span class="cmd">sh_mods</span> rescan          <span class="out">rebuild an edited mod and push it into the running game</span></div>
 <div class="ln"><span class="prompt">&gt;</span> <span class="cmd">sh_help</span>                 <span class="out">every command and cvar, described in one place</span></div>
         </div>
       </div>
@@ -276,6 +300,14 @@
         <figure class="shot">
           <img src="images/sh-target-any.jpg" alt="Hidden placeable entities revealed in the SnapMap palette by sh_target_any" loading="lazy">
           <figcaption><code>sh_target_any</code> &mdash; the hidden half of the palette, revealed.</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="images/mods-spider-mastermind.jpg" alt="The Spider Mastermind filling the editor view while its Toybox tile is selected" loading="lazy">
+          <figcaption>Mods &mdash; the Spider Mastermind, placed from the Toybox like any other demon.</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="images/mods-tab-dark.png" alt="The Mods tab: installed mods on the left, the selected mod's details on the right" loading="lazy">
+          <figcaption>The Mods tab &mdash; what each mod adds, what it needs, and what your map uses.</figcaption>
         </figure>
       </div>
     </div>

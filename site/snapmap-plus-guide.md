@@ -79,8 +79,9 @@ A few practical notes:
   Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps, prefabs and
   strings carry straight over: they are copied from the old `%USERPROFILE%\snaphak` folder into
   Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`). An old `overrides` folder is left where
-  it is (see [Packages](#packages)).
-- **Packages from an earlier release?** This release does not use them; see [Packages](#packages).
+  it is; its packages become mods the first time DOOM starts (see [Mods](#mods)).
+- **Packages from an earlier release?** They become mods automatically; see
+  [If you used packages before the April 2024 port](#if-you-used-packages-before-the-april-2024-port).
 - **Uninstalling:** `snapmap-plus uninstall` restores your DOOM folder to exactly what it was before.
   Your own Snapmap+ data (`config.json`, prefabs, rawmaps under `%LOCALAPPDATA%\snapmap-plus`) is left
   untouched.
@@ -92,9 +93,9 @@ Snapmap+ supports the current DOOM 2016 on Steam (the April 2024 update). The in
 which build you have before downloading anything; if your game is the older 2018 build, it installs
 v0.2.1-beta.19, the final Snapmap+ release for that build.
 
-What actually lands in your DOOM folder is small: `XINPUT1_4.dll` in the folder itself (`XINPUT1_3.dll`
-on the 2018 build), and
-`snapmap-plus-ui.dll` inside a `snapmap-plus\` subfolder. Everything is hash-verified before a single
+What actually lands in your DOOM folder is small: `XINPUT1_4.dll` in the folder itself and
+`snapmap-plus-ui-13954591.dll` inside a `snapmap-plus\` subfolder (on the 2018 build, the older
+`XINPUT1_3.dll` and `snapmap-plus-ui.dll` of v0.2.1-beta.19). Everything is checked before a single
 file is touched, and the installer keeps a record so uninstall reverses exactly what it placed. Your
 settings are separate: Snapmap+ creates `%LOCALAPPDATA%\snapmap-plus\config.json` the first time it
 starts, rather than shipping one in the installer.
@@ -655,6 +656,8 @@ description, installed under `%LOCALAPPDATA%\snapmap-plus\mods\`. Snapmap+ serve
 game in place of, or in addition to, the game's own archives, so a modded entity appears in the Toybox
 with a name and description and plays like any other.
 
+![DOOM's Toybox showing the Hell Guard, Cyberdemon and Spider Mastermind tiles added by mods](images/mods-toybox-demons.jpg)
+
 Mods run on the author's PC and on every player's PC. A map that uses mods needs Snapmap+ on each
 machine that plays it; console players and players without Snapmap+ cannot play it. Published maps
 that use mods carry the search tag **mods** so players can tell in advance.
@@ -687,10 +690,10 @@ Select a row to read about the mod:
   from your install.
 - **Requirements**: console settings the mod needs while active, and the reminder that every player
   needs Snapmap+ to play a map that uses it.
-- **Sharing**: how many of your published maps use it, when it was last built, and its bundle number,
-  which you can quote when asking for help.
+- **Sharing**: how many of your published maps use it, when it was last built, and an identifier you
+  can quote when asking for help.
 
-The head actions are **Verify** (rehash the mod's files), **Rebuild** (build it again from its folder)
+The head actions are **Verify** (check the mod's files), **Rebuild** (build it again from its folder)
 and **Uninstall**, described below.
 
 ### Editing a mod while the game runs
@@ -705,6 +708,8 @@ you saved with an earlier build of the mod keep working with the current one.
 ### The map window
 
 ![Map window: the open map's details and the mods it uses, each with a Remove from map button](images/mods-map-modal-dark.png)
+
+![Remove from map confirmation listing the entities that will be deleted, with Cancel and Delete from map](images/mods-remove-confirm-dark.png)
 
 The map icon in the left panel head opens a window about the map you have open: its name, saved-map id,
 whether it is published and whether its mods are on the server, whether it carries the **mods** search
@@ -721,6 +726,8 @@ removed, the window says the map is now vanilla: it plays without Snapmap+.
 
 ### Uninstalling a mod
 
+![Uninstall confirmation listing the map cleanup, the Toybox rows and the folder that will go](images/mods-uninstall-confirm-dark.png)
+
 **Uninstall**, in the details pane, removes a mod from this computer. If the open map uses it, the map is
 cleaned first with the same consequence list as above; then the mod's Toybox rows are removed from the
 editor and the folder goes: a folder Snapmap+ installed is deleted, a folder you made yourself is moved to
@@ -731,23 +738,23 @@ so. The Mods tab is refused these actions during Play or while a map is loading.
 ### Playing a map that uses mods
 
 Open the map as usual, from Community or My Maps. If it names a mod this machine does not have, DOOM's
-own Yes/No dialog names the mods and their total size. **Yes** downloads them from the Snapmap+ mod
-store, checks each file against its recorded hash, installs them and starts the map. **No** leaves the
-map unloaded and says which mod it needs. Joining a lobby asks the same way. A map whose mods are
+own Yes/No dialog names the mods and their total size. **Yes** downloads them, checks that every file
+arrived intact, installs them and starts the map. **No** leaves the map unloaded and says which mod it
+needs. Joining a lobby asks the same way. A map whose mods are
 already installed, and a map without mods, start exactly as before.
 
 ### Publishing a map that uses mods
 
-Publish from DOOM's editor as usual. Before the map reaches the map service, Snapmap+ uploads the mods
-the map uses to the mod store at `api.snapmapplus.com`, so other players can download them. The first
-time you publish a map with mods, the game asks once whether you agree to upload; **No** leaves the map
-unpublished. A map over the map service's 10 MB limit is refused before anything is sent.
+Publish from DOOM's editor as usual. Before the map goes up, Snapmap+ uploads the mods the map uses
+so other players can download them. The first time you publish a map with mods, the game asks once
+whether you agree to upload; **No** leaves the map unpublished. A map over SnapMap's 10 MB limit is
+refused before anything is sent.
 
-Plain saves never upload anything. Publishing the same map again after editing a mod sends the new build
-and replaces the old one on the server; players who already have the old build are offered the new one
-when they open the updated map. Unpublishing a map releases its mods, and a mod no published map uses
-any more is deleted from the server at once. Deleting a map from My Maps while its published copy stays
-available keeps its mods on the server.
+Plain saves never upload anything. Publishing the same map again after editing a mod sends the new
+version and replaces the old one; players who already have the old version are offered the new one when
+they open the updated map. Unpublishing a map takes its mods down with it unless another published map
+of yours still uses them. Deleting a map from My Maps while its published copy stays available keeps its
+mods available.
 
 To share a map without publishing it, `sh_mods export "<path.zip>"` writes the open map and the mods it
 uses into one ZIP, and `sh_mods import "<path.zip>"` on another machine installs those mods and stages
@@ -810,9 +817,9 @@ replacement is deliberate.
   `{"<request path>": {"source": "<installed path>"}}`.
 - Any other key of your own is kept as it is.
 
-When Snapmap+ builds the folder it adds one member, `"snapmap-plus"`, holding the list of files, their
-hashes, the bundle number and whether the mod verified. Leave it alone: it is rewritten on every build,
-and everything else in the file, your formatting included, is never touched. A folder that still uses
+When Snapmap+ builds the folder it adds one member, `"snapmap-plus"`, with its own record of the files
+and whether the mod checked out. Leave it alone: it is rewritten on every build, and everything else in
+the file, your formatting included, is never touched. A folder that still uses
 the older `package.json` name is converted to `mod.json` at its first build. The folder's name is yours
 to choose; the id inside `mod.json` is what identifies the mod.
 
@@ -859,7 +866,7 @@ Everything the Mods tab does is also a console command.
 | `sh_mods rescan` (alias `refresh`) | Reread `mods\`, rebuild changed folders, and push the changes into the running game; prints what was re-parsed, reloaded, and what still needs a restart. |
 | `sh_mods build "<folder>"` / `sh_mods rebuild "<folder>"` | Check one folder and write the `snapmap-plus` block of its `mod.json`; rebuild also rescans. |
 | `sh_mods install "<folder>"` | Copy a folder from anywhere into `mods\`, check it and serve it. |
-| `sh_mods verify "<folder>"` | Rehash one mod (a folder, an id or `id@version`). |
+| `sh_mods verify "<folder>"` | Check one mod's files (a folder, an id or `id@version`). |
 | `sh_mods map` | Show the open map's details and the mods it uses, with placed-entity counts. |
 | `sh_mods map remove "<id>" [--yes]` | Print what removing the mod from the open map would delete; `--yes` does it. |
 | `sh_mods uninstall "<id>" [--yes]` | Print what uninstalling the mod would do, map cleanup included; `--yes` does it. |
@@ -867,7 +874,6 @@ Everything the Mods tab does is also a console command.
 | `sh_mods palette rebuild` | Rebuild the editor's Toybox rows by hand (refresh does this for you). |
 | `sh_mods copystock "<engine path>" "<file>"` | Write an installed game file's bytes to a file. |
 | `sh_mods export "<path.zip>"` / `sh_mods import "<path.zip>"` | Write the open map with its mods to a ZIP, or install a ZIP's mods and stage its map. |
-| `sh_mods push` / `pull` / `release` / `retry` / `cancel` | Talk to the mod store directly; publishing does this for you. |
 | `sh_mods migrate [--again]` | Move `overrides\` packages into `mods\` again. |
 
 ---
