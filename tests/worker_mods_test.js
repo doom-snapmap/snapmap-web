@@ -362,7 +362,15 @@ test('bundle PUT refuses mismatch, non-canonical text, missing blobs and every m
   const rebuilt = bundleOf({ ...good, build: 2 });
   assert.notEqual(rebuilt.hash, ok.hash, 'build is part of the canonical text');
   await expectRule({ ...good, homepage: 'javascript:alert(1)' }, /bad homepage/);
-  await expectRule({ ...good, extra: 1 }, /unknown manifest key/);
+  await expectRule({ ...good, extra: 1 }, /bad extra/);
+  await expectRule({ ...good, extra: {} }, /bad extra/);
+  await expectRule({ ...good, extra: { 'Bad Key': 1 } }, /bad extra key/);
+  await expectRule({ ...good, extra: { legacy: 'x' } }, /bad extra legacy/);
+  await expectRule({ ...good, extra: { big: 'x'.repeat(256 * 1024) } }, /extra too large/);
+  await expectRule({ ...good, unknown: 1 }, /unknown manifest key/);
+  const withExtra = bundleOf({ ...good, extra: { legacy: { digest: '856c0b308aaa62e5' }, strings: { greet: 'hi' } } });
+  assert.notEqual(withExtra.hash, ok.hash, 'extra is part of the canonical text');
+  assert.equal((await fetchWorker(env, putBundleRequest(withExtra.text, withExtra.hash))).status, 201, 'extra is accepted');
   await expectRule({ ...good, files: [] }, /no files/);
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/../../x.json')] }, /path traversal/);
   await expectRule({ ...good, files: [withRequest('/mods/alex.pink-imp/x.json')] }, /absolute/);
