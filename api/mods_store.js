@@ -541,9 +541,9 @@ async function deleteReleased(env, hashes) {
 /* Deletes every stored blob and bundle and empties the index. Hidden unless the
  * MODS_ADMIN_TOKEN secret is set, and refused without exactly that bearer token. */
 async function postReset(req, env) {
-  const expected = env.MODS_ADMIN_TOKEN === undefined ? '' : String(env.MODS_ADMIN_TOKEN);
+  const expected = env.MODS_ADMIN_TOKEN === undefined ? '' : String(env.MODS_ADMIN_TOKEN).trim();   // a secret piped in keeps its newline
   if (!expected) { await discard(req); return refuse('not found', 404); }
-  const given = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  const given = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
   if (!given || !(await sameToken(given, expected))) { await discard(req); return refuse('forbidden', 403); }
   await discard(req);
   const deleted = { blobs: 0, bundles: 0 };
