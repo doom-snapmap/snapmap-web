@@ -379,6 +379,12 @@ test('bundle PUT refuses mismatch, non-canonical text, missing blobs and every m
   await expectRule({ ...good, files: [stockFile] }, /namespace/);
   await expectRule({ ...good, files: [withRequest('generated/image/models/monsters/imp/skin.bimage', { provides: { type: 'image', name: 'models/monsters/imp/skin' } })] }, /namespace/);
   await expectRule({ ...good, files: [withRequest('mods/other.mod/x.json')] }, /namespace/);
+  await expectRule({ ...good, files: [{ ...file, provides: { type: 'entityDef2', name: file.provides.name } }] }, /provides does not match/);
+  const material = 'generated/decls/material/mods/alex.pink-imp/skin.decl';
+  const materialFile = { ...file, path: 'assets/' + material, request: material, provides: { type: 'material', name: 'mods/alex.pink-imp/skin' } };
+  await expectRule({ ...good, files: [{ ...materialFile, provides: { type: 'material2', name: 'mods/alex.pink-imp/skin' } }] }, /provides does not match/);
+  const materialBundle = bundleOf({ ...good, files: [materialFile] });
+  assert.equal((await fetchWorker(env, putBundleRequest(materialBundle.text, materialBundle.hash))).status, 201, 'decl type is the folder name');
   await expectRule({ ...good, shadows: ['generated/decls/entitydef/monster/cacodemon.decl'] }, /shadow names no file/);
   await expectRule({ ...good, shadows: ['../x.decl'] }, /shadow: path traversal/);
 
@@ -404,6 +410,35 @@ test('bundle PUT refuses mismatch, non-canonical text, missing blobs and every m
 
   const big = await fetchWorker(env, call('PUT', '/mods/bundle/' + ok.hash, { body: new Uint8Array(MIB + 1) }));
   assert.equal(big.status, 413);
+});
+
+test('raw files of a dashed id may use the engine underscore spelling; decls keep the exact id', async () => {
+  const env = await modsEnv();
+  const mesh = Buffer.from('bmd6model bytes'), skin = Buffer.from('bimage bytes'), anim = Buffer.from('bmd6anim bytes');
+  await storeBlobs(env, blobA, mesh, skin, anim);
+  const raw = (request, bytes, type, name) => ({ path: 'assets/' + request, request, blob: sha(bytes), size: bytes.byteLength, provides: { type, name } });
+  const files = [
+    declFile('alex.r2-imp', 'r2_imp', blobA),
+    raw('generated/basemodel/md6/mods/alex.r2_imp/imp.bmd6model', mesh, 'baseModel', 'md6/mods/alex.r2_imp/imp.md6mesh'),
+    raw('generated/image/models/mods/alex.r2_imp/skin.bimage', skin, 'image', 'models/mods/alex.r2_imp/skin'),
+    raw('cooked/anim/md6/mods/alex.r2-imp/idle.bmd6anim', anim, 'anim', 'md6/mods/alex.r2-imp/idle.md6anim'),
+  ];
+  const manifest = { format: 1, id: 'alex.r2-imp', build: 1, name: 'R2 Imp', files };
+  const ok = bundleOf(manifest);
+  const stored = await fetchWorker(env, putBundleRequest(ok.text, ok.hash));
+  assert.equal(stored.status, 201, await stored.clone().text());
+
+  const refused = async (changed, pattern) => {
+    const { text, hash } = bundleOf({ ...manifest, files: changed });
+    const response = await fetchWorker(env, putBundleRequest(text, hash));
+    assert.equal(response.status, 422);
+    assert.match((await response.json()).error, pattern);
+  };
+  const underscoredDecl = 'generated/decls/entitydef/mods/alex.r2_imp/r2_imp.decl';
+  await refused([{ ...files[0], path: 'assets/' + underscoredDecl, request: underscoredDecl,
+    provides: { type: 'entityDef', name: 'mods/alex.r2_imp/r2_imp' } }], /namespace/);
+  await refused([raw('generated/basemodel/md6/mods/alex.r2.imp/imp.bmd6model', mesh, 'baseModel', 'md6/mods/alex.r2.imp/imp.md6mesh')], /namespace/);
+  await refused([raw('generated/basemodel/md6/mods/alex_r2_imp/imp.bmd6model', mesh, 'baseModel', 'md6/mods/alex_r2_imp/imp.md6mesh')], /namespace/);
 });
 
 /* ---------------- missing ---------------- */

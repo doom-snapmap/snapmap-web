@@ -283,7 +283,10 @@ export function manifestError(manifest) {
       return 'bad needs: ' + request.slice(0, 200);
     }
     if (!shadows.has(request)) {
-      const owned = expected.decl ? expected.name.startsWith('mods/' + id + '/') : ('/' + request).includes('/mods/' + id + '/');
+      /* Decls keep the exact id. Cooked raw names are derived by the engine with every
+       * "-" rewritten to "_", so either spelling of the id owns a raw file. */
+      const owned = expected.decl ? expected.name.startsWith('mods/' + id + '/')
+        : ['/mods/' + id + '/', '/mods/' + id.replaceAll('-', '_') + '/'].some(prefix => ('/' + request).includes(prefix));
       if (!owned) return 'outside the mods/' + id + '/ namespace and not a declared shadow: ' + request.slice(0, 200);
     }
   }
