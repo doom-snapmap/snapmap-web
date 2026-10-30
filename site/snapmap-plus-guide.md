@@ -31,34 +31,12 @@ Snapmap+ on the player's PC** and cannot be delivered to vanilla or console play
 
 ## Installing Snapmap+
 
-### Get the pre-patch DOOM files
-
-Snapmap+ currently targets the DOOM build from **before** the April 2024 patch — the patch changed
-enough of the engine's internals that Snapmap+ needs to be rebuilt against it, and that work is ongoing
-separately. Until then, you'll need to run DOOM on the previous Steam depot:
-
-1. Press **Windows Key + R**, then enter `steam://nav/console` to open the Steam console.
-2. In the Steam console, run:
-   ```
-   download_depot 379720 379721 2206249600939156631
-   ```
-3. Once it finishes, find the downloaded files under your Steam folder, typically:
-   `C:\Program Files (x86)\Steam\steamapps\content\app_379720\depot_379721`
-4. Copy those files into your DOOM install folder (e.g. `C:\Program Files (x86)\Steam\steamapps\common\DOOM`),
-   replacing everything when prompted.
-
-Online services (playing and publishing maps) still work on this depot. **Multiplayer/Coop matchmaking
-with other players does not** while you're on it.
-
-Running "Verify integrity of game files" in Steam will silently pull you back to the current (patched)
-build — if that happens, and you still have the Snapmap+ files installed, remove them first (see below),
-verify, then redo the depot-download steps above when you want to go back to editing.
-
-### Install Snapmap+ itself
+Snapmap+ works with DOOM (2016) as Steam installs it today. Nothing about your game needs to change
+first: no downgrade, no depot download, no special launch options.
 
 Download **`snapmap-plus.exe`** from the [Snapmap+ site](./) (or from the project's GitHub Releases page)
-and **double-click it**. It finds your DOOM 2016 install automatically by looking through your Steam
-libraries, asks you to confirm, and places the overlay. That's the whole install. (In the in-game
+and **double-click it**. It finds your DOOM install automatically by looking through your Steam
+libraries, asks you to confirm, and places its files. That's the whole install. (In the in-game
 console, Snapmap+'s commands and cvars all carry the short `sh_` prefix — `sh_help` lists them.)
 
 A few practical notes:
@@ -72,33 +50,50 @@ A few practical notes:
 - **Already installed?** Double-clicking `snapmap-plus.exe` again shows your installed version, tells you
   when a newer one is available (press Enter to update), and takes any command — `update`, `changelog`,
   `uninstall`, `status` — right there, no terminal needed.
-- **Updating later:** run `snapmap-plus update` — it updates both the overlay and `snapmap-plus.exe`
+- **Updating later:** run `snapmap-plus update` — it updates both Snapmap+ and `snapmap-plus.exe`
   itself. You never need to re-download anything from the site.
 - **Coming from the original SnapHak?** If your DOOM folder still has the original (closed-source)
   SnapHak in it, the installer notices, tells you, and removes its files as part of the install —
   Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps, prefabs and
   strings carry straight over: they are copied from the old `%USERPROFILE%\snaphak` folder into
-  Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`). An old `overrides` folder is left where
-  it is; its packages become mods the first time DOOM starts (see [Mods](#mods)).
-- **Packages from an earlier release?** They become mods automatically; see
-  [If you used packages before the April 2024 port](#if-you-used-packages-before-the-april-2024-port).
+  Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`).
+- **Packages from an earlier Snapmap+ release?** They become mods automatically the first time DOOM
+  starts; see [If you used packages before](#if-you-used-packages-before).
 - **Uninstalling:** `snapmap-plus uninstall` restores your DOOM folder to exactly what it was before.
-  Your own Snapmap+ data (`config.json`, prefabs, rawmaps under `%LOCALAPPDATA%\snapmap-plus`) is left
-  untouched.
+  Your own Snapmap+ data (`config.json`, prefabs, mods, rawmaps under `%LOCALAPPDATA%\snapmap-plus`) is
+  left untouched.
 - `snapmap-plus help` in a terminal lists everything else: `status`, `changelog`, `version`.
-  `status` and `version` also print your game's identity (`Game: DOOMx64vk.exe: DOOM 2016 build
-  13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)`), the same line the app puts on reports.
+  `status` and `version` also print your game's identity, the same line the app puts on reports.
 
-Snapmap+ supports the current DOOM 2016 on Steam (the April 2024 update). The installer checks
-which build you have before downloading anything; if your game is the older 2018 build, it installs
-v0.2.1-beta.19, the final Snapmap+ release for that build.
+What actually lands in your DOOM folder is small: `XINPUT1_4.dll` in the folder itself and one
+`snapmap-plus-ui-*.dll` inside a `snapmap-plus\` subfolder. Everything is checked before a single file
+is touched, and the installer keeps a record so uninstall reverses exactly what it placed. Your settings
+are separate: Snapmap+ creates `%LOCALAPPDATA%\snapmap-plus\config.json` the first time it starts,
+rather than shipping one in the installer.
 
-What actually lands in your DOOM folder is small: `XINPUT1_4.dll` in the folder itself and
-`snapmap-plus-ui-13954591.dll` inside a `snapmap-plus\` subfolder (on the 2018 build, the older
-`XINPUT1_3.dll` and `snapmap-plus-ui.dll` of v0.2.1-beta.19). Everything is checked before a single
-file is touched, and the installer keeps a record so uninstall reverses exactly what it placed. Your
-settings are separate: Snapmap+ creates `%LOCALAPPDATA%\snapmap-plus\config.json` the first time it
-starts, rather than shipping one in the installer.
+<details>
+<summary>Still on the DOOM version from before the April 2024 patch? (no longer supported)</summary>
+
+Earlier Snapmap+ releases needed DOOM downgraded to the Steam depot from before the April 2024 patch.
+That is no longer the case, and that version of the game is no longer supported: new Snapmap+ releases
+are built for the current game only. If you downgraded for an earlier release, run **Verify integrity
+of game files** in Steam to return to the current version, then install Snapmap+ as described above.
+
+If you choose to stay on the old depot anyway, the installer recognizes it and installs
+**v0.2.1-beta.19**, the last Snapmap+ release made for it, instead of the current one. That release
+receives no updates, has no mods system, and its maps cannot use mods. The old instructions, for
+reference only:
+
+1. Press **Windows Key + R**, then enter `steam://nav/console` to open the Steam console.
+2. In the Steam console, run `download_depot 379720 379721 2206249600939156631`.
+3. Find the downloaded files under your Steam folder, typically
+   `C:\Program Files (x86)\Steam\steamapps\content\app_379720\depot_379721`, and copy them into your
+   DOOM install folder, replacing everything when prompted.
+
+Multiplayer and co-op matchmaking with other players does not work on that depot, and Verify integrity
+in Steam pulls the game back to the current version.
+
+</details>
 
 ---
 
@@ -845,7 +840,7 @@ The full file format and every detail of what the game accepts are documented in
 repository's [capabilities](https://github.com/doom-snapmap/snapmap-plus/blob/main/docs/capabilities.md#mods)
 and [architecture](https://github.com/doom-snapmap/snapmap-plus/blob/main/docs/architecture.md#mods) pages.
 
-### If you used packages before the April 2024 port
+### If you used packages before
 
 Releases up to v0.2.1-beta.19 kept packages in `%LOCALAPPDATA%\snapmap-plus\overrides\`. The first
 start of this release moves every package there into `mods\`, once, each in its own folder with a
@@ -1403,5 +1398,5 @@ Nothing is sent unless you click Send — Snapmap+ makes no other network reques
 
 **Reporting without the app.** If you open an issue on GitHub yourself, say which DOOM build you are
 on: run `snapmap-plus status` in a terminal and paste its `Game:` line (for example
-`DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)`). If Snapmap+ will not install, say whether your game is
-the April 2024 update or the 2018 build.
+`DOOM 2016 build 13954591 (20240321-104810-ginger-fuchsia, Vulkan, 3d8b4393)`). If Snapmap+ will not install, paste what the
+installer printed.
