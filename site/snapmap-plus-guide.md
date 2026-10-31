@@ -588,7 +588,7 @@ restart the game; a filter shows every folder that has a match. **Shift-click** 
 **Ctrl-click** adds or removes one (folders too). With more than one prefab selected the details pane
 steps aside: drag the set onto a folder, or onto the blank space below the list to move it back to the
 root, and it moves in one go. Dragging a folder onto another folder moves its prefabs across. Selecting a
-prefab and clicking **Delete** removes it permanently; with several selected, the **Delete** key or the
+prefab and clicking **Delete** moves its file to the Windows Recycle Bin; with several selected, the **Delete** key or the
 right-click menu removes them all after one confirmation.
 
 Each prefab is one file under `%LOCALAPPDATA%\snapmap-plus\prefabs\`; its description, tags and the mods
