@@ -119,7 +119,7 @@ window to look at it can crash the game. Borderless and Windowed don't have that
 
 ### The window
 
-Snapmap+'s panel has five tabs — **Assets**, **Entities**, **Prefabs**, **Timelines**, and **Mods** — and a couple
+Snapmap+'s panel has five tabs — **Assets**, **Entities**, **Timelines**, **Prefabs**, and **Mods** — and a couple
 of controls that stay visible no matter which tab you're on:
 
 ![Snapmap+ full window: title bar, tabs, Camera Origin, View menu](images/window-tour-dark.png)
