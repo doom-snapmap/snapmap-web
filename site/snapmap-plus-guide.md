@@ -591,21 +591,25 @@ root, and it moves in one go. Dragging a folder onto another folder moves its pr
 prefab and clicking **Delete** removes it permanently; with several selected, the **Delete** key or the
 right-click menu removes them all after one confirmation.
 
-Prefabs are stored as individual files under `%LOCALAPPDATA%\snapmap-plus\prefabs\` — sharing one is just
-sending someone that file; they drop it into their own `prefabs` folder (or the matching subfolder, to
-land it in the same folder on their end) and it shows up in their list. You can drop a file into that
+Each prefab is one file under `%LOCALAPPDATA%\snapmap-plus\prefabs\`; its description, tags and the mods
+it uses are kept inside that file, so there is nothing else to keep track of. You can drop a file into that
 folder from Windows while Snapmap+ is already running — no restart needed, it picks the new prefab up
 right away.
 
-**Prefabs that use mods:** a prefab remembers the mods its entities or rooms come from. The list shows
-**Mods:** with their names, or **Needs mods:** when one is not installed, and the details pane lists each
-mod as Installed or Not installed. **Load / Place** checks first: if the mod store has the missing mods,
-the game asks whether to download them, then places the prefab and adds the mods to the open map (the
-Mods tab's **Remove from map** takes them out again); if the store does not have them, nothing is placed
-and the message names each mod. To share such a prefab, use **Export** in the details pane: it writes a
-`.zip` with the prefab and every mod it uses, and the **Import** button (or `sh_prefab import
-"<path.zip>"`) on the other machine installs the mods and adds the prefab to the list. Sending the
-prefab file alone does not carry its mods.
+**Sharing a prefab:** select it and click **Export** in the details pane. A Save As dialog opens, proposes
+`<name>.zip`, and writes the prefab with every mod it uses into that one `.zip` wherever you choose. Send
+that file. On the other end, **Import** at the top of the list opens a file dialog: pick the `.zip` (or,
+if it was already extracted, the `.json` inside the extracted folder) and Snapmap+ installs any mods they
+do not have yet and adds the prefab to their list. Importing the same export twice changes nothing; an
+export whose prefab has the same name but different contents lands as `<name> (2)`. The console does the
+same with `sh_prefab export "<name>" "<path.zip>"` and `sh_prefab import "<path.zip or path.json>"`.
+
+**Prefabs that use mods:** the list shows **Mods:** with their names, or **Needs mods:** when one is not
+installed, and the details pane lists each mod as Installed or Not installed. **Load / Place** checks
+first: if the mod store has the missing mods, the game asks whether to download them, then places the
+prefab and adds the mods to the open map (the Mods tab's **Remove from map** takes them out again); if
+the store does not have them, nothing is placed and the message names each mod and asks for the
+prefab's export. A prefab whose mods you already have places as any other.
 
 ---
 
