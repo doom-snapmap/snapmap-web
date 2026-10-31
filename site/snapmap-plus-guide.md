@@ -628,6 +628,10 @@ a rawmap is waiting.
 A save is refused when no map is open in the editor. A save is cancelled if you
 leave the map before it runs.
 
+A map that uses mods also gets a `.zip` beside its `.json` on every save, and
+**Load Rawmap...** opens either. Share the `.zip`; see
+[Sharing a map that uses mods](#sharing-a-map-that-uses-mods).
+
 Rawmaps are saved as compact JSON on one line. To save them with line breaks and
 indents, type `sh_pretty_on 1` in the console before you save. Type
 `sh_pretty_on 0` to go back to compact JSON.
@@ -750,9 +754,23 @@ they open the updated map. Unpublishing a map takes its mods down with it unless
 of yours still uses them. Deleting a map from My Maps while its published copy stays available keeps its
 mods available.
 
-To share a map without publishing it, `sh_mods export "<path.zip>"` writes the open map and the mods it
-uses into one ZIP, and `sh_mods import "<path.zip>"` on another machine installs those mods and stages
-the map. A plain rawmap names the mods a map needs but does not carry their files.
+### Sharing a map that uses mods
+
+If your map uses mods, share the `.zip`, not the `.json`. Every time you save a rawmap, Snapmap+ also
+saves a `.zip` next to it (for example `rawmap.zip` beside `rawmap.json`); you can also pick `.zip` in
+**File > Save Rawmap As...**. The `.zip` holds the map and every mod it uses, so send that one file. Your
+friend opens it the same way, with **File > Load Rawmap...**, and the mods install by themselves. A
+published map needs none of this: the game offers to download its mods when someone opens it.
+
+If you open a rawmap and see "This map was not loaded. It needs mods you do not have...", the map uses
+mods you don't have and that aren't available to download. The message names each one; ask the map's
+author to send you the map's `.zip`. When the mods are in the mod store, Snapmap+ offers to download them
+instead, just as it does for a published map.
+
+The console does the same: `sh_mods export "<path.zip>"` writes the open map and its mods into one ZIP,
+`sh_mods import "<path.zip>"` installs a ZIP's mods and stages its map, and `sh_rawmaps status` reports
+which files the last save wrote. A plain `.json` rawmap names the mods a map needs but does not carry
+their files.
 
 ### Authoring a mod
 
