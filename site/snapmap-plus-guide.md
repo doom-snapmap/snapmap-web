@@ -883,10 +883,13 @@ and [architecture](https://github.com/doom-snapmap/snapmap-plus/blob/main/docs/a
 
 ### If you used packages before
 
-Releases up to v0.2.1-beta.19 kept packages in `%LOCALAPPDATA%\snapmap-plus\overrides\`. The first
-start of this release moves every package there into `mods\`, once, each in its own folder with a
-`mod.json`, and records the outcome in `mods\snapmap-plus.json` and in the log. Nothing in `overrides\`
-is changed or deleted; once you are happy with the result you can delete it. Maps saved or published
+Releases up to v0.2.1-beta.19 kept packages in `%LOCALAPPDATA%\snapmap-plus\overrides\`. When the
+installer installs or updates Snapmap+ it runs its `snapmap-plus-store` tool, which moves every package
+there into `mods\`, once, each in its own folder with a `mod.json`, brings a mods folder of an earlier
+release to the current layout, and prints what it did. Nothing in `overrides\` is changed or deleted;
+once you are happy with the result you can delete it. DOOM itself never migrates anything at start; if
+the installer could not run the tool, close DOOM and run `snapmap-plus-store migrate
+"%LOCALAPPDATA%\snapmap-plus"` from the store folder. Maps saved or published
 with packages by those releases load with the matching mods. If you change `overrides\` later,
 `sh_mods migrate --again` repeats the move, and the Mods tab shows the migrate button while anything
 there is still pending.
