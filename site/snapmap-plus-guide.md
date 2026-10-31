@@ -765,12 +765,22 @@ arrived intact, installs them and starts the map. **No** leaves the map unloaded
 needs. Joining a lobby asks the same way. A map whose mods are
 already installed, and a map without mods, start exactly as before.
 
+A mod that only changes the editor (an author's editor overrides: wider property lists, extra Toybox
+rows and the like) is never installed for play. If a map published by an earlier release still lists one,
+the download reads its contents, installs nothing, and remembers it so the map plays without asking
+again; nothing of it lands in your mods folder.
+
 ### Publishing a map that uses mods
 
 Publish from DOOM's editor as usual. Before the map goes up, Snapmap+ uploads the mods the map uses
 so other players can download them. The first time you publish a map with mods, the game asks once
 whether you agree to upload; **No** leaves the map unpublished. A map over SnapMap's 10 MB limit is
 refused before anything is sent.
+
+What a map lists is what its placed entities need: the mod that provides an entity's definition, a model
+you set by path in an entity's properties (a mod that unlocks a stock model counts), and whatever those
+files need in turn. Your editor overrides are never listed: they change what you can set, not what plays,
+so a vanilla map stays vanilla however many editor mods you have installed.
 
 Plain saves never upload anything. Publishing the same map again after editing a mod sends the new
 version and replaces the old one; players who already have the old version are offered the new one when
