@@ -57,8 +57,8 @@ A few practical notes:
   Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps, prefabs and
   strings carry straight over: they are copied from the old `%USERPROFILE%\snaphak` folder into
   Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`).
-- **Packages from an earlier Snapmap+ release?** They become mods automatically the first time DOOM
-  starts; see [If you used packages before](#if-you-used-packages-before).
+- **Packages from an earlier Snapmap+ release?** The installer converts them into mods when it installs
+  or updates, with its `snapmap-plus-store` tool; see [If you used packages before](#if-you-used-packages-before).
 - **Uninstalling:** `snapmap-plus uninstall` restores your DOOM folder to exactly what it was before.
   Your own Snapmap+ data (`config.json`, prefabs, mods, rawmaps under `%LOCALAPPDATA%\snapmap-plus`) is
   left untouched.
@@ -676,11 +676,12 @@ that use mods carry the search tag **mods** so players can tell in advance.
 
 ### The Mods tab
 
-![Mods tab: the installed list grouped by origin on the left, the selected mod's details on the right](images/mods-tab-dark.png)
+![Mods tab: the installed list on the left, the selected mod's details on the right](images/mods-tab-dark.png)
 
-The **Mods** tab lists every mod installed on this machine, grouped by where it came from: **Your
-mods** (folders you made or dropped in), **Installed** (added through the tab or the console) and
-**From maps you played** (downloaded when you played a published map). Each row carries a status icon:
+The **Mods** tab lists every mod installed on this machine in one list sorted by name. A row the open
+map uses carries an **In this map** pill, and the details pane says where the folder came from (added by
+hand, moved from the old overrides folder, imported from an export, or downloaded for a map you played).
+Each row carries a status icon:
 a green check means installed and serving, a yellow triangle means it needs attention (hover the icon
 for the reason, for example two installed folders declaring the same id), and a grey dot means another
 build of the same mod is serving its files. The yellow badge in the panel head counts the rows needing
@@ -740,14 +741,14 @@ removed, the window says the map is now vanilla: it plays without Snapmap+.
 
 ![Uninstall confirmation listing the map cleanup, the Toybox rows and the folder that will go](images/mods-uninstall-confirm-dark.png)
 
-**Uninstall**, in the details pane, removes a mod from this computer for good. If the open map uses it,
-the map is cleaned first with the same consequence list as above; then the mod's Toybox rows leave the
-editor, the folder under `mods\` is deleted, and the editor's undo history is cleared so Ctrl+Z cannot bring
-the deleted entities back. The confirmation says all of this, and tells you how many of your saved maps
-still use the mod: those maps will not open again until a mod folder provides the assets they use, either
-the same folder put back or a new one with the same id and files. There is no recycle bin; keep a copy of
-a folder you made yourself before uninstalling it. The Mods tab is refused these actions during Play or
-while a map is loading.
+**Uninstall**, in the details pane, removes a mod from this computer. If the open map uses it, the map
+is cleaned first with the same consequence list as above; then the mod's Toybox rows leave the editor,
+the folder under `mods\` is moved to the Windows Recycle Bin, and the editor's undo history is cleared so
+Ctrl+Z cannot bring the deleted entities back. The confirmation says all of this, and tells you how many
+of your saved maps still use the mod: those maps will not open again until a mod folder provides the
+assets they use, either the folder restored from the Recycle Bin or a new one with the same id and files.
+Snapmap+ keeps no bin of its own. The Mods tab is refused these actions during Play or while a map is
+loading.
 
 The Mods tab and the Prefabs tab follow their folders: a mod folder you copy into `mods\` by hand is built
 and listed a moment later, and a prefab file you add, rename or delete outside the window appears or goes
