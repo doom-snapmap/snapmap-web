@@ -26,6 +26,7 @@ const HEX32 = /^[0-9a-f]{32}$/;
 const ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
 const SEGMENT_RE = /^[a-z0-9_.~$#@+=,()&!' -]+$/;
 const CVAR_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const COMMAND_LINE_RE = /^[\x21-\x7e](?:[\x20-\x7e]{0,254}[\x21-\x7e])?$/;
 const TYPE_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const EXTENSIONS = new Set(['decl', 'bmd6model', 'bmd6skl', 'bmd6anim', 'bimage', 'bmodel', 'bcm', 'bnk', 'json', 'bin', 'vspv', 'fspv', 'cspv', 'mrpr', 'dmodel']);
 const TOP_KEYS = new Set(['format', 'id', 'build', 'version', 'name', 'author', 'homepage', 'requirements', 'shadows', 'extra', 'files', 'bundle']);
@@ -247,11 +248,22 @@ export function manifestError(manifest) {
   }
   if (manifest.requirements !== undefined) {
     const req = manifest.requirements;
-    if (!plainObject(req) || Object.keys(req).some(key => key !== 'cvars')) return 'bad requirements';
+    if (!plainObject(req) || Object.keys(req).some(key => key !== 'cvars' && key !== 'commands')) return 'bad requirements';
     if (req.cvars !== undefined) {
       if (!plainObject(req.cvars) || Object.keys(req.cvars).length > 32) return 'bad requirements';
       for (const [name, value] of Object.entries(req.cvars)) {
         if (!CVAR_RE.test(name) || !displayText(value, 64)) return 'bad requirements';
+      }
+    }
+    // Console lines the product runs when the mod's requirements go live and when they stop:
+    // the same shape and limits as the builder's canonical form.
+    if (req.commands !== undefined) {
+      if (!plainObject(req.commands) || Object.keys(req.commands).some(key => key !== 'activate' && key !== 'deactivate')) return 'bad requirements';
+      for (const list of Object.values(req.commands)) {
+        if (!Array.isArray(list) || list.length > 16) return 'bad requirements';
+        for (const line of list) {
+          if (typeof line !== 'string' || !COMMAND_LINE_RE.test(line) || line.includes(';')) return 'bad requirements';
+        }
       }
     }
   }

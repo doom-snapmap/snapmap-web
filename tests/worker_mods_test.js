@@ -376,6 +376,13 @@ test('bundle PUT refuses mismatch, non-canonical text, missing blobs and every m
   await expectRule({ ...good, extra: {} }, /bad extra/);
   await expectRule({ ...good, extra: { 'Bad Key': 1 } }, /bad extra key/);
   await expectRule({ ...good, extra: { legacy: 'x' } }, /bad extra legacy/);
+  const commands = { activate: ['echo hi', 'bind x "say hi"'], deactivate: ['echo bye'] };
+  const { manifestError } = await modsModule;
+  assert.equal(manifestError({ ...good, requirements: { cvars: { com_maxFps: '120' }, commands } }), null, 'requirements may carry any cvar and console commands');
+  for (const bad of [{ activate: ['echo hi; quit'] }, { activate: [' echo hi'] }, { later: ['echo hi'] },
+                    { activate: Array(17).fill('echo hi') }, { activate: [1] }, ['echo hi']]) {
+    assert.equal(manifestError({ ...good, requirements: { cvars: {}, commands: bad } }), 'bad requirements');
+  }
   await expectRule({ ...good, extra: { big: 'x'.repeat(256 * 1024) } }, /extra too large/);
   await expectRule({ ...good, unknown: 1 }, /unknown manifest key/);
   const withExtra = bundleOf({ ...good, extra: { legacy: { digest: '856c0b308aaa62e5' }, strings: { greet: 'hi' } } });
