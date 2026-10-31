@@ -740,17 +740,26 @@ removed, the window says the map is now vanilla: it plays without Snapmap+.
 
 ![Uninstall confirmation listing the map cleanup, the Toybox rows and the folder that will go](images/mods-uninstall-confirm-dark.png)
 
-**Uninstall**, in the details pane, removes a mod from this computer. If the open map uses it, the map is
-cleaned first with the same consequence list as above; then the mod's Toybox rows are removed from the
-editor and the folder goes: a folder Snapmap+ installed is deleted, a folder you made yourself is moved to
-`%LOCALAPPDATA%\snapmap-plus\removed-mods\` so your work is not lost. Other saved maps that use the mod
-will ask for it again when you load them. The folder removal cannot be undone, so the confirmation says
-so. The Mods tab is refused these actions during Play or while a map is loading.
+**Uninstall**, in the details pane, removes a mod from this computer for good. If the open map uses it,
+the map is cleaned first with the same consequence list as above; then the mod's Toybox rows leave the
+editor, the folder under `mods\` is deleted, and the editor's undo history is cleared so Ctrl+Z cannot bring
+the deleted entities back. The confirmation says all of this, and tells you how many of your saved maps
+still use the mod: those maps will not open again until a mod folder provides the assets they use, either
+the same folder put back or a new one with the same id and files. There is no recycle bin; keep a copy of
+a folder you made yourself before uninstalling it. The Mods tab is refused these actions during Play or
+while a map is loading.
+
+The Mods tab and the Prefabs tab follow their folders: a mod folder you copy into `mods\` by hand is built
+and listed a moment later, and a prefab file you add, rename or delete outside the window appears or goes
+on its own.
 
 ### Playing a map that uses mods
 
-Open the map as usual, from Community or My Maps. If it names a mod this machine does not have, DOOM's
-own Yes/No dialog names the mods and their total size. **Yes** downloads them, checks that every file
+Open the map as usual, from Community or My Maps. What the map needs is the assets it placed, not a
+particular copy of a mod: if a mod folder on this machine has the same id and provides those assets, the
+map opens with it, whatever version or build it is. If no folder provides them, DOOM's own Yes/No dialog
+names the mods and their total size. A folder that has the id but lacks a file the map uses is named too,
+with the missing file, so you know what to put back. **Yes** downloads them, checks that every file
 arrived intact, installs them and starts the map. **No** leaves the map unloaded and says which mod it
 needs. Joining a lobby asks the same way. A map whose mods are
 already installed, and a map without mods, start exactly as before.
