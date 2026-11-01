@@ -900,9 +900,9 @@ release to the current layout, and prints what it did. Nothing in `overrides\` i
 once you are happy with the result you can delete it. DOOM itself never migrates anything at start; if
 the installer could not run the tool, close DOOM and run `snapmap-plus-store migrate
 "%LOCALAPPDATA%\snapmap-plus"` from the store folder. Maps saved or published
-with packages by those releases load with the matching mods. If you change `overrides\` later,
-`sh_mods migrate --again` repeats the move, and the Mods tab shows the migrate button while anything
-there is still pending.
+with packages by those releases load with the matching mods. If you add a package to `overrides\`
+later, run `snapmap-plus update` again or `snapmap-plus migrate` with DOOM closed: the tool moves
+what is new and leaves the rest alone.
 
 ### Mod console commands
 
