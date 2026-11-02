@@ -694,7 +694,8 @@ Snapmap+ looks inside it, while a folder with one is a mod. A nested mod is list
 
 The toolbar has the filter and four icon buttons: **refresh**, **open the mods folder**, **migrate** (only
 while an old `overrides\` folder still holds packages Snapmap+ has not moved), and the **download icon**,
-which installs a mod from a folder anywhere on disk. The map icon in the panel head opens the map
+which installs mods from anywhere on disk: pick one mod folder, several at once, or a folder that
+holds many mods (grouped in subfolders or not) and every mod found inside it is installed in one go. The map icon in the panel head opens the map
 window described below.
 
 Select a row to read about the mod:
@@ -919,7 +920,7 @@ Everything the Mods tab does is also a console command.
 | `sh_mods list` | List the mod folders. |
 | `sh_mods rescan` (alias `refresh`) | Reread `mods\`, rebuild changed folders, and push the changes into the running game; prints what was re-parsed, reloaded, and what still needs a restart. |
 | `sh_mods build "<folder>"` / `sh_mods rebuild "<folder>"` | Check one folder and write the `snapmap-plus` block of its `mod.json`; rebuild also rescans. |
-| `sh_mods install "<folder>"` | Copy a folder from anywhere into `mods\`, check it and serve it. |
+| `sh_mods install "<folder>"` | Copy a folder from anywhere into `mods\`, check it and serve it; a folder without `mod.json` installs every mod found below it. |
 | `sh_mods verify "<folder>"` | Check one mod's files (a folder, an id or `id@version`). |
 | `sh_mods map` | Show the open map's details and the mods it uses, with placed-entity counts. |
 | `sh_mods map remove "<id>" [--yes]` | Print what removing the mod from the open map would delete; `--yes` does it. |
