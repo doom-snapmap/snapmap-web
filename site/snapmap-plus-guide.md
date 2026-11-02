@@ -687,6 +687,11 @@ for the reason, for example two installed folders declaring the same id), and a 
 build of the same mod is serving its files. The yellow badge in the panel head counts the rows needing
 attention and filters the list to them when clicked.
 
+You can organize `mods\` into subfolders, for example `mods\demon-mods\local.cyberdemon\` and
+`mods\demon-mods\local.spider-mastermind\`: a folder without a `mod.json` is only a grouping folder and
+Snapmap+ looks inside it, while a folder with one is a mod. A nested mod is listed by its path under
+`mods\`. Mods Snapmap+ installs or downloads itself always land at the top of `mods\`.
+
 The toolbar has the filter and four icon buttons: **refresh**, **open the mods folder**, **migrate** (only
 while an old `overrides\` folder still holds packages Snapmap+ has not moved), and the **download icon**,
 which installs a mod from a folder anywhere on disk. The map icon in the panel head opens the map
