@@ -877,6 +877,11 @@ What a mod can carry, beyond entity and model decls:
   moves, saves and plays like a stock module.
 - **Virtual-texture families** under `virtualtextures/mods/<id>/`, for materials with their own streamed
   detail.
+- **Scenes that hide the HUD**: a scene your mod plays through a sync animation can put the game's own
+  HUD events on the player's body rows for that animation (`ae_hideHudForContextPrompt` on the frame the
+  scene starts, `ae_showHudForContextPrompt` on the frame it releases the player, in your
+  `player/mp/tp_body_mp.md6` shadow). During Play, Snapmap+ hides and shows the whole HUD on those two
+  events; a scene cut short before its show event gets the HUD back at the next Play.
 
 Unchanged copies of the game's own files are never stored or uploaded: the build records them as
 pointers to the installed game, and a player whose install lacks that content is told so. To get the
