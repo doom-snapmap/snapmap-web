@@ -57,8 +57,6 @@ A few practical notes:
   Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps, prefabs and
   strings carry straight over: they are copied from the old `%USERPROFILE%\snaphak` folder into
   Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`).
-- **Packages from an earlier Snapmap+ release?** The installer converts them into mods when it installs
-  or updates, with its `snapmap-plus-store` tool; see [If you used packages before](#if-you-used-packages-before).
 - **Uninstalling:** `snapmap-plus uninstall` restores your DOOM folder to exactly what it was before.
   Your own Snapmap+ data (`config.json`, prefabs, mods, rawmaps under `%LOCALAPPDATA%\snapmap-plus`) is
   left untouched.
@@ -71,28 +69,6 @@ is touched, and the installer keeps a record so uninstall reverses exactly what 
 are separate: Snapmap+ creates `%LOCALAPPDATA%\snapmap-plus\config.json` the first time it starts,
 rather than shipping one in the installer.
 
-<details class="legacy-note" markdown="1">
-<summary><span class="legacy-tag">Legacy</span> Still on the DOOM version from before the April 2024 patch? No longer supported.</summary>
-
-Earlier Snapmap+ releases needed DOOM downgraded to the Steam depot from before the April 2024 patch.
-That is no longer the case, and that version of the game is no longer supported: new Snapmap+ releases
-are built for the current game only. If you downgraded for an earlier release, run **Verify integrity
-of game files** in Steam to return to the current version, then install Snapmap+ as described above.
-
-If you choose to stay on the old depot anyway, the installer recognizes it and installs
-**v0.2.1-beta.19**, the last Snapmap+ release made for it, instead of the current one. That release
-receives no updates, has no mods system, and its maps cannot use mods. The old instructions, for
-reference only:
-
-1. Press **Windows Key + R**, then enter `steam://nav/console` to open the Steam console.
-2. In the Steam console, run `download_depot 379720 379721 2206249600939156631`.
-3. Find the downloaded files under your Steam folder, typically
-   `C:\Program Files (x86)\Steam\steamapps\content\app_379720\depot_379721`, and copy them into your
-   DOOM install folder, replacing everything when prompted.
-
-Multiplayer and co-op matchmaking with other players does not work on that depot, and Verify integrity
-in Steam pulls the game back to the current version.
-</details>
 
 ---
 
@@ -848,31 +824,45 @@ replacement is deliberate.
       "snapmapplus_imp_blue_toybox_desc": "An Imp with a blue hide."
     }
   },
+  "scope": "map",
   "requirements": {
     "cvars": { "g_useResourceBlackList": "0", "g_useImageBlackList": "0" }
   }
 }
 ```
 
-- `id` is the mod's identity: 1 to 64 characters, lower-case letters, digits, dots, hyphens and
-  underscores, no punctuation at either end, unique to you (a `yourname.` prefix is the convention). Two
-  installed mods with one id are both kept and both flagged until you change one.
-- `name`, `version`, `author` and `description` are what players see in the Mods tab.
-- `strings` supplies the Toybox names and descriptions your decls refer to as `#str_...` ids, per
-  language code.
-- `requirements.cvars` names console variables the mod needs while it is active. The two blacklist
-  cvars above are needed by any mod that brings campaign-only models or images into SnapMap.
-- `hud` adjusts the ammo panel for a weapon mod: `{"weapons": {"weapon/zion/player/sp/pistol":
-  {"ammo_display": "weapon"}}}` lets the campaign pistol show its infinity symbol instead of a forced
-  number.
-- `stock` names installed game files under your own paths without copying them:
-  `{"<request path>": {"source": "<installed path>"}}`.
-- Any other key of your own is kept as it is.
+Every field you can write, and what it does:
+
+| Field | What it does |
+|---|---|
+| `id` | The mod's identity: 1 to 64 characters, lower-case letters, digits, dots, hyphens and underscores, no punctuation at either end, unique to you (a `yourname.` prefix is the convention). Your new files live under `mods/<id>/`. Two installed mods with one id are both kept and both flagged until you change one. |
+| `name`, `version`, `author`, `homepage`, `description` | What players see in the Mods tab: the display name, a version such as `1.2.0`, who made it, a link, and a sentence or two about what it adds. |
+| `scope` | Where the mod's replaced game files and its requirements apply. `"map"` (the default) applies them only while a map that uses the mod is open or played; `"always"` applies them in every map. The mod's own new content (its Toybox rows and everything under `mods/<id>/`) is offered everywhere either way. |
+| `strings` | The Toybox names and descriptions your decls refer to as `#str_...` ids, grouped by language code: `{"en": {"my_imp_name": "Blue Imp"}}` supplies `#str_my_imp_name`. |
+| `requirements` | What the game must be set to while the mod is active. `cvars` maps console variables to the value they need (a string, a number, or `true`/`false`; write a decimal as a string), up to 32; the two blacklist cvars above are needed by any mod that brings campaign-only models or images into SnapMap. `commands` holds two lists of console lines, `activate` and `deactivate` (up to 16 each, no `;`), run once when the mod's requirements start and stop. The values are set when a map that uses the mod loads, checked again before Play, and put back when the map closes. The Mods tab lists them under Requirements. |
+| `shadows` | The game's own files the mod replaces, as a list of their paths under `assets\`, for example `["generated/decls/entitydef/player/coop.decl"]`. A file at a stock path that is not listed here is refused when the mod is built, so a replacement is always deliberate. Where a replacement applies follows `scope`. |
+| `stock` | Installed game files served under your own names without copying them: `{"<request path>": {"source": "<installed path>"}}`. The build records the file's hash, and a player whose game lacks that file, or has a different revision of it, is told so. |
+| `companions` | Helper entities that spawn with every placed copy of one of your tiles: GUI displays, props or speakers that sit where you put them relative to the tile, move with it, are removed with it, and are switched on in the listed order when the tile activates its targets. Keyed by the tile's entityDef (one of your own, `mods/<id>/...`), each entry names an `entityDef` and its tile-relative `origin` and `axis`; `"activate": false` keeps one out of the switch-on order and `"bind": false` leaves it unbound. At most 16 per tile. Numbers are plain integers or fixed decimals such as `-0.7071`. |
+| `hud` | How the ammo panel shows a weapon your mod adds: `{"weapons": {"weapon/zion/player/sp/pistol": {"ammo_display": "weapon"}}}` lets the campaign pistol show its infinity symbol instead of a forced number. |
+
+Any other key of your own is kept exactly as you wrote it.
+
+A companions entry looks like this:
+
+```json
+"companions": {
+  "mods/alex.imp-variant/control_panel": [
+    { "entityDef": "mods/alex.imp-variant/screen_left",
+      "origin": [-57.4, 80.6, 98.3],
+      "axis": [[-0.7071, -0.7071, 0], [0.7071, -0.7071, 0], [0, 0, 1]] }
+  ]
+}
+```
 
 When Snapmap+ builds the folder it adds one member, `"snapmap-plus"`, with its own record of the files
 and whether the mod checked out. Leave it alone: it is rewritten on every build, and everything else in
-the file, your formatting included, is never touched. A folder that still uses
-the older `package.json` name is converted to `mod.json` at its first build. The folder's name is yours
+the file, your formatting included, is never touched. A folder whose manifest is named
+`package.json` is converted to `mod.json` at its first build. The folder's name is yours
 to choose; the id inside `mod.json` is what identifies the mod.
 
 What a mod can carry, beyond entity and model decls:
@@ -897,19 +887,6 @@ The full file format and every detail of what the game accepts are documented in
 repository's [capabilities](https://github.com/doom-snapmap/snapmap-plus/blob/main/docs/capabilities.md#mods)
 and [architecture](https://github.com/doom-snapmap/snapmap-plus/blob/main/docs/architecture.md#mods) pages.
 
-### If you used packages before
-
-Releases up to v0.2.1-beta.19 kept packages in `%LOCALAPPDATA%\snapmap-plus\overrides\`. When the
-installer installs or updates Snapmap+ it runs its `snapmap-plus-store` tool, which moves every package
-there into `mods\`, once, each in its own folder with a `mod.json`, brings a mods folder of an earlier
-release to the current layout, and prints what it did. Nothing in `overrides\` is changed or deleted;
-once you are happy with the result you can delete it. DOOM itself never migrates anything at start; if
-the installer could not run the tool, close DOOM and run `snapmap-plus-store migrate
-"%LOCALAPPDATA%\snapmap-plus"` from the store folder. Maps saved or published
-with packages by those releases load with the matching mods. If you add a package to `overrides\`
-later, run `snapmap-plus update` again or `snapmap-plus migrate` with DOOM closed: the tool moves
-what is new and leaves the rest alone.
-
 ### Mod console commands
 
 Everything the Mods tab does is also a console command.
@@ -929,7 +906,7 @@ Everything the Mods tab does is also a console command.
 | `sh_mods palette rebuild` | Rebuild the editor's Toybox rows by hand (refresh does this for you). |
 | `sh_mods copystock "<engine path>" "<file>"` | Write an installed game file's bytes to a file. |
 | `sh_mods export "<path.zip>"` / `sh_mods import "<path.zip>"` | Write the open map with its mods to a ZIP, or install a ZIP's mods and stage its map. |
-| `sh_mods migrate [--again]` | Move `overrides\` packages into `mods\` again. |
+| `sh_mods migrate [--again]` | Move any packages still in `overrides\` into `mods\`, each as its own mod folder. |
 
 ---
 
