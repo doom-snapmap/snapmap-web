@@ -882,6 +882,14 @@ What a mod can carry, beyond entity and model decls:
   scene starts, `ae_showHudForContextPrompt` on the frame it releases the player, in your
   `player/mp/tp_body_mp.md6` shadow). During Play, Snapmap+ hides and shows the whole HUD on those two
   events; a scene cut short before its show event gets the HUD back at the next Play.
+- **Scene anchors**: a `scenes` entry in `mod.json`, keyed by one of your scene nodes, gives that node
+  a second frame. The player's part of the scene plays where the player stands when the node fires, and
+  the entities you list under `spawn` (a demon with its entrance animation, for example) appear at the
+  node's own placement at the same moment, facing the way the node is turned. `anchor` and `player`
+  give the scene's two first poses as `[x, y, z, yaw]`; `reaim` (on by default) turns the player's view
+  toward the node as the scene starts; `"plays": "at_node"` plays the whole scene at the node instead.
+  The player stays where the scene leaves them. In the editor, the node draws the spawned entity's first
+  pose and its path, so you can see where a demon arrives and where it goes before you press Play.
 
 Unchanged copies of the game's own files are never stored or uploaded: the build records them as
 pointers to the installed game, and a player whose install lacks that content is told so. To get the
