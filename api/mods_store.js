@@ -224,6 +224,8 @@ export function logicalName(request) {
   if ((m = request.match(/^generated\/skeleton\/(.+)\.bmd6skl$/))) return { type: 'skeleton', name: m[1] + '.md6skl' };
   if ((m = request.match(/^cooked\/anim\/(.+)\.bmd6anim$/))) return { type: 'anim', name: m[1] + '.md6anim' };
   if ((m = request.match(/^generated\/image\/(.+)\.bimage$/))) return { type: 'image', name: m[1] };
+  /* generated/swf/<stem>.bswf is the movie a consumer names swf/<stem>.swf (the product's rule). */
+  if ((m = request.match(/^generated\/(swf\/.+)\.bswf$/))) return { type: 'swf', name: m[1] + '.swf' };
   return { type: null, name: request };
 }
 

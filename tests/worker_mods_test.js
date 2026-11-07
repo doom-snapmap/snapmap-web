@@ -398,13 +398,21 @@ test('bundle PUT refuses mismatch, non-canonical text, missing blobs and every m
   {
     /* One accepted PUT covers the newer kinds: the per-address upload budget is shared with the rules below. */
     const kinds = ['generated/swf/mods/alex.pink-imp/x.bswf', 'generated/spirv/mods/alex.pink-imp/x.cspv', 'generated/discreteanimation/mods/alex.pink-imp/x.dmodel'];
-    const b = bundleOf({ ...good, files: [file, ...kinds.map(request => withRequest(request)),
+    /* A movie is named the way the product names it: type swf, swf/<stem>.swf. */
+    const movie = { ...withRequest(kinds[0]), provides: { type: 'swf', name: 'swf/mods/alex.pink-imp/x.swf' } };
+    const b = bundleOf({ ...good, files: [file, movie, ...kinds.slice(1).map(request => withRequest(request)),
       { path: 'assets/mods/alex.pink-imp/pointer.tome', request: 'mods/alex.pink-imp/pointer.tome', provides: { type: 'file', name: 'mods/alex.pink-imp/pointer.tome' },
         stock: { source: 'generated/decls/entitydef/ai/demon/imp.decl', sha256: 'ab'.repeat(32) } }] });
     assert.equal((await fetchWorker(env, putBundleRequest(b.text, b.hash))).status, 201, 'movies, compute stages, dmodels and a stock pointer are accepted');
   }
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.json', { path: 'mods/alex.pink-imp/x.json' })] }, /path does not match/);
   await expectRule({ ...good, files: [{ ...file, provides: { type: 'entityDef', name: 'mods/alex.pink-imp/other' } }] }, /provides does not match/);
+  {
+    /* A movie's logical name is the product's: no request spent, the budget below is shared. */
+    const { logicalName } = await modsModule;
+    assert.deepEqual(logicalName('generated/swf/mods/alex.pink-imp/x.bswf'), { type: 'swf', name: 'swf/mods/alex.pink-imp/x.swf' });
+    assert.deepEqual(logicalName('generated/swf/minigames/demoncrush.bswf'), { type: 'swf', name: 'swf/minigames/demoncrush.swf' });
+  }
   await expectRule({ ...good, files: [{ ...file, extra: true }] }, /unknown file key/);
   const pointer = (request, stock, extra = {}) => ({ path: 'assets/' + request, request, provides: { type: 'file', name: request }, stock, ...extra });
   const goodStock = { source: 'generated/decls/entitydef/ai/demon/imp.decl', sha256: 'ab'.repeat(32) };
