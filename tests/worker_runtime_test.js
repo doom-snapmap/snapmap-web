@@ -112,6 +112,12 @@ async function mods(mf) {
   assert.deepEqual(await missing.json(), { missing: [wrong] });
   const checked = await send('POST', '/mods/missing', JSON.stringify({ bundle, manifest: text }));
   assert.deepEqual(await checked.json(), { missing: [], bundle });
+  /* A fixed decimal is hashed as written, never re-spelled. */
+  const decimals = canonical({ ...manifest, extra: { companions: { 'mods/alex.pink-imp/pink_imp': [{ activate: false, axis: [[0, 1, 0], [-1, 0, 0], [0, 0, 1]],
+    bind: true, entityDef: 'mods/alex.pink-imp/pink_imp', origin: [0, 0, 0] }] } } }).replace('[[0,1,0],[-1,0,0],[0,0,1]]', '[[0.0,1.0,0.0],[-1.0,0.0,0.0],[0.0,0.0,1.0]]');
+  const decimalBundle = sha(Buffer.from(decimals));
+  const decimalCheck = await send('POST', '/mods/missing', JSON.stringify({ bundle: decimalBundle, manifest: decimals }));
+  assert.deepEqual(await decimalCheck.json(), { missing: [], bundle: decimalBundle });
   const carried = { ...manifest, files: [manifest.files[0], { ...manifest.files[0], path: 'assets/' + surface, request: surface,
     provides: { type: 'entityDef', name: 'monster/imp' } }] };
   const carriedText = canonical(carried);

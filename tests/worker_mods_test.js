@@ -237,6 +237,84 @@ test('canonical text matches a hand-written golden string and its hash', async (
   assert.equal(bundleOf(manifest).text, golden);
 });
 
+/* ---------------- number spelling ---------------- */
+
+/* The product keeps fixed decimals as written (companion transforms such as -1.0 and
+ * -0.7071), so the store hashes the received lexemes and never re-spells a number. */
+function companionManifest() {
+  return sampleManifest([declFile('alex.pink-imp', 'pink_imp', blobA)], { extra: { companions: { 'mods/alex.pink-imp/pink_imp': [{
+    activate: false, axis: [[0, 1, 0], [-1, 0, 0], [0, 0, 1]], bind: true, entityDef: 'mods/alex.pink-imp/pink_imp', origin: [0, 0, 7] }] } } });
+}
+const INTEGER_TRANSFORM = '"axis":[[0,1,0],[-1,0,0],[0,0,1]],"bind":true,"entityDef":"mods/alex.pink-imp/pink_imp","origin":[0,0,7]';
+const DECIMAL_TRANSFORM = '"axis":[[0.0,1.0,0.0],[-1.0,0.0,0.0],[0.0,0.0,1.0]],"bind":true,"entityDef":"mods/alex.pink-imp/pink_imp","origin":[0.0,-0.7071,7]';
+
+test('fixed decimals hash as written at the bundle PUT and at missing', async () => {
+  const { canonicalSource } = await modsModule;
+  const env = await modsEnv();
+  await storeBlobs(env, blobA);
+  const integers = bundleOf(companionManifest());
+  assert.ok(integers.text.includes(INTEGER_TRANSFORM));
+  const text = integers.text.replace(INTEGER_TRANSFORM, DECIMAL_TRANSFORM);
+  const hash = sha(Buffer.from(text, 'utf8'));
+  assert.equal(canonicalSource(text).text, text, 'the canonical form keeps every lexeme');
+  const ask = async (manifest, bundle = sha(Buffer.from(manifest))) => {
+    const response = await fetchWorker(env, postJson('/mods/missing', { bundle, manifest }));
+    return [response.status, await response.json()];
+  };
+  assert.deepEqual(await ask(text), [200, { missing: [], bundle: hash }]);
+  const created = await fetchWorker(env, putBundleRequest(text, hash));
+  assert.equal(created.status, 201, await created.clone().text());
+  assert.equal(await (await fetchWorker(env, call('GET', '/mods/bundle/' + hash))).text(), text, 'served verbatim');
+
+  /* The integer spelling is a different, equally canonical text with its own hash. */
+  assert.notEqual(integers.hash, hash);
+  assert.deepEqual(await ask(integers.text), [200, { missing: [], bundle: integers.hash }]);
+  assert.equal((await fetchWorker(env, putBundleRequest(integers.text, integers.hash))).status, 201);
+  assert.deepEqual([(await fetchWorker(env, putBundleRequest(text, integers.hash))).status], [422], 'a re-spelled text is not the hashed one');
+
+  /* Whitespace or unsorted keys around decimals are still non-canonical. */
+  const pretty = text.replace('"axis":', '"axis": ');
+  const prettyResponse = await fetchWorker(env, putBundleRequest(pretty, hash));
+  assert.deepEqual([prettyResponse.status, (await prettyResponse.json()).error], [422, 'body is not the canonical manifest text']);
+  const unsorted = text.replace('"bind":true,"entityDef":"mods/alex.pink-imp/pink_imp"', '"entityDef":"mods/alex.pink-imp/pink_imp","bind":true');
+  assert.deepEqual(await ask(unsorted, hash), [422, { error: 'body is not the canonical manifest text' }]);
+  const withBundle = text.replace('"build":1,', '"build":1,"bundle":"' + hash + '",');
+  assert.equal((await fetchWorker(env, putBundleRequest(withBundle, hash))).status, 200, 'a bundle key may ride along');
+});
+
+test('a number with an exponent or outside the JSON integer and decimal grammar is refused', async () => {
+  const { canonicalSource } = await modsModule;
+  const env = await modsEnv();
+  const text = bundleOf(companionManifest()).text.replace(INTEGER_TRANSFORM, DECIMAL_TRANSFORM);
+  for (const spelling of ['-7.071e-1', '-7071E-4', '1e0']) {
+    const bad = text.replace('-0.7071', spelling);
+    assert.deepEqual(canonicalSource(bad), { error: 'number is not a plain integer or fixed decimal' });
+    const response = await fetchWorker(env, postJson('/mods/missing', { bundle: sha(Buffer.from(bad)), manifest: bad }));
+    assert.deepEqual([response.status, await response.json()], [422, { error: 'number is not a plain integer or fixed decimal' }]);
+    const put = await fetchWorker(env, putBundleRequest(bad, sha(Buffer.from(bad))));
+    assert.deepEqual([put.status, (await put.json()).error], [422, 'number is not a plain integer or fixed decimal']);
+  }
+  const exponentBuild = bundleOf(companionManifest()).text.replace('"build":1,', '"build":1e0,');
+  assert.deepEqual(canonicalSource(exponentBuild), { error: 'number is not a plain integer or fixed decimal' });
+  for (const spelling of ['-0', '0.0', '-1.000', '12.5']) assert.equal(canonicalSource(text.replace('-0.7071', spelling)).error, undefined, spelling);
+  assert.deepEqual(canonicalSource('{"a":1,"a":2}'), { error: 'duplicate key: a' });
+});
+
+test('the real campaign-interactables-progression manifest hashes to its path at missing', async () => {
+  const { canonicalSource, canonicalText } = await modsModule;
+  const text = fs.readFileSync(path.join(__dirname, 'fixtures', 'campaign-interactables-progression.canon.json'), 'utf8');
+  const hash = sha(Buffer.from(text, 'utf8'));
+  assert.equal(hash, '3f3a5b8e2ad1d1e3aded5fa3a529af5a0fff97dba4120d4b1497ce493ca8f87c');
+  assert.ok(text.includes('"axis":[[0.0,1.0,0.0],[-1.0,0.0,0.0],[0.0,0.0,1.0]]'), 'the fixture carries fixed decimals');
+  assert.equal(canonicalSource(text).text, text);
+  assert.notEqual(canonicalText(JSON.parse(text)), text, 'JSON.stringify re-spells the decimals (defect B7)');
+  const env = await modsEnv();
+  const carried = [...new Set(JSON.parse(text).files.filter(file => file.blob !== undefined).map(file => file.blob))];
+  const response = await fetchWorker(env, postJson('/mods/missing', { bundle: hash, manifest: text }));
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.deepEqual(await response.json(), { missing: carried, bundle: hash });
+});
+
 /* ---------------- blobs ---------------- */
 
 test('blob PUT creates, re-PUT is idempotent, GET and HEAD serve immutable bytes', async () => {

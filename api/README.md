@@ -91,10 +91,14 @@ decided in one transaction.
   so a client mid-upload sees the answer rather than a reset; a new one answers 201.
   Either way the declared length counts toward the hourly byte limit.
 - `PUT /mods/bundle/:hash` takes the canonical manifest text, at most 1 MiB:
-  UTF-8 JSON, keys sorted at every level, no whitespace, `files` sorted by `path`,
-  `JSON.stringify` escaping, `bundle` omitted or equal to the path hash. A
-  pretty-printed or otherwise non-canonical body is refused with 422 so that every
-  reader parses exactly the bytes that were hashed. The Worker checks the hash, the
+  UTF-8 JSON, keys sorted at every level, no duplicate keys, no whitespace, `files`
+  sorted by `path`, `JSON.stringify` escaping for strings, `bundle` omitted or equal
+  to the path hash. Numbers are kept as the producer wrote them, plain integers or
+  fixed decimals (`7`, `-1.0`, `-0.7071`; no exponent, else 422 `number is not a
+  plain integer or fixed decimal`), and hashed verbatim: the Worker never
+  re-spells a number, so `-1.0` and `-1` are different canonical texts with
+  different hashes. A pretty-printed or otherwise non-canonical body is refused
+  with 422 so that every reader parses exactly the bytes that were hashed. The Worker checks the hash, the
   format, the id grammar, the required integer `build` (1 to 2147483647), the
   optional `version`, display fields, request paths (lowercase,
   relative, no `..`, no backslash, whitelisted extension), the path to request

@@ -352,14 +352,100 @@ function sortedKeys(value) {
   return Object.fromEntries(Object.keys(value).sort().map(key => [key, sortedKeys(value[key])]));
 }
 
-/* Canonical text: keys sorted at every level, no whitespace, files sorted by path,
- * JSON.stringify escaping. With includeBundle false the "bundle" key is omitted; the
- * bundle hash is the SHA-256 of that text. */
+/* Canonical text of a parsed manifest: keys sorted at every level, no whitespace, files
+ * sorted by path, JSON.stringify escaping. With includeBundle false the "bundle" key is
+ * omitted. It spells numbers as JSON.stringify does; bundleVerdict instead rebuilds the
+ * canonical form from the received text with canonicalSource, which keeps every number as
+ * written. The two agree whenever every number is a plain integer. */
 export function canonicalText(manifest, includeBundle = false) {
   const copy = { ...manifest };
   if (!includeBundle) delete copy.bundle;
   copy.files = [...manifest.files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return JSON.stringify(sortedKeys(copy));
+}
+
+/* A number in a manifest is a plain integer or a fixed decimal (-0.7071, -1.0): no exponent. */
+const NUMBER_RE = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
+const PLAIN_NUMBER_RE = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/;
+const STRING_RE = /"(?:[^"\\]|\\.)*"/y;
+const LITERAL_RE = /true|false|null/y;
+const SPACE_RE = /[ \t\n\r]*/y;
+
+class SourceError extends Error {}
+
+/* Reads JSON text that JSON.parse already accepted into a tree that keeps each number's
+ * lexeme: { num: '-1.0' }, { str: value }, { lit: 'true' }, { arr: [...] }, { obj: [[key, node]] }. */
+function sourceTree(text) {
+  let at = 0;
+  const match = re => { re.lastIndex = at; const found = re.exec(text); if (found) at = re.lastIndex; return found && found[0]; };
+  const space = () => match(SPACE_RE);
+  const value = () => {
+    space();
+    const c = text[at];
+    if (c === '{') {
+      at++;
+      const entries = [], seen = new Set();
+      space();
+      if (text[at] === '}') { at++; return { obj: entries }; }
+      for (;;) {
+        space();
+        const key = JSON.parse(match(STRING_RE));
+        if (seen.has(key)) throw new SourceError('duplicate key: ' + key.slice(0, 200));
+        seen.add(key);
+        space(); at++;              // ':'
+        entries.push([key, value()]);
+        space();
+        if (text[at++] === '}') return { obj: entries };
+      }
+    }
+    if (c === '[') {
+      at++;
+      const items = [];
+      space();
+      if (text[at] === ']') { at++; return { arr: items }; }
+      for (;;) {
+        items.push(value());
+        space();
+        if (text[at++] === ']') return { arr: items };
+      }
+    }
+    if (c === '"') return { str: JSON.parse(match(STRING_RE)) };
+    const number = match(NUMBER_RE);
+    if (number !== null) {
+      if (!PLAIN_NUMBER_RE.test(number)) throw new SourceError('number is not a plain integer or fixed decimal');
+      return { num: number };
+    }
+    return { lit: match(LITERAL_RE) };
+  };
+  return value();
+}
+
+function sourceText(node) {
+  if (node.num !== undefined) return node.num;
+  if (node.str !== undefined) return JSON.stringify(node.str);
+  if (node.lit !== undefined) return node.lit;
+  if (node.arr) return '[' + node.arr.map(sourceText).join(',') + ']';
+  return '{' + [...node.obj].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([key, child]) => JSON.stringify(key) + ':' + sourceText(child)).join(',') + '}';
+}
+
+/* The canonical text of a manifest's received text, with numbers kept as the producer
+ * wrote them: keys sorted at every level, no whitespace, files sorted by path,
+ * JSON.stringify escaping for strings. The text must already parse as a manifest
+ * (manifestError null). Returns { text, withBundle }: text omits "bundle" and is what the
+ * bundle hash covers; withBundle keeps a present "bundle" key in place, else null. A
+ * duplicate key or a number outside the plain grammar returns { error } instead. */
+export function canonicalSource(text) {
+  let tree;
+  try { tree = sourceTree(text); }
+  catch (error) { if (error instanceof SourceError) return { error: error.message }; throw error; }
+  const pathOf = file => file.obj.find(([key]) => key === 'path')[1].str;
+  const top = tree.obj.map(([key, child]) => key !== 'files' ? [key, child]
+    : [key, { arr: [...child.arr].sort((a, b) => { const x = pathOf(a), y = pathOf(b); return x < y ? -1 : x > y ? 1 : 0; }) }]);
+  return {
+    text: sourceText({ obj: top.filter(([key]) => key !== 'bundle') }),
+    withBundle: top.some(([key]) => key === 'bundle') ? sourceText({ obj: top }) : null,
+  };
 }
 
 /* ---------------- object responses ---------------- */
@@ -471,12 +557,15 @@ async function bundleVerdict(env, text, hash) {
   catch { return { refusal: refuse('bad json', 400) }; }
   const error = manifestError(manifest);
   if (error) return { refusal: refuse(error, 422) };
-  const canonical = canonicalText(manifest);
-  if ((await sha256Hex(canonical)) !== hash) return { refusal: refuse('canonical manifest does not hash to the path', 422) };
+  /* Numbers are never re-spelled: the canonical form is rebuilt from the received text's
+   * own lexemes, so a fixed decimal such as -1.0 hashes as the producer wrote it. */
+  const canonical = canonicalSource(text);
+  if (canonical.error) return { refusal: refuse(canonical.error, 422) };
+  if ((await sha256Hex(canonical.text)) !== hash) return { refusal: refuse('canonical manifest does not hash to the path', 422) };
   if (manifest.bundle !== undefined && manifest.bundle !== hash) return { refusal: refuse('bundle field does not match the path', 422) };
   /* The body must be the canonical text itself (optionally with "bundle"), so every parser
    * that reads the stored body sees exactly the manifest that was hashed. */
-  if (text !== canonical && !(manifest.bundle !== undefined && text === canonicalText(manifest, true))) {
+  if (text !== canonical.text && text !== canonical.withBundle) {
     return { refusal: refuse('body is not the canonical manifest text', 422) };
   }
   const carried = manifest.files.filter(file => file.blob !== undefined);
