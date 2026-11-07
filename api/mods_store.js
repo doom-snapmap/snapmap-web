@@ -15,6 +15,8 @@ export const MAX_QUERY = 4096;
 export const MAX_CLAIM_BUNDLES = 256;
 export const CLAIM_WINDOW_MS = 3600000;   // upload-before-claim window (one hour), as in mods_registry_store.js
 const MAX_MISSING_JSON = 512 * 1024;
+/* A missing query may carry one bundle's canonical text as a JSON string; escaping can grow it. */
+const MAX_MISSING_WITH_MANIFEST_JSON = MAX_MISSING_JSON + 2 * MAX_BUNDLE_JSON;
 const MAX_CLAIM_JSON = 64 * 1024;
 const MISSING_SHOWN = 100;
 const IMMUTABLE = 'public, max-age=31536000, immutable';
@@ -328,7 +330,9 @@ export function manifestError(manifest) {
     if (file.needs !== undefined && (!Array.isArray(file.needs) || file.needs.length > 1024 || !file.needs.every(logicalRef))) {
       return 'bad needs: ' + request.slice(0, 200);
     }
-    if (!shadows.has(request)) {
+    /* A stock pointer carries nothing, so it may name any game path (a surface): it can only
+     * serve the player's own installed bytes. The namespace rule binds carried files. */
+    if (!stock && !shadows.has(request)) {
       /* Decls keep the exact id. Cooked raw names are derived by the engine with every
        * "-" rewritten to "_", so either spelling of the id owns a raw file. */
       const owned = expected.decl ? expected.name.startsWith('mods/' + id + '/')
@@ -455,28 +459,39 @@ async function putBlob(req, env, hash) {
 
 /* ---------------- bundle upload ---------------- */
 
+/* Every check a bundle upload makes before the index: PUT /mods/bundle runs it on its body
+ * and POST /mods/missing on a manifest sent ahead of the blobs, so both refuse with the same
+ * status and wording. Returns { refusal } or { manifest, carried }. */
+async function bundleVerdict(env, text, hash) {
+  if (blockedSet(env).has(hash)) return { refusal: blockedResponse([hash]) };
+  let manifest;
+  try { manifest = JSON.parse(text); }
+  catch { return { refusal: refuse('bad json', 400) }; }
+  const error = manifestError(manifest);
+  if (error) return { refusal: refuse(error, 422) };
+  const canonical = canonicalText(manifest);
+  if ((await sha256Hex(canonical)) !== hash) return { refusal: refuse('canonical manifest does not hash to the path', 422) };
+  if (manifest.bundle !== undefined && manifest.bundle !== hash) return { refusal: refuse('bundle field does not match the path', 422) };
+  /* The body must be the canonical text itself (optionally with "bundle"), so every parser
+   * that reads the stored body sees exactly the manifest that was hashed. */
+  if (text !== canonical && !(manifest.bundle !== undefined && text === canonicalText(manifest, true))) {
+    return { refusal: refuse('body is not the canonical manifest text', 422) };
+  }
+  const carried = manifest.files.filter(file => file.blob !== undefined);
+  const blocked = [...new Set(carried.map(file => file.blob))].filter(blob => blockedSet(env).has(blob));
+  if (blocked.length) return { refusal: blockedResponse(blocked) };
+  return { manifest, carried };
+}
+
 async function putBundle(req, env, hash) {
   if (blockedSet(env).has(hash)) { await discard(req); return blockedResponse([hash]); }
   if (!(await admit(req, env, [['mod_bundle_put', 1]], false))) { await discard(req); return rateLimited(); }
   const bytes = await readBody(req, MAX_BUNDLE_JSON);
-  let text, manifest;
+  let text;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
   catch { return refuse('bad utf-8', 400); }
-  try { manifest = JSON.parse(text); }
-  catch { return refuse('bad json', 400); }
-  const error = manifestError(manifest);
-  if (error) return refuse(error, 422);
-  const canonical = canonicalText(manifest);
-  if ((await sha256Hex(canonical)) !== hash) return refuse('canonical manifest does not hash to the path', 422);
-  if (manifest.bundle !== undefined && manifest.bundle !== hash) return refuse('bundle field does not match the path', 422);
-  /* The body must be the canonical text itself (optionally with "bundle"), so every parser
-   * that reads the stored body sees exactly the manifest that was hashed. */
-  if (text !== canonical && !(manifest.bundle !== undefined && text === canonicalText(manifest, true))) {
-    return refuse('body is not the canonical manifest text', 422);
-  }
-  const carried = manifest.files.filter(file => file.blob !== undefined);
-  const blocked = [...new Set(carried.map(file => file.blob))].filter(blob => blockedSet(env).has(blob));
-  if (blocked.length) return blockedResponse(blocked);
+  const { refusal, carried } = await bundleVerdict(env, text, hash);
+  if (refusal) return refusal;
   const registered = await registry(env, 'registerBundle', hash, carried.map(file => ({ blob: file.blob, size: file.size })));
   if (registered.missing?.length) {
     return refuse('missing blobs', 409, { missing: registered.missing.slice(0, MISSING_SHOWN), missingCount: registered.missing.length });
@@ -497,14 +512,36 @@ function hashArray(value, max) {
   return [...new Set(value)];
 }
 
+/* {"blobs":[sha...]} answers which blobs the store lacks. A client may add one bundle's
+ * {"bundle":hash,"manifest":"<canonical text>"} so a bundle the store would refuse is refused
+ * here, before any blob is uploaded, with the bundle PUT's status and wording; "blobs" then
+ * defaults to the blobs that manifest carries, and an accepted manifest is echoed as "bundle".
+ * The bundle PUT still makes every check itself. */
 async function postMissing(req, env) {
   if (!(await admit(req, env, [['mod_get', 1]], false))) { await discard(req); return rateLimited(); }
-  const body = await readJsonObject(req, MAX_MISSING_JSON);
-  const list = hashArray(body.blobs, MAX_QUERY);
-  if (!list.length) return reply({ missing: [] });
+  const bytes = await readBody(req, MAX_MISSING_WITH_MANIFEST_JSON);
+  let body;
+  try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  catch (error) { return refuse(error instanceof SyntaxError ? 'bad json' : 'bad utf-8', 400); }
+  if (!plainObject(body)) return refuse('bad json', 400);
+  const withManifest = body.manifest !== undefined || body.bundle !== undefined;
+  let verdict = null;
+  if (withManifest) {
+    if (typeof body.bundle !== 'string' || !HEX64.test(body.bundle)) return refuse('bad bundle hash', 400);
+    if (typeof body.manifest !== 'string') return refuse('manifest must be the canonical text as a string', 400);
+    if (new TextEncoder().encode(body.manifest).byteLength > MAX_BUNDLE_JSON) return refuse('too large', 413);
+    verdict = await bundleVerdict(env, body.manifest, body.bundle);
+    if (verdict.refusal) return verdict.refusal;
+  } else if (bytes.byteLength > MAX_MISSING_JSON) {
+    return refuse('too large', 413);
+  }
+  const list = verdict && body.blobs === undefined ? [...new Set(verdict.carried.map(file => file.blob))].slice(0, MAX_QUERY)
+    : hashArray(body.blobs, MAX_QUERY);
+  const extra = verdict ? { bundle: body.bundle } : {};
+  if (!list.length) return reply({ missing: [], ...extra });
   const blocked = blockedSet(env);
   const missing = new Set(await registry(env, 'missing', list.filter(hash => !blocked.has(hash))));
-  return reply({ missing: list.filter(hash => blocked.has(hash) || missing.has(hash)) });
+  return reply({ missing: list.filter(hash => blocked.has(hash) || missing.has(hash)), ...extra });
 }
 
 async function postClaim(req, env) {

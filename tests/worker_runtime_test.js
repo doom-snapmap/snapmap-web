@@ -103,11 +103,21 @@ async function mods(mf) {
   await head.arrayBuffer();
 
   const request = 'generated/decls/entitydef/mods/alex.pink-imp/pink_imp.decl';
-  const manifest = { format: 1, id: 'alex.pink-imp', build: 1, version: '1.0.0', name: 'Pink Imp', files: [{
-    path: 'assets/' + request, request, blob: hash, size: blob.length, provides: { type: 'entityDef', name: 'mods/alex.pink-imp/pink_imp' } }] };
+  const surface = 'generated/decls/entitydef/monster/imp.decl';
+  const manifest = { format: 1, id: 'alex.pink-imp', build: 1, version: '1.0.0', name: 'Pink Imp', shadows: [], files: [{
+    path: 'assets/' + request, request, blob: hash, size: blob.length, provides: { type: 'entityDef', name: 'mods/alex.pink-imp/pink_imp' } }, {
+    path: 'assets/' + surface, request: surface, provides: { type: 'entityDef', name: 'monster/imp' }, stock: { source: surface, sha256: wrong } }] };
   const text = canonical(manifest), bundle = sha(Buffer.from(text));
   const missing = await send('POST', '/mods/missing', JSON.stringify({ blobs: [hash, wrong] }));
   assert.deepEqual(await missing.json(), { missing: [wrong] });
+  const checked = await send('POST', '/mods/missing', JSON.stringify({ bundle, manifest: text }));
+  assert.deepEqual(await checked.json(), { missing: [], bundle });
+  const carried = { ...manifest, files: [manifest.files[0], { ...manifest.files[0], path: 'assets/' + surface, request: surface,
+    provides: { type: 'entityDef', name: 'monster/imp' } }] };
+  const carriedText = canonical(carried);
+  const early = await send('POST', '/mods/missing', JSON.stringify({ bundle: sha(Buffer.from(carriedText)), manifest: carriedText }));
+  assert.equal(early.status, 422);
+  assert.match((await early.json()).error, /^outside the mods\/alex\.pink-imp\/ namespace and not a declared shadow/);
   const stored = await send('PUT', '/mods/bundle/' + bundle, text);
   assert.equal(stored.status, 201, await stored.clone().text());
   await stored.arrayBuffer();

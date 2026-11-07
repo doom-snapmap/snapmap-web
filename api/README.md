@@ -77,6 +77,12 @@ decided in one transaction.
 
 - `POST /mods/missing` takes `{"blobs":[sha...]}`, at most 4096, and returns
   `{"missing":[...]}` in request order. Blocked and mid-purge blobs count as missing.
+  A client may add one bundle as `"bundle":hash,"manifest":"<canonical text>"` (the
+  text as a JSON string, at most 1 MiB) to have it checked before any blob is
+  uploaded: the Worker runs every check the bundle `PUT` makes before the index and
+  answers its refusal with the same status and wording (422, 451, 400 or 413);
+  otherwise it answers `{"missing":[...],"bundle":hash}`, `blobs` defaulting to
+  the ones the manifest carries. The bundle `PUT` still checks everything itself.
 - `PUT /mods/blob/:sha256` needs `Content-Type: application/octet-stream` (else 415)
   and `Content-Length` (else 411), at most 64 MiB (else 413). The body streams
   straight to `blob/<sha256>` with that hash as R2's `sha256` checksum, so R2 refuses
@@ -92,9 +98,13 @@ decided in one transaction.
   format, the id grammar, the required integer `build` (1 to 2147483647), the
   optional `version`, display fields, request paths (lowercase,
   relative, no `..`, no backslash, whitelisted extension), the path to request
-  mapping, the declared logical name, the `mods/<id>/` namespace unless the request
-  is a declared shadow, and the caps (4096 files, 64 MiB per file, 256 MiB total),
-  answering 422 with the first cause. Blobs it names must already be stored with the
+  mapping, the declared logical name, the `mods/<id>/` namespace for carried files
+  unless the request is a declared shadow, and the caps (4096 files, 64 MiB per file, 256 MiB total),
+  answering 422 with the first cause. A stock pointer (`stock: {source, sha256}`,
+  no `blob` or `size`) carries no bytes and only tells the product to serve the
+  player's own installed file, so it may name any game path without a shadow; the
+  additive builder writes its surfaces this way with `shadows` empty. Each
+  `shadows` entry must name a file of the bundle. Blobs it names must already be stored with the
   declared sizes (409 with up to 100 missing hashes and `missingCount`). The stored
   object is the request body. A new bundle answers 201, an existing one 200.
 - `GET` and `HEAD` on either object return it with

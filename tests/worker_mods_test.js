@@ -485,6 +485,42 @@ test('raw files of a dashed id may use the engine underscore spelling; decls kee
   await refused([raw('generated/basemodel/md6/mods/alex_r2_imp/imp.bmd6model', mesh, 'baseModel', 'md6/mods/alex_r2_imp/imp.md6mesh')], /namespace/);
 });
 
+test('stock pointers may sit at any game path; carried files there must be declared shadows', async () => {
+  const env = await modsEnv();
+  await storeBlobs(env, blobA);
+  const file = declFile('alex.pink-imp', 'pink_imp', blobA);
+  const put = async manifest => {
+    const { text, hash } = bundleOf(manifest);
+    const response = await fetchWorker(env, putBundleRequest(text, hash));
+    return [response.status, (await response.json()).error];
+  };
+  /* A surface as the additive builder writes it: request and source are the game's own path. */
+  const anim = 'cooked/anim/md6/characters/humans/mp_male/motion/mechanics/manual_override/pull_lever_finish.bmd6anim';
+  const surface = { path: 'assets/' + anim, request: anim, provides: { type: 'anim', name: anim.slice('cooked/anim/'.length).replace(/\.bmd6anim$/, '.md6anim') },
+    stock: { source: anim, sha256: 'ab'.repeat(32) } };
+  const decl = 'generated/decls/entitydef/monster/imp.decl';
+  const declSurface = { path: 'assets/' + decl, request: decl, provides: { type: 'entityDef', name: 'monster/imp' },
+    stock: { source: decl, sha256: 'cd'.repeat(32) } };
+  /* A pointer whose request names a game path and whose source is another installed file. */
+  const image = 'generated/image/models/monsters/imp/skin.bimage';
+  const moved = { path: 'assets/' + image, request: image, provides: { type: 'image', name: 'models/monsters/imp/skin' },
+    stock: { source: 'generated/image/models/monsters/imp/skin_b.bimage', sha256: 'ef'.repeat(32) } };
+  assert.deepEqual(await put(sampleManifest([file, surface, declSurface, moved], { shadows: [] })), [201, undefined],
+    'pointers outside mods/<id>/ need no shadow');
+  assert.deepEqual(await put(sampleManifest([file, surface])), [201, undefined], 'shadows may be absent');
+
+  const carried = { ...file, path: 'assets/' + decl, request: decl, provides: { type: 'entityDef', name: 'monster/imp' } };
+  const [code, error] = await put(sampleManifest([file, carried], { shadows: [] }));
+  assert.equal(code, 422);
+  assert.equal(error, 'outside the mods/alex.pink-imp/ namespace and not a declared shadow: ' + decl);
+  assert.deepEqual(await put(sampleManifest([file, carried], { shadows: [decl] })), [201, undefined], 'a declared shadow is carried');
+  assert.equal((await put(sampleManifest([file, surface], { shadows: [decl] })))[1], 'shadow names no file: ' + decl);
+  assert.equal((await put(sampleManifest([file, surface, { ...surface }])))[1], 'duplicate path: assets/' + anim);
+  const many = Array.from({ length: 4096 }, (_, i) => ({ path: 'assets/s/' + i, request: 's/' + i, provides: { type: 'file', name: 's/' + i },
+    stock: { source: 's/' + i, sha256: 'ab'.repeat(32) } }));
+  assert.equal((await put(sampleManifest([file, ...many])))[1], 'too many files');
+});
+
 /* ---------------- missing ---------------- */
 
 test('missing answers present and absent blobs and bounds the list', async () => {
@@ -505,6 +541,62 @@ test('missing answers present and absent blobs and bounds the list', async () =>
   assert.equal((await fetchWorker(env, postJson('/mods/missing', { blobs: ['nothex'] }))).status, 400);
   assert.equal((await fetchWorker(env, postJson('/mods/missing', {}))).status, 400);
   assert.equal((await fetchWorker(env, call('GET', '/mods/missing'))).status, 405);
+});
+
+test('missing with a manifest refuses a bundle the store would refuse before any blob is uploaded', async () => {
+  const env = await modsEnv();
+  await storeBlobs(env, blobA);
+  const file = declFile('alex.pink-imp', 'pink_imp', blobA);
+  const second = declFile('alex.pink-imp', 'pink_imp_boss', blobB);
+  const decl = 'generated/decls/entitydef/monster/imp.decl';
+  const carried = { ...file, path: 'assets/' + decl, request: decl, provides: { type: 'entityDef', name: 'monster/imp' } };
+  const ask = async (value, raw) => {
+    const response = await fetchWorker(env, raw ? call('POST', '/mods/missing', { body: raw, headers: { 'Content-Type': 'application/json' } })
+      : postJson('/mods/missing', value));
+    return [response.status, await response.json()];
+  };
+  const objects = () => [...env.MODS.objects.keys()].sort();
+  const before = objects();
+
+  /* The same refusal, status and wording as the bundle PUT, with nothing stored. */
+  const bad = bundleOf(sampleManifest([file, carried, second], { shadows: [] }));
+  const early = await ask({ blobs: [sha(blobA), sha(blobB)], bundle: bad.hash, manifest: bad.text });
+  const late = await fetchWorker(env, putBundleRequest(bad.text, bad.hash));
+  assert.deepEqual(early, [422, { error: 'outside the mods/alex.pink-imp/ namespace and not a declared shadow: ' + decl }]);
+  assert.deepEqual([late.status, await late.json()], early);
+  assert.deepEqual(objects(), before);
+
+  /* An accepted manifest echoes its hash; blobs default to the ones it carries. */
+  const anim = 'cooked/anim/md6/characters/humans/mp_male/motion/mechanics/manual_override/pull_lever_finish.bmd6anim';
+  const surface = { path: 'assets/' + anim, request: anim, provides: { type: 'anim', name: anim.slice('cooked/anim/'.length).replace(/\.bmd6anim$/, '.md6anim') },
+    stock: { source: anim, sha256: 'ab'.repeat(32) } };
+  const good = bundleOf(sampleManifest([file, second, surface], { shadows: [] }));
+  assert.deepEqual(await ask({ bundle: good.hash, manifest: good.text }), [200, { missing: [sha(blobB)], bundle: good.hash }]);
+  assert.deepEqual(await ask({ blobs: [sha(blobA)], bundle: good.hash, manifest: good.text }), [200, { missing: [], bundle: good.hash }]);
+  const onlySurfaces = bundleOf(sampleManifest([surface]));
+  assert.deepEqual(await ask({ bundle: onlySurfaces.hash, manifest: onlySurfaces.text }), [200, { missing: [], bundle: onlySurfaces.hash }]);
+  await storeBlobs(env, blobB);
+  assert.equal((await fetchWorker(env, putBundleRequest(good.text, good.hash))).status, 201, 'the PUT accepts what missing accepted');
+
+  /* Every other bundle PUT refusal arrives early too. */
+  assert.deepEqual(await ask({ bundle: sha(Buffer.from('x')), manifest: good.text }), [422, { error: 'canonical manifest does not hash to the path' }]);
+  assert.deepEqual(await ask({ bundle: good.hash, manifest: JSON.stringify(good.manifest, null, 2) }), [422, { error: 'body is not the canonical manifest text' }]);
+  assert.deepEqual(await ask({ bundle: good.hash, manifest: '{' }), [400, { error: 'bad json' }]);
+  env.MODS_BLOCKED = JSON.stringify([sha(blobB)]);
+  assert.deepEqual(await ask({ bundle: good.hash, manifest: good.text }), [451, { error: 'blocked by takedown', blocked: [sha(blobB)] }]);
+  env.MODS_BLOCKED = JSON.stringify([good.hash]);
+  assert.deepEqual(await ask({ bundle: good.hash, manifest: good.text }), [451, { error: 'blocked by takedown', blocked: [good.hash] }]);
+  env.MODS_BLOCKED = '[]';
+
+  /* Malformed manifest members and the size caps. */
+  assert.equal((await ask({ manifest: good.text }))[0], 400);
+  assert.equal((await ask({ bundle: 'nothex', manifest: good.text }))[0], 400);
+  assert.equal((await ask({ bundle: good.hash, manifest: good.manifest }))[0], 400);
+  assert.equal((await ask({ bundle: good.hash }))[0], 400);
+  assert.equal((await ask({ bundle: good.hash, manifest: 'x'.repeat(MIB + 1) }))[0], 413);
+  assert.equal((await ask({ blobs: [sha(blobA)], pad: 'x'.repeat(512 * 1024) }))[0], 413, 'a plain query keeps its 512 KiB cap');
+  assert.equal((await ask(null, '[]'))[0], 400);
+  assert.equal((await ask(null, '{'))[0], 400);
 });
 
 /* ---------------- takedown ---------------- */
