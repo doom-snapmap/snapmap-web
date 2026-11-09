@@ -734,7 +734,10 @@ loading.
 
 The Mods tab and the Prefabs tab follow their folders: a mod folder you copy into `mods\` by hand is built
 and listed a moment later, and a prefab file you add, rename or delete outside the window appears or goes
-on its own.
+on its own. A folder that was never built before (no key in its `mod.json`) gets a generated key at that
+first build: the folder is renamed to it (its name plus a short salt, for example `cyberprobe_2uxk`), the
+mod's own references are rewritten once, and the Mods tab says so. Two unrelated folders with the same name
+therefore never collide. A folder that an author built with Snapmap+ before sharing it keeps its key.
 
 ### Playing a map that uses mods
 
