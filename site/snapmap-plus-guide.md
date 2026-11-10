@@ -54,9 +54,11 @@ A few practical notes:
   itself. You never need to re-download anything from the site.
 - **Coming from the original SnapHak?** If your DOOM folder still has the original (closed-source)
   SnapHak in it, the installer notices, tells you, and removes its files as part of the install —
-  Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps, prefabs and
-  strings carry straight over: they are copied from the old `%USERPROFILE%\snaphak` folder into
-  Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`).
+  Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps and prefabs
+  carry straight over: they are copied from the old `%USERPROFILE%\snaphak` folder into Snapmap+'s
+  own data folder (`%LOCALAPPDATA%\snapmap-plus`). Your old editor tweaks and custom strings (the
+  `overrides` and `strings` folders of SnapHak and early Snapmap+) become one mod named **My
+  overrides** in your mods list, and those two folders go to the Recycle Bin. Nothing to redo.
 - **Uninstalling:** `snapmap-plus uninstall` restores your DOOM folder to exactly what it was before.
   Your own Snapmap+ data (`config.json`, prefabs, mods, rawmaps under `%LOCALAPPDATA%\snapmap-plus`) is
   left untouched.
@@ -671,8 +673,11 @@ The buttons at the top of the list, by their hover text:
 
 Below them, **Filter by name or id...** narrows the list.
 
-If an `overrides` folder beside `mods` still holds mods, a **Migrate** button takes New mod's place
-until you use it; it moves them into `mods\`. **New mod...** stays on the list's right-click menu.
+The installer moves anything left in an old `overrides` folder into `mods\` by itself: packaged
+mods become mods of their own, and loose editor tweaks join your **My overrides** mod together with
+the old `strings` file. If an `overrides` folder beside `mods` still holds mods when the game runs,
+a **Migrate** button takes New mod's place until you use it. **New mod...** stays on the list's
+right-click menu.
 
 ### Installing a mod
 
@@ -761,6 +766,10 @@ Doomforge, the companion import tool.
 - **Unchanged copies of game files** cost nothing: they are read from each player's own game, never
   stored or uploaded. `sh_mods copystock "<engine path>" "<file>"` writes a game file out so you
   can start from it.
+- **Campaign content comes complete.** When a file of yours names something the game ships only
+  in the campaign (a model, its skeleton and clips, an effect's particles, a screen), Snapmap+
+  brings it along the same way, so the object loads whole in SnapMap. The details pane counts
+  them as game files borrowed for completeness. A name no archive holds is a build warning.
 
 `mod.json` is the part you write:
 
