@@ -474,6 +474,17 @@ test('bundle PUT refuses mismatch, non-canonical text, missing blobs and every m
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.exe')] }, /extension not allowed/);
   await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.bswf')] }, /extension not allowed/);
   {
+    /* A virtual-texture family member is carried only in the form the product's builder writes
+     * (checked through manifestError: the PUT budget above is shared). */
+    const { manifestError } = await modsModule;
+    for (const member of ['mods/alex.pink-imp/fam_sq1.mega2', 'virtualtextures/mods/alex.pink-imp/fam_sq17.mega2',
+                          'virtualtextures/mods/alex.pink-imp/fam_sq01.mega2', 'virtualtextures/mods/alex.pink-imp/_vmtr_sq1.mega2',
+                          'virtualtextures/mods/alex.pink-imp/fam_sq1.mega'])
+      assert.match(manifestError({ ...good, files: [withRequest(member)] }) || '', /extension not allowed/, member);
+    for (const member of ['virtualtextures/mods/alex.pink-imp/fam_sq1.mega2', 'virtualtextures/mods/alex.pink-imp/deep/fam_sq16.mega2'])
+      assert.equal(manifestError({ ...good, files: [withRequest(member)] }), null, member);
+  }
+  {
     /* One accepted PUT covers the newer kinds: the per-address upload budget is shared with the rules below. */
     const kinds = ['generated/swf/mods/alex.pink-imp/x.bswf', 'generated/spirv/mods/alex.pink-imp/x.cspv', 'generated/discreteanimation/mods/alex.pink-imp/x.dmodel'];
     /* A movie is named the way the product names it: type swf, swf/<stem>.swf. */

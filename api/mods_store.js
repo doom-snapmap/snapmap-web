@@ -30,6 +30,7 @@ const SEGMENT_RE = /^[a-z0-9_.~$#@+=,()&!' -]+$/;
 const CVAR_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const COMMAND_LINE_RE = /^[\x21-\x7e](?:[\x20-\x7e]{0,254}[\x21-\x7e])?$/;
 const TYPE_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const MEGA2_RE = /^virtualtextures\/mods\/[^/]+\/.+_sq(?:[1-9]|1[0-6])\.mega2$/;
 const EXTENSIONS = new Set(['decl', 'bmd6model', 'bmd6skl', 'bmd6anim', 'bimage', 'bmodel', 'bcm', 'bnk', 'json', 'bin', 'vspv', 'fspv', 'cspv', 'mrpr', 'dmodel']);
 const TOP_KEYS = new Set(['format', 'id', 'build', 'version', 'name', 'author', 'homepage', 'requirements', 'shadows', 'extra', 'files', 'bundle']);
 /* Descriptor keys the builder preserves verbatim (strings, hud, legacy, composes, ...). */
@@ -211,6 +212,9 @@ export function requestPathError(path, options) {
   const ext = dot > 0 ? last.slice(dot + 1) : '';
   if (options && options.extension === false) return null;
   if (ext === 'bswf') return path.startsWith('generated/swf/') ? null : 'extension not allowed';
+  /* A private virtual-texture family member, the one form the product's builder admits (modbundle.c
+   * sh_mb_vt_member): under virtualtextures/mods/<id>/, member 1 to 16, never a stock _vmtr family. */
+  if (ext === 'mega2') return MEGA2_RE.test(path) && !path.slice(16).includes('_vmtr') ? null : 'extension not allowed';
   if (!EXTENSIONS.has(ext) && !/^baas_[a-z0-9]+$/.test(ext)) return 'extension not allowed';
   return null;
 }
