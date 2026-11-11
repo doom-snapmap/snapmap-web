@@ -722,9 +722,7 @@ which you turned off in the Mods tab; turn on "Play maps whose mods include scri
 it." That holds for a map you downloaded while the setting was on, and for a rawmap or prefab ZIP
 you import or open. Your own maps always play.
 
-`mods\maps\` is a cache. When DOOM starts, Snapmap+ removes the mods of a downloaded map that none of
-your saved maps uses and that you have not played for 30 days. Playing that map again downloads
-them again.
+A downloaded map's mods stay in `mods\maps\` until you remove them in the Mods tab.
 
 When a mod cannot be had, the map does not load, and the game says why:
 
@@ -798,7 +796,7 @@ Select one of your mods to read about it. The line under its name says how it is
 - **Sharing**: how many of your published maps use it.
 
 A mod a downloaded map brought shows a short view instead: which map it came with, whether it runs
-scripts, and the 30-day cleanup line. Its buttons are **Add to my mods**, which copies it into your
+scripts, and that it stays until you remove it. Its buttons are **Add to my mods**, which copies it into your
 own mods so your own maps can use it, and **Remove**.
 
 The buttons above the details are **Files** (browse the mod's files), **Use in this map** (only while
