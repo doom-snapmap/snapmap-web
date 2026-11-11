@@ -661,7 +661,7 @@ tell before they open one.
 ### The Mods tab
 
 The **Mods** tab lists every mod installed on this computer, sorted by name. Each row shows one
-icon, the mod's name, and its id, version and size:
+icon, the mod's name and its size:
 
 - a **green check**: installed and working;
 - a **map icon**: the map open in the editor uses this mod;
@@ -681,11 +681,12 @@ The buttons at the top of the list, by their hover text:
 
 Below them, **Filter by name or id...** narrows the list.
 
-The installer moves anything left in an old `overrides` folder into `mods\` by itself: packaged
-mods become mods of their own, and loose editor tweaks join your **My overrides** mod together with
-the old `strings` file. If an `overrides` folder beside `mods` still holds mods when the game runs,
-a **Migrate** button takes New mod's place until you use it. **New mod...** stays on the list's
-right-click menu.
+When you update Snapmap+, the installer converts what you already have, once: every mod folder
+in `mods\`, anything left in an old `overrides` folder (packaged mods become mods of their own, and
+loose editor tweaks join your **My overrides** mod together with the old `strings` file), and every
+map saved on this computer, so your maps and mods keep working together. Nothing else needs doing,
+and there is nothing to run later. A folder in an older shape that was not converted is listed with
+a yellow triangle and the reason; the game does not use it.
 
 ### Installing a mod
 
@@ -700,7 +701,7 @@ You can also copy a mod folder into `mods\` yourself. Snapmap+ notices it a mome
 Select a mod to read about it. The line under its name says how it is doing, for example
 "Installed and serving 24 files, 476 more read from your install".
 
-- **About**: its id, version, author and description, and its folder (click it to open it in
+- **About**: its description and author, and its folder (click it to open it in
   Explorer). One line says where it came from: added by hand, imported from an export, or
   downloaded for a map you played.
 - **What it adds**: the Toybox rows it adds, by name, and any sounds, movies or modules it brings.
@@ -784,7 +785,6 @@ Doomforge, the companion import tool.
 ```json
 {
   "name": "Blue Imp",
-  "version": "1.0.0",
   "author": "alex",
   "description": "A recoloured Imp with its own Toybox entry.",
   "strings": {
@@ -801,7 +801,7 @@ Doomforge, the companion import tool.
 
 | Field | What it does |
 |---|---|
-| `name`, `version`, `author`, `homepage`, `description` | What players see in the Mods tab. `name` is required. |
+| `name`, `author`, `homepage`, `description` | What players see in the Mods tab. `name` is required. A mod has no version number: it is its folder as it is now, and a published map carries the files it was published with. |
 | `strings` | The Toybox names and descriptions your files refer to as `#str_...`, under `"en"`: `"blue_imp_2uxk_imp_blue_name": "Blue Imp"` supplies `#str_blue_imp_2uxk_imp_blue_name`. Start each name with your folder's name so it never meets another mod's. |
 | `requirements` | Console settings the game needs while a map uses the mod. `cvars` maps a setting to its value (up to 32); `commands` holds two lists of console lines, `activate` and `deactivate` (up to 16 each, no `;`). The two settings above are needed by any mod that brings campaign-only models or images into SnapMap. |
 | `companions` | Helper objects that spawn with every placed copy of one of your tiles and move with it, such as the screens of a control panel. |
@@ -909,9 +909,9 @@ folder restored from the Recycle Bin.
 
 A mod with a problem gets a yellow triangle, and the details pane starts with "Needs attention:" and
 the cause. A problem in one mod never affects the others. If a change you made breaks your own mod,
-the cause reads "its latest build failed: ...; the last working version keeps serving until it
-builds", so your maps keep working while you fix it. When several mods need attention, the yellow
-triangle at the top of the list shows only those.
+the mod is not used until it builds again: fix the cause the details pane names, then use **Read the
+mods folder again**. Snapmap+ keeps no older copy of a mod to fall back on. When several mods need
+attention, the yellow triangle at the top of the list shows only those.
 
 ### Mod console commands
 
@@ -945,7 +945,6 @@ Everything the Mods tab does is also a console command. `sh_mods help` prints th
 | `sh_mods retry` | Retry uploads that failed and wait in the queue. |
 | `sh_mods cancel` | Stop the running mod store job. |
 | `sh_mods removed` | Say where uninstalled mods go: the Windows Recycle Bin. |
-| `sh_mods migrate [--again]` | Move the mods of an `overrides` folder into `mods\`. |
 
 ---
 
