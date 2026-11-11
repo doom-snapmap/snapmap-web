@@ -44,6 +44,11 @@ const RETIRED_KEYS = ['id', 'key', 'shadows', 'stock', 'scope', 'player', 'exten
 const FILE_KEYS = ['needs', 'path', 'provides', 'sha256', 'size'];
 const POINTER_KEYS = new Set(['closure', 'needs', 'path', 'provides', 'sha256', 'source']);
 const LUA_SIGNATURE = [0x1b, 0x4c, 0x75, 0x61];   // "\x1bLua", the start of every precompiled chunk
+/* A published map that uses only part of a mod uploads just the files it needs: a build of
+ * its own whose author part names, in "slice-of", the build it was cut from, and whose
+ * archive carries that build's canonical manifest as source.json (modslice.h). */
+const SLICE_KEY = 'slice-of';
+const SOURCE_JSON = 'source.json';
 
 /* Every refusal is one plain sentence the product shows as it is: printable ASCII, whole
  * (modnet.c mn_error_text keeps the printable ASCII of the text, of any length). */
@@ -381,6 +386,7 @@ export class ArchiveWalker {
     this.entries = [];
     this.names = new Set();
     this.modjson = null;
+    this.source = null;              // source.json: the canonical manifest of the build a part was cut from
     this.scripts = 0;
     this.central = 0;                // central records read
     this.cdStart = -1;
@@ -514,6 +520,9 @@ export class ArchiveWalker {
       if (name === 'mod.json') {
         entry.data = this.modjson = new Uint8Array(entry.size);
         entry.captured = 0;
+      } else if (name === SOURCE_JSON) {
+        entry.data = this.source = new Uint8Array(entry.size);
+        entry.captured = 0;
       } else if (isScript(name)) {
         this.scripts++;
         entry.check = new ScriptCheck();
@@ -637,9 +646,10 @@ const POINTER_REQUIRED = ['path', 'sha256', 'source', 'provides', 'needs'];
  * member is present exactly when the archive carries scripts and counts them. The Worker
  * does not recompute the build hash or check what each file provides; the product does
  * both before it installs. There is no mod version anywhere in this: a "version" key an
- * author wrote is an unknown author key and is ignored. Returns { salt, scripts } or
- * { error }. */
-export function buildVerdict(hash, entries, modjson) {
+ * author wrote is an unknown author key and is ignored. Part of a build (SLICE_KEY) also
+ * carries source.json, `source` with its SHA-256 `sourceHash`. Returns { salt, scripts },
+ * with sliceOf for part of a build, or { error }. */
+export function buildVerdict(hash, entries, modjson, source = null, sourceHash = null) {
   if (!modjson) return { error: 'The archive has no mod.json.' };
   let text, doc;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(modjson); }
@@ -703,9 +713,38 @@ export function buildVerdict(hash, entries, modjson) {
     requests.add(request);
   }
 
+  /* Part of a build: source.json is the canonical manifest of the build "slice-of" names
+   * (its SHA-256 is that hash), of the same mod, and every carried file is a file of it with
+   * the same hash and size. */
+  const sliceOf = doc[SLICE_KEY];
+  if (sliceOf !== undefined) {
+    if (typeof sliceOf !== 'string' || !HEX64.test(sliceOf)) return { error: MODJSON + 'names the build it was cut from by something other than its hash.' };
+    if (!source) return { error: 'The archive has no ' + SOURCE_JSON + ', which names the files of the build it was cut from.' };
+    if (sourceHash !== sliceOf) return { error: 'The archive\'s ' + SOURCE_JSON + ' is not the build its mod.json was cut from.' };
+    let whole;
+    try { whole = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(source)); }
+    catch { return { error: 'The archive\'s ' + SOURCE_JSON + ' is not UTF-8 JSON.' }; }
+    if (!plainObject(whole) || !Array.isArray(whole.files)) return { error: 'The archive\'s ' + SOURCE_JSON + ' lists no files.' };
+    if (whole.id !== salt) return { error: 'The archive\'s ' + SOURCE_JSON + ' is another mod.' };
+    const had = new Map();
+    for (const file of whole.files) {
+      if (plainObject(file) && typeof file.path === 'string' && typeof file.blob === 'string') had.set(file.path, file);
+    }
+    for (const file of block.files) {
+      const was = had.get(file.path);
+      if (!was || was.blob !== file.sha256 || was.size !== file.size) {
+        return { error: 'The file ' + shown(file.path) + ' is not a file of the build it was cut from.' };
+      }
+    }
+  }
+
   let scripts = 0;
   for (const entry of entries) {
     if (entry.name === 'mod.json') continue;
+    if (entry.name === SOURCE_JSON) {
+      if (sliceOf === undefined) return { error: 'The archive holds ' + SOURCE_JSON + ', which only part of a build carries.' };
+      continue;
+    }
     if (!entry.name.startsWith('assets/')) return { error: 'The archive holds ' + shown(entry.name) + ', which is outside assets/.' };
     const request = entry.name.slice(7);
     if (request !== request.toLowerCase()) return { error: 'The archive holds ' + shown(entry.name) + ', whose path is not in lower case.' };
@@ -730,7 +769,7 @@ export function buildVerdict(hash, entries, modjson) {
   } else if (!scripts || !plainObject(block.scripts) || block.scripts.files !== scripts) {
     return { error: MODJSON + 'describes scripts the archive does not carry.' };
   }
-  return { salt, scripts };
+  return sliceOf === undefined ? { salt, scripts } : { salt, scripts, sliceOf };
 }
 
 function providesOk(value) {
@@ -815,9 +854,10 @@ async function walkStream(stream, length) {
   return walker;
 }
 
-function verdictOf(walker, hash) {
+async function verdictOf(walker, hash) {
   if (walker.error) return { refusal: walker.error };
-  const verdict = buildVerdict(hash, walker.entries, walker.modjson);
+  const sourceHash = walker.source ? await sha256Hex(walker.source) : null;
+  const verdict = buildVerdict(hash, walker.entries, walker.modjson, walker.source, sourceHash);
   return verdict.error ? { refusal: verdict.error } : verdict;
 }
 
@@ -829,7 +869,7 @@ async function deleteObjects(env, objects) {
 
 /* Records a validated archive and answers the upload. */
 async function register(env, hash, size, verdict, object) {
-  const result = await registry(env, 'registerBuild', hash, size, verdict.salt, object, verdict.scripts);
+  const result = await registry(env, 'registerBuild', hash, size, verdict.salt, object, verdict.scripts, verdict.sliceOf ?? null);
   await deleteObjects(env, [result.discard]);
   return reply({ build: hash, size, scripts: verdict.scripts }, result.created ? 201 : 200);
 }
@@ -904,9 +944,9 @@ async function putBuild(req, env, hash) {
   let verdict = null;
   const tap = new TransformStream({
     transform(chunk, controller) { walker.push(chunk); controller.enqueue(chunk); },
-    flush() {
+    async flush() {
       walker.finish();
-      verdict = verdictOf(walker, hash);
+      verdict = await verdictOf(walker, hash);
       if (verdict.refusal) throw new Error('refused');
     },
   });
@@ -1026,7 +1066,7 @@ async function completeParts(req, env, hash) {
     console.log('mods: a joined archive could not be read back');
     throw new RequestError(UNAVAILABLE, 503);
   }
-  const verdict = verdictOf(walker, hash);
+  const verdict = await verdictOf(walker, hash);
   if (verdict.refusal) { await deleteObjects(env, [session.object]); return refuse(verdict.refusal, 422); }
   return register(env, hash, size, verdict, session.object);
 }
@@ -1082,6 +1122,39 @@ async function postRelease(req, env) {
   return new Response(null, { status: 204 });
 }
 
+/* ---------------- what players asked for ---------------- */
+
+/* POST /mods/build/<hash>/asked {"request","by"}: a player's game asked a published map's part
+ * of a mod for a file the part lacks. Kept for the map's author, who sees it beside the
+ * published map and publishes again to carry it. Only a stored part of a build takes one,
+ * and only for a request inside that build's own mod. Counts as a claim call. */
+async function postAsked(req, env, hash) {
+  if (!(await admit(req, env, [['mod_claim', 1]], false))) { await discard(req); return rateLimited(); }
+  const body = await readRequestJson(req);
+  if (typeof body.request !== 'string' || !body.request || body.request !== body.request.toLowerCase() || pathFault(body.request)) {
+    return refuse('The report names no file of a mod.', 400);
+  }
+  if (body.by !== undefined && !displayText(body.by)) return refuse('The report names what asked for the file by something other than text.', 400);
+  const result = await registry(env, 'reportAsked', hash, body.request, body.by === undefined ? '' : body.by);
+  if (result.notFound) return refuse(NO_BUILD, 404);
+  if (result.whole) return refuse('This build is a whole mod; nothing was left out of it.', 404);
+  if (result.foreign) return refuse('The report names a file of another mod.', 400);
+  return new Response(null, { status: 204 });
+}
+
+/* POST /mods/asked {"claim","secret"}: what players asked for of the builds a claim names,
+ * for the claim's holder. Counts as a read. */
+async function postAskedList(req, env) {
+  if (!(await admit(req, env, [['mod_get', 1]], true))) { await discard(req); return rateLimited(); }
+  const body = await readRequestJson(req);
+  if (typeof body.claim !== 'string' || !HEX32.test(body.claim)) return refuse('The request names no claim.', 400);
+  if (typeof body.secret !== 'string' || !HEX64.test(body.secret)) return refuse(BAD_SECRET, 400);
+  const result = await registry(env, 'listAsked', body.claim, await sha256Hex(body.secret));
+  if (result.notFound) return refuse('The mod store has no such claim.', 404);
+  if (result.forbidden) return refuse('The secret does not match this claim.', 403);
+  return reply({ asked: result.asked });
+}
+
 /* ---------------- maintainer reset ---------------- */
 
 /* Deletes every object in the MODS bucket (build archives, uploads in parts, and anything
@@ -1135,7 +1208,7 @@ export async function handleMods(req, env, path) {
 
 async function routeMods(req, env, path) {
   if (!env.MODS || !env.MOD_REGISTRY || !env.WRITE_QUOTAS) { await discard(req); return refuse(UNAVAILABLE, 503); }
-  const build = path.match(/^\/mods\/build\/([0-9a-fA-F]{64})(?:\/(parts|complete)(?:\/(\d{1,9}))?)?$/);
+  const build = path.match(/^\/mods\/build\/([0-9a-fA-F]{64})(?:\/(parts|complete|asked)(?:\/(\d{1,9}))?)?$/);
   if (build) {
     const [, raw, kind, part] = build;
     if (raw !== raw.toLowerCase()) { await discard(req); return refuse('A build hash must be written in lowercase hex.', 400); }
@@ -1144,11 +1217,13 @@ async function routeMods(req, env, path) {
       if (req.method === 'PUT') return putBuild(req, env, raw);
       return notAllowed(req, 'GET, HEAD, PUT');
     }
+    if (kind === 'asked' && part === undefined) return req.method === 'POST' ? postAsked(req, env, raw) : notAllowed(req, 'POST');
     if (kind === 'parts' && part === undefined) return req.method === 'POST' ? startParts(req, env, raw) : notAllowed(req, 'POST');
     if (kind === 'parts') return req.method === 'PUT' ? putPart(req, env, raw, Number(part)) : notAllowed(req, 'PUT');
     if (part === undefined) return req.method === 'POST' ? completeParts(req, env, raw) : notAllowed(req, 'POST');
   }
-  const action = { '/mods/claim': postClaim, '/mods/release': postRelease, '/mods/admin/reset': postReset }[path];
+  const action = { '/mods/claim': postClaim, '/mods/release': postRelease, '/mods/asked': postAskedList,
+    '/mods/admin/reset': postReset }[path];
   if (action) return req.method === 'POST' ? action(req, env) : notAllowed(req, 'POST');
   await discard(req);
   return refuse(NOT_FOUND, 404);

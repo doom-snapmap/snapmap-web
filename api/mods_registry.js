@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
   initializeRegistry, buildRow, registerBuild, touchBuild, buildServed,
-  claimBuilds, releaseClaim, purgeBuilds, resetRegistry,
+  claimBuilds, releaseClaim, purgeBuilds, resetRegistry, reportAsked, listAsked,
   uploadSession, openUpload, recordPart, closeUpload, abandonUploads,
 } from './mods_registry_store.js';
 
@@ -13,7 +13,9 @@ export class ModRegistry extends DurableObject {
   }
 
   buildRow(hash) { return buildRow(this.ctx.storage, hash); }
-  registerBuild(hash, size, salt, object, scripts) { return registerBuild(this.ctx.storage, hash, size, salt, object, scripts, Date.now()); }
+  registerBuild(hash, size, salt, object, scripts, sliceOf) {
+    return registerBuild(this.ctx.storage, hash, size, salt, object, scripts, Date.now(), sliceOf ?? null);
+  }
   touchBuild(hash) { return touchBuild(this.ctx.storage, hash, Date.now()); }
   buildServed(hash) { return buildServed(this.ctx.storage, hash, Date.now()); }
   claim(request) { return claimBuilds(this.ctx.storage, request, Date.now()); }
@@ -24,5 +26,7 @@ export class ModRegistry extends DurableObject {
   recordPart(hash, size, upload, part, etag) { return recordPart(this.ctx.storage, hash, size, upload, part, etag, Date.now()); }
   closeUpload(hash, size, upload) { return closeUpload(this.ctx.storage, hash, size, upload); }
   abandonUploads(limit, all) { return abandonUploads(this.ctx.storage, Date.now(), limit, all); }
+  reportAsked(hash, request, asker) { return reportAsked(this.ctx.storage, hash, request, asker, Date.now()); }
+  listAsked(id, presentedHash) { return listAsked(this.ctx.storage, id, presentedHash); }
   reset() { return resetRegistry(this.ctx.storage); }
 }
