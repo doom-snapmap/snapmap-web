@@ -169,8 +169,7 @@ in that box. Messages that report an error stay until you dismiss them.
 ![Entities tab: list populated, one row selected](images/entities-tab-dark.png)
 
 The Entities tab lists every entity placed in your map, by its **reference ID** and, if you've given it
-one, its display name. The list keeps itself up to date automatically as you edit — **Refresh** is there
-if you ever want to force an immediate re-sync yourself.
+one, its display name. The list keeps itself up to date automatically as you edit.
 
 - **Filter entities...** narrows the list by typing part of an ID or name.
 - **Show hidden** reveals the entities that exist in every map by default (the built-in filters like "any
@@ -187,8 +186,7 @@ if you ever want to force an immediate re-sync yourself.
 Follow Selection and Select in 3D are opposite directions of one mode, so they cannot be enabled together.
 Snapmap+ remembers the direction you choose (or that both are off) for the next launch.
 
-- **Deselect** clears whatever's selected in the 3D editor. Occasionally clicking off an object in-game
-  doesn't fully deselect it — this button is a reliable way to force it.
+Clicking the blank space of the list clears the selection in the 3D editor too.
 
 Right-clicking one or more selected rows gives you:
 
@@ -197,11 +195,11 @@ Right-clicking one or more selected rows gives you:
 - **Delete** — deletes the entity(ies) exactly as pressing Delete in the 3D editor would, following
   the same rules: objects the editor protects and room doors or caps are not deleted, and Ctrl+Z
   undoes it like any other delete. A message says what was deleted, or why nothing was.
-- **Push to stack 0** — adds the entity(ies) to SnapStack's scratch stack 0 (see
+- **Add to SnapStack (stack 0)** — adds the entity(ies) to SnapStack's scratch stack 0 (see
   [SnapStack](#snapstack-bulk-editing)).
-- **Clear stack 0** — empties stack 0 out, regardless of what's currently selected.
+- **Clear SnapStack (stack 0)** — empties stack 0 out, regardless of what's currently selected.
 
-**Fly to entity:** select one entity and press the crosshair button beside **Revert**, or right-click
+**Fly to entity:** select one entity and press **Fly to** beside **Revert**, or right-click
 the row and choose **Fly to entity**. Snapmap+ switches the editor to Object mode if you are in
 Blueprint and moves the camera in front of the entity with the cursor resting on it, so you can grab it
 or open its properties right away. The camera drops to the floor beneath you as it does after Tab; if
@@ -227,22 +225,26 @@ on the right.
   type a value that isn't listed.
 - **Displayname** — the name shown in the SnapMap editor and in the Entities list (not shown to players
   in-game). Editing it here bypasses the editor's character limit, and works even on entities the stock
-  editor won't let you rename (filters, for instance).
-- **Decl Text** — the entity's full underlying declaration, in the format described in
+  editor won't let you rename (filters, for instance). For a mod's **Script** node the field offers the
+  names that mod's scripts answer and fire, and a line under it says what the node does ("Script node:
+  runs "switch_used" in Door Logic.", or that no script uses the name). An object a mod's script
+  drives reads "Driven by a script in <mod>." See [Mod scripts](#mod-scripts).
+- **Declaration** — the entity's full underlying declaration, in the format described in
   [Understanding the Decl Format](#understanding-the-decl-format). This is the same data the Properties
   menu edits a slice of — here you see and can edit all of it. Syntax is colorized as you type, and
   anything the checker flags (an unknown property, a value that doesn't look like the type it expects, an
   enum value outside the known set) shows up as an underline plus a count in the corner — **hover a
   warning to jump to it**. A count of "no problems" doesn't guarantee the map will load — the checker
-  catches likely mistakes, it doesn't validate everything the engine does.
+  catches likely mistakes, it doesn't validate everything the engine does. **Ctrl+Space** offers the
+  property names and values that fit where the cursor is.
 - **Focus mode** (the expand icon next to the problem count) — expands the decl editor to fill the
   window, hiding the fields above and below it, for distraction-free editing of a long decl. Save,
   Revert, and the problem count stay right there next to the toggle; press **Esc** or click the icon
   again to leave.
-- **Save to Decl** — commits your edits (**Ctrl+S** works as a shortcut while the decl editor has focus).
+- **Save** — commits your edits (**Ctrl+S** works as a shortcut while the declaration editor has focus).
   Most visual changes won't appear in the 3D editor until you reload the map (copy-pasting the entity, or
   playing the map, will reflect the change immediately even without a reload). **You still need to save
-  the map itself from SnapMap's own menu** — Save to Decl only writes the change into the in-memory map
+  the map itself from SnapMap's own menu** — Save only writes the change into the in-memory map
   the editor is holding.
 - **Revert** — discards your unsaved edits, reloading the entity's last-saved state.
 - **Inherit / Class Descriptions** (collapsible, below the editor) — a short description of what the
@@ -254,7 +256,7 @@ on the right.
 
 ## Understanding the Decl Format
 
-The Decl Text editor uses the same syntax the engine itself uses to store entities, so it's worth
+The Declaration editor uses the same syntax the engine itself uses to store entities, so it's worth
 learning the shape of it before you start editing.
 
 A property is written as `propertyName = value;` on its own line — the semicolon matters; a missing one
@@ -292,7 +294,7 @@ renderModels = {
 ```
 
 `item[N]` entries are the list's contents, numbered from 0; `num` is the count. **Keep `num` accurate** —
-too low, and Save to Decl will silently drop the out-of-range items; too high, and the game can crash
+too low, and Save will silently drop the out-of-range items; too high, and the game can crash
 when you try to play the map. You can freely add or remove items as long as you keep `num` matching.
 
 A couple of things to keep in mind while editing:
@@ -425,7 +427,7 @@ A worked example — turning a prop into a Mover (a scriptable-movement entity):
 
 1. Change **Classname** to `idMover`
 2. Change **Inherit** to `snapmaps/func/snap_lift`
-3. Save to Decl
+3. Save
 4. Save the map and exit the editor
 5. Re-open the map
 
@@ -456,7 +458,7 @@ Steps to reclass one manually, if you're not starting from the *Custom tab:
 
 1. Change **Classname** to the type you want.
 2. Change **Inherit** to `snapmaps/unknown`.
-3. Save to Decl — only after **both** fields are changed, not one at a time, or the map will likely
+3. Save — only after **both** fields are changed, not one at a time, or the map will likely
    crash from the momentary mismatch.
 4. Save the map, exit, and re-open it (or copy-paste the entity and delete the original).
 
@@ -738,7 +740,7 @@ Select a mod to read about it. The line under its name says how it is doing, for
 - **Build**: when it was last built, and a **Bundle** number to quote when you ask for help.
 - **Sharing**: how many of your published maps use it.
 
-Colour marks what a thing is, in the Decl Text editor's own colours: the mod's own files, the game
+Colour marks what a thing is, in the Declaration editor's own colours: the mod's own files, the game
 files it edits, and console settings each have theirs. Hover any coloured part to see what it means.
 The warning colour is kept for problems.
 
@@ -750,7 +752,7 @@ the mod again from its folder) and **Uninstall**.
 
 **Files** opens the mod's folder in a window. On the left is the folder as a tree, with a filter.
 On the right is the selected file: its path, what it is to the game (for example "New file" or
-"Your edit of a game file"), and its text in the Decl Text editor's colours.
+"Your edit of a game file"), and its text in the Declaration editor's colours.
 
 The window is read-only. You can select and copy text; to change a mod, edit its files in its folder.
 A file with a problem carries a yellow triangle in the tree, and the problem is shown under its
