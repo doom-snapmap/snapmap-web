@@ -8,7 +8,7 @@ title: Guide to Snapmap+
 ## What is Snapmap+
 
 Snapmap+ is a tool that reads and writes a DOOM (2016) SnapMap file directly, instead of going through
-the game's built-in editor UI. That gives you three things the stock editor can't:
+the game's built-in editor UI. That gives you four things the stock editor can't:
 
 - **Properties the Properties menu doesn't expose.** Every entity in DOOM's engine has far more fields
   than SnapMap's UI shows you — Snapmap+ lets you read and write all of them.
@@ -19,11 +19,14 @@ the game's built-in editor UI. That gives you three things the stock editor can'
   that isn't in SnapMap's own picker at all.
 - **Entities SnapMap was never built to place.** The DOOM engine contains far more object types than
   SnapMap's palette exposes. Snapmap+ can place and configure any of them.
+- **Mods.** New demons, props, sounds and whole arenas in DOOM's own Toybox, and small Lua scripts
+  that drive them. A map that uses mods brings them along: other Snapmap+ players are offered the
+  download when they open it. See [Mods](#mods) and [Mod scripts](#mod-scripts).
 
-Edits that use stock engine behavior and installed assets can travel with the
-**map file itself**, including to console players. Features that supply new
-runtime resources have additional requirements: **resized Grid Rooms require
-Snapmap+ on the player's PC** and cannot be delivered to vanilla or console players.
+Edits that use stock engine behavior and installed assets travel with the **map file itself**,
+including to console players. Features that supply new runtime resources need **Snapmap+ on the
+player's PC** and cannot reach vanilla or console players: resized Grid Rooms, Unlock Map Bounds and
+every map that uses a mod. Each of those sections says so.
 
 ![Snapmap+ full window: Entities tab open, DOOM editor visible behind it](images/snapmap-window-and-doom.png)
 
