@@ -1454,9 +1454,7 @@ placement. Turning it on widens that box to the largest size the game can
 handle, 32671 units, for this map; the editor camera, the Blueprint floor grid
 and the Blueprint floor range follow. Choose **Apply**, then save the map; the
 setting is stored inside the map and is used whenever the map is edited, played
-or loaded directly. A map saved by an earlier Snapmap+ version with a number
-between the two keeps that number and shows the setting as On until you change
-it.
+or loaded directly.
 
 The highest value is 32671. Collision and AI navigation store world positions
 as 16-bit numbers that end at 32767, and navigation reaches up to 96 units
@@ -1510,10 +1508,10 @@ another map uses that map's own setting.
   Set Environment nodes still change the environment; only the distance is
   replaced and the fog stretched to match. It is not infinite.
 
-Turning the setting on modifies the map: it is stored in the map as a string
-variable named `smp.render.v1`. Turning it off and applying removes that
-variable again, so the next save writes the map exactly as the unmodified game
-would. Players without Snapmap+ can load a map saved with it on; they see the
+Turning the setting on modifies the map: it is stored in the map's own Snapmap+
+data, a part of the map file the game ignores (it never appears among the map's
+variables). Turning it off and applying removes it again, so a map with nothing
+else of Snapmap+ saves exactly as the unmodified game would. Players without Snapmap+ can load a map saved with it on; they see the
 map with its original environments.
 
 On a four-room test map, frame times were the same with the setting on and off
@@ -1523,12 +1521,6 @@ cost more, because nothing past the old distance is cut away any more.
 
 Fog is not a map setting. Use environments and Set Environment nodes for fog;
 with this setting on their fog is kept but drawn farther out.
-
-Maps saved with earlier Snapmap+ versions, which stored a View Distance number,
-read as follows: a distance of 8192 (the old default) reads as **Off**, and its
-variable is removed the next time the map is saved; any other distance,
-including 0, reads as **On**. Their old map fog values are ignored. Maps saved
-with the former enable switch off read as **Off**.
 
 ### AI navigation on Blocking Boxes
 
