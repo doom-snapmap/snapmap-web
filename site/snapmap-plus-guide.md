@@ -1390,14 +1390,13 @@ conflicting connection loops and new overlaps can prevent an edit.
 
 Out-of-range values clamp and the panel shows the applied dimensions. Only the
 value you changed is adjusted. If a room cannot grow further on that axis, the
-panel keeps the size that fits; the Snapmap+ log (`sh_backend.log`) says which
-room or connected module reached which limit. A room that already extends past
+panel keeps the size that fits, and a message says which room or connected
+module reached which limit. A room that already extends past
 the limit can always be made smaller. The maximum
 follows the current `snapEdit_environmentModuleBounds` cvar, the room's world
 position and its connected neighbors. Raising that cvar allows larger rooms
 without restarting, up to native collision and navigation coordinate limits.
-Snapmap+ does not change the cvar for you. The current process retains up to
-64 distinct size/type combinations; restart DOOM if that cache fills.
+Snapmap+ does not change the cvar for you.
 Keep the world cvar large enough when reopening or playing a map authored with
 a raised limit; the room dimensions are saved, but this cvar is not stored in
 the map. For example, `snapEdit_environmentModuleBounds 30000` permits a larger
@@ -1405,8 +1404,8 @@ world box, while each room still has to fit at its actual position.
 
 Save and load normally. Collision, navigation and marked blocking-volume
 navigation use the resized room. **Players need Snapmap+ to load these maps.**
-The resizing feature is included in the existing backend DLL; it needs no
-separate file beside the map.
+The console command `sh_gridsize` prints the selected Grid Room's size, and
+`sh_gridsize <x> <y> <z>` resizes it the same way the panel does.
 
 To return a map to vanilla compatibility, restore every Grid Room to its
 original dimensions, turn **Unlock View Distance** off, and remove any
@@ -1630,7 +1629,8 @@ landing points clear.
 
 Build navigation from the editor's Start menu with **Build Navmesh**, below
 **Save As** and above **Play**. The game shows **Building Navmesh** while the worker runs, then a
-native completion toast, just like ordinary Save. This does not save or name
+native completion toast, just like ordinary Save; if the build does not finish within a minute, the
+message closes and a toast says so. This does not save or name
 the map, and it does not require a player start. It also works in Blueprint mode
 and with the green preview turned off.
 
@@ -1646,6 +1646,10 @@ boxes and position are unchanged is not baked again at the next Play, after
 reloading the map, or when it is launched from outside the editor. Build Navmesh and the preview bake all three demon sizes, so the first Play
 reuses them. If the View menu says **Could not read this map**,
 run `sh_navmesh` for the reason.
+
+A map can be too large for Play to load: the game holds a fixed number of world
+areas. When a map needs more, a **Map Too Large** message says so before you
+choose Play; make the map smaller.
 
 Duplicated boxes that share an ID keep their navigation when the map assigns
 that ID to one module. An ID assigned to different modules is ambiguous, so the
@@ -1670,21 +1674,23 @@ them each time.
 
 - `sh psel [stack]` — takes your current in-game selection and pushes it onto a stack (default stack 0).
   De-selects everything in-game once it's stored, and reports how many entities landed in which stack.
-  Right-clicking a row in the Entities tab and choosing **Push to stack 0** does the same thing for that
-  one entity.
+  Right-clicking rows in the Entities tab and choosing **Add to SnapStack (stack 0)** does the same thing
+  for those entities.
 - `sh phov [stack]` — pushes whatever entity you're currently hovering (not necessarily selected) onto a
   stack. Pushing the same one twice doesn't duplicate it.
 - `sh pr [stack] [lo] [hi]` — pushes every valid id in the inclusive range `lo..hi` onto a stack, without
   needing to select any of them first.
-- `sh pg [name] [stack]` — pushes a named group's ids onto a stack (`sh pg [name]` alone targets stack 0)
+- `sh pg [stack] [name]` — pushes a named group's ids onto a stack (`sh pg [name]` alone targets stack 0)
   — the reverse direction of `pop2g` below.
 - `sh pop2g [stack] [name]` — moves a stack's contents into a named group (replacing that group's
   previous contents, if any).
 - `sh popsel [stack or group]` — re-selects, in-game, everything stored in a stack or group. Useful both
   for finding something you can only see in the Entities list, and for pulling a group's contents back
   into a stack you can run other commands against.
-- `sh cstk [stack]` — empties a stack out. (Right-clicking in the Entities tab and choosing **Clear stack
-  0** does the same thing for stack 0 specifically.)
+- `sh cstk [stack]` — empties a stack out. (Right-clicking in the Entities tab and choosing **Clear
+  SnapStack (stack 0)** does the same thing for stack 0 specifically.)
+
+Stacks and groups belong to the map you are editing: opening another map empties them.
 
 ### Narrowing a stack
 
@@ -1713,9 +1719,10 @@ stack once they run:
 | `sh acctargets [stack]` | Appends every OTHER entity in the stack to the `targets` list of the LAST entity selected before `sh psel` |
 
 `[property path]` uses dots for nested properties — `clipModelInfo.size.x`, `renderModelInfo.color.r`,
-and so on, the sub-property you want to change written last. Get `inherit`/`classname` wrong together
-(with `bsin`/`bscls` alone rather than `bsincls`) and you risk the same mismatch crash as reclassing a
-single entity by hand — see [Reclassing an Entity](#reclassing-an-entity).
+and so on, the sub-property you want to change written last. `bsin`, `bscls` and `bsincls` check each
+entity's final inherit and classname together and refuse a pair that does not match, so they cannot
+cause the mismatch crash of reclassing by hand (see [Reclassing an Entity](#reclassing-an-entity)).
+Each command reports how many of the entities it changed.
 
 `bse`, `accl`, and `acctargets` all need to know which entity was selected *last* — since groups don't
 track that, those three only work against a stack.
@@ -1762,7 +1769,6 @@ guessing what's in them:
 | `sh chkstk [N]` | Inspect stack `N` (ids + id-strings); omit `N` to summarize every non-empty stack. |
 | `sh chkgrp [name]` | Inspect a group's ids; omit `name` to list every group and its count. |
 | `sh clrgrp <name>` or `sh clrgrp *` | Delete a named group entirely (`*` deletes all of them). |
-| `sh snapstack_diag` | Diagnostic: reports which SnapStack implementation is currently handling commands. |
 
 ---
 
