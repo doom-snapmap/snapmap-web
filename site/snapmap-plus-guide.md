@@ -110,12 +110,13 @@ executable is actually running. Nothing to configure.
 The renderer lives in the `r_renderAPI` cvar (`0` is OpenGL, `1` is Vulkan), stored in
 `%USERPROFILE%\Saved Games\id Software\DOOM\base\DOOMConfig.local`. Changing it is what makes DOOM restart
 into the other executable — useful to know if you're chasing a graphics problem, but not something Snapmap+
-asks you to touch. OpenGL support is new: it is proven against the shipped OpenGL executable in our tests,
-so if you see Snapmap+ behave differently there than under Vulkan, that's worth reporting.
+asks you to touch. If you see Snapmap+ behave differently under OpenGL than under Vulkan, that's
+worth reporting.
 
 Once installed, open a SnapMap in editor mode. A second window — the Snapmap+ panel — will appear
 alongside the DOOM window; you'll need to switch windows (Alt+Tab) to see it, since it doesn't overlay
-the game.
+the game. The panel shows while the editor is open and steps aside during Play and outside the
+editor.
 
 **Set DOOM's display mode to Windowed or Borderless while you're editing with Snapmap+ — avoid true
 Fullscreen.** Snapmap+'s panel is a separate OS window, and switching away from a truly-fullscreen DOOM
@@ -153,6 +154,13 @@ The **status bar** along the bottom stays visible on every tab too:
 - **Updated** (far right) is a live timestamp of the last change Snapmap+ picked up from the map.
 - The **?** icon next to it opens the feedback dialog — see [Reporting Bugs and Requesting
   Features](#reporting-bugs-and-requesting-features).
+
+When a Snapmap+ feature cannot work with your copy of the game, a line above the status bar names
+it ("... is unavailable in this session"); the rest of Snapmap+ works as usual.
+
+**Keyboard.** Every dialog closes with **Esc** and gives focus back where it was. **Shift+F10** opens a
+row's right-click menu, the arrow keys move between tabs and rows, and keys typed into a text box stay
+in that box. Messages that report an error stay until you dismiss them.
 
 ---
 
