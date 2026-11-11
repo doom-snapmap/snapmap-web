@@ -44,7 +44,7 @@ console, Snapmap+'s commands and cvars all carry the short `sh_` prefix — `sh_
 
 A few practical notes:
 
-- **"Windows protected your PC"?** Snapmap+'s files are not code-signed yet, so Windows SmartScreen
+- **"Windows protected your PC"?** Snapmap+'s files are not code-signed, so Windows SmartScreen
   may stop `snapmap-plus.exe` the first time. Choose **More info**, check that the file came from the
   Snapmap+ site or the project's GitHub Releases page, then choose **Run anyway**. Every release is
   built from source on GitHub; anyone with the GitHub CLI can confirm a download with
@@ -53,21 +53,26 @@ A few practical notes:
   close it rather than failing cryptically.
 - If auto-detection can't find DOOM (a non-Steam copy, say), run it from a terminal instead and point
   it at the folder: `snapmap-plus install --doom "C:\path\to\DOOM"`.
-- The installer takes the newest **stable** release. To try betas as well, use
-  `snapmap-plus update --beta`, which takes the newest release of either kind. Snapmap+ never moves you
-  to an older version by itself; `snapmap-plus update --release <version>` installs a specific one.
+- The installer takes the newest **stable** release. `snapmap-plus update --beta` also takes test
+  releases, whichever is newest. Snapmap+ never moves you to an older version by itself;
+  `snapmap-plus update --release <version>` installs a specific one.
 - **Already installed?** Double-clicking `snapmap-plus.exe` again shows your installed version, tells you
   when a newer one is available (press Enter to update), and takes any command — `update`, `changelog`,
   `uninstall`, `status` — right there, no terminal needed.
 - **Updating later:** run `snapmap-plus update` — it updates both Snapmap+ and `snapmap-plus.exe`
   itself. You never need to re-download anything from the site.
-- **Coming from the original SnapHak?** If your DOOM folder still has the original (closed-source)
-  SnapHak in it, the installer notices, tells you, and removes its files as part of the install —
-  Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps and prefabs
-  carry straight over: they are copied from the old `%USERPROFILE%\snaphak` folder into Snapmap+'s
-  own data folder (`%LOCALAPPDATA%\snapmap-plus`). Your old editor tweaks and custom strings (the
-  `overrides` and `strings` folders of SnapHak and early Snapmap+) become one mod named **My
-  overrides** in your mods list, and those two folders go to the Recycle Bin. Nothing to redo.
+- **Your mods and maps come along.** Every install and update converts what an earlier Snapmap+
+  left on this computer so it keeps working: every mod folder in `mods\`, every map you saved, your
+  rawmap and your prefabs. Your old editor tweaks and custom strings (the `overrides` and `strings`
+  folders of earlier versions and of the original SnapHak) become one mod named **My overrides**, and
+  those two folders go to the Recycle Bin. A map file the installer changes keeps a copy of itself
+  as it was beside it. A mod folder it converts but cannot build yet is still converted: the Mods
+  tab shows it with what to fix. If you later copy in a mod folder from an earlier version, the Mods
+  tab says so; run the installer again and it converts that folder too. Files beside a mod's
+  `mod.json` and `assets\` folder are left alone.
+- **Coming from the original SnapHak?** The installer notices it in your DOOM folder and removes
+  its files; Snapmap+ replaces it. Your maps and prefabs are copied from `%USERPROFILE%\snaphak`
+  into Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`).
 - **Uninstalling:** `snapmap-plus uninstall` restores your DOOM folder to exactly what it was before.
   If its record is gone, `snapmap-plus uninstall --doom "C:\path\to\DOOM"` still finds and removes
   Snapmap+'s files there.
@@ -78,9 +83,19 @@ A few practical notes:
 
 What actually lands in your DOOM folder is small: `XINPUT1_4.dll` in the folder itself and one
 `snapmap-plus-ui-*.dll` inside a `snapmap-plus\` subfolder. Everything is checked before a single file
-is touched, and the installer keeps a record so uninstall reverses exactly what it placed. Your settings
-are separate: Snapmap+ creates `%LOCALAPPDATA%\snapmap-plus\config.json` the first time it starts,
-rather than shipping one in the installer.
+is touched, both files go in together or not at all, and the installer keeps a record so uninstall
+reverses exactly what it placed. Your settings are separate: Snapmap+ creates
+`%LOCALAPPDATA%\snapmap-plus\config.json` the first time it starts, rather than shipping one in the
+installer.
+
+**If Snapmap+ does not start.** Snapmap+ checks the game before it changes anything. When your DOOM
+is not the build this release supports (usually because DOOM was updated), a box titled **Snapmap+ is
+off** says so, and the game runs without Snapmap+ for that session: run the installer again, and it
+installs the release that matches your DOOM or tells you that none does yet. When one feature cannot
+find what it needs in your game, only that feature is off: a line at the bottom of the Snapmap+
+window names it ("... is unavailable in this session"), and everything else works. When the two
+Snapmap+ files do not match each other, the window says only "Reinstall Snapmap+": run
+`snapmap-plus update`.
 
 
 ---
