@@ -292,10 +292,9 @@ function defaultFiles(salt) {
 }
 
 /* A refusal is one plain sentence the product shows as it is (modnet.c mn_error_text keeps
- * 160 printable ASCII characters). */
+ * its printable ASCII, whole). */
 function assertSentence(text, what) {
   assert.match(text, /^[A-Z][\x20-\x7e]*\.$/, what + ': ' + text);
-  assert.ok(text.length <= 160, what + ' is ' + text.length + ' characters: ' + text);
 }
 
 function entriesFor(modjson, files) {
@@ -427,6 +426,45 @@ test('an archive PUT creates the build, a re-PUT is idempotent, GET and HEAD ser
   assert.equal((await head.arrayBuffer()).byteLength, 0);
   assert.equal((await fetchWorker(env, call('GET', '/mods/build/' + 'f'.repeat(64)))).status, 404);
   assert.equal((await fetchWorker(env, call('HEAD', '/mods/build/' + 'f'.repeat(64)))).status, 404);
+});
+
+/* A carried file 60 folders deep whose request path is 5,000 bytes. */
+function deepRequest(salt) {
+  const head = 'generated/decls/entitydef/mods/' + salt + '/';
+  const leaf = 'deep_imp.decl';
+  const folders = [];
+  let used = head.length + leaf.length;
+  for (let i = 0; i < 60; i++) {
+    const room = Math.floor((5000 - used) / (60 - i)) - 1;
+    const name = ('f' + i + '_').padEnd(room, 'x');
+    folders.push(name);
+    used += name.length + 1;
+  }
+  folders[59] = folders[59].padEnd(folders[59].length + (5000 - used), 'y');
+  const request = head + folders.join('/') + '/' + leaf;
+  assert.equal(request.length, 5000);
+  assert.equal(request.split('/').length - head.split('/').length + 1, 61);
+  return request;
+}
+
+test('a long name, author, homepage and a 60-folder, 5,000-byte path are carried whole', async () => {
+  const env = await modsEnv();
+  const request = deepRequest(SALT);
+  const author = { name: 'N'.repeat(2000), author: 'A'.repeat(2000), homepage: 'https://example.test/' + 'h'.repeat(10000 - 21) };
+  assert.equal(author.homepage.length, 10000);
+  const archive = build({ files: [...defaultFiles(SALT), { request, data: 'entityDef deep { inherit = "monster/imp"; }\n' }], author });
+  const created = await put(env, archive);
+  assert.equal(created.status, 201, await created.clone().text());
+  const got = await fetchWorker(env, call('GET', '/mods/build/' + archive.hash));
+  assert.deepEqual(Buffer.from(await got.arrayBuffer()), archive.bytes);
+
+  /* A refusal names a long path whole. */
+  const bad = request.replace(/deep_imp\.decl$/, 'deep_imp.exe');
+  const refused = await put(env, build({ files: [{ request: bad, data: 'x' }] }));
+  const text = JSON.parse(await refused.text()).error;
+  assert.equal(refused.status, 422);
+  assert.ok(text.includes(bad), 'the refusal names the path whole: ' + text.length + ' characters');
+  assertSentence(text, 'the long-path refusal');
 });
 
 test('a mod.json-only archive, pointers that never upload, a BOM and a compact mod.json are accepted', async () => {
@@ -627,9 +665,10 @@ test('the Worker refuses what the product would refuse when it reads the archive
   const badPointer = { path: 'assets/generated/decls/entitydef/monster/imp.decl', sha256: 'c'.repeat(64), source: 'Generated/Decls/x.decl',
     provides: { type: 'entityDef', name: 'monster/imp' }, needs: [] };
   await refusedWith(env, build({ stock: [badPointer] }), /^The archive's mod\.json lists a pointer entry Snapmap\+ did not write\.$/);
-  /* A long path keeps the sentence within what the product shows. */
-  const deep = build({ files: [{ request: 'generated/decls/entitydef/mods/' + SALT + '/' + 'deep/'.repeat(70) + 'x.exe', data: 'x' }] });
-  await refusedWith(env, deep, /^The file \.\.\..* is a type of file a mod cannot carry\.$/);
+  /* A long path is named whole. */
+  const deepPath = 'generated/decls/entitydef/mods/' + SALT + '/' + 'deep/'.repeat(70) + 'x.exe';
+  const deep = build({ files: [{ request: deepPath, data: 'x' }] });
+  await refusedWith(env, deep, new RegExp('^The file assets/' + deepPath.replace(/[.]/g, '\\.') + ' is a type of file a mod cannot carry\\.$'));
   assert.equal(env.MODS.objects.size, 0);
 });
 

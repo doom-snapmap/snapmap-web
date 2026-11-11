@@ -45,9 +45,8 @@ const FILE_KEYS = ['needs', 'path', 'provides', 'sha256', 'size'];
 const POINTER_KEYS = new Set(['closure', 'needs', 'path', 'provides', 'sha256', 'source']);
 const LUA_SIGNATURE = [0x1b, 0x4c, 0x75, 0x61];   // "\x1bLua", the start of every precompiled chunk
 
-/* Every refusal is one plain sentence the product shows as it is: printable ASCII, at most
- * 160 characters (modnet.c mn_error_text keeps no more). */
-export const MAX_REFUSAL = 160;
+/* Every refusal is one plain sentence the product shows as it is: printable ASCII, whole
+ * (modnet.c mn_error_text keeps the printable ASCII of the text, of any length). */
 
 /* ---------------- responses ---------------- */
 
@@ -208,11 +207,10 @@ export function validSalt(salt) {
   return typeof salt === 'string' && SALT_RE.test(salt);
 }
 
-/* A path or key as a refusal names it: printable ASCII, the end kept when it is long, so
- * that every sentence stays within MAX_REFUSAL. */
+/* A path or key as a refusal names it: whole, each character outside printable ASCII
+ * shown as "?" (the product reads printable ASCII only). */
 function shown(text) {
-  const t = String(text).replace(/[^\x20-\x7e]/g, '?');
-  return t.length > 72 ? '...' + t.slice(-69) : t;
+  return String(text).replace(/[^\x20-\x7e]/g, '?');
 }
 
 /* What is wrong with a request path (the part below assets/), as the end of a sentence
