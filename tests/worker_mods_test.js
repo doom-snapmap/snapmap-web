@@ -588,6 +588,13 @@ test('the Worker stores what the product writes after decisions 8, 9 and 10', as
   /* Requirements in every shape the builder takes: integers, booleans, padded lines. */
   await stored(env, build({ author: { requirements: { cvars: { g_fov: 90, r_skipFog: true, g_name: 'x y', g_neg: -3 },
     commands: { activate: ['  g_fov 90  '], deactivate: [] } } } }));
+  /* Requirements of any size: 200 cvars with long names and values, 300 long lines. */
+  {
+    const cvars = {}, lines = [];
+    for (let i = 0; i < 200; i++) cvars['sh_a_cvar_name_longer_than_sixty_four_characters_for_the_test_' + i] = 'v'.repeat(300);
+    for (let i = 0; i < 300; i++) lines.push('echo ' + 'x'.repeat(400) + ' ' + i);
+    await stored(env, build({ author: { requirements: { cvars, commands: { activate: lines, deactivate: lines } } } }));
+  }
   /* The block keys the builder writes, a pointer with closure, the largest file count. */
   const pointer = { path: 'assets/generated/decls/entitydef/monster/imp.decl', sha256: 'c'.repeat(64), source: 'generated/decls/entitydef/monster/imp.decl',
     provides: { type: 'entityDef', name: 'monster/imp' }, needs: [], closure: true };

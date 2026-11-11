@@ -31,7 +31,7 @@ const SALT_RE = /^[a-z][a-z0-9]{7}$/;
 /* A path segment's characters as the builder allows them (modbundle.c mb_path_char),
  * lower-cased as every request path is. */
 const SEGMENT_RE = /^[a-z0-9._$+@~() -]+$/;
-const CVAR_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const CVAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PRINTABLE_RE = /^[\x20-\x7e]*$/;
 const EXTENSIONS = new Set(['decl', 'bmd6model', 'bmd6skl', 'bmd6anim', 'bimage', 'bmodel', 'bcm', 'bnk', 'json', 'bin', 'vspv', 'fspv', 'cspv', 'mrpr', 'dmodel']);
 const BLOCK_KEY = 'snapmap-plus';
@@ -769,31 +769,31 @@ function authorError(doc) {
 }
 
 /* Console settings and lines the product applies while a mod's requirements are live, in
- * the builder's shape (modbundle.c mb_requirements): at most 32 cvars named like cvars,
- * each a string of printable ASCII up to 64 characters, an integer or a boolean, no name
- * twice in any case; activate and deactivate lists of up to 16 lines, each 1 to 256
- * printable ASCII characters without ';' once its spaces are trimmed. */
+ * the builder's shape (modbundle.c mb_requirements): any number of cvars named like cvars,
+ * each a string of printable ASCII, an integer or a boolean, no name twice in any case;
+ * activate and deactivate lists of any length, each line printable ASCII without ';' and
+ * not empty once its spaces are trimmed. No count or length of the store's own. */
 function requirementsOk(req) {
   if (!plainObject(req) || Object.keys(req).some(key => key !== 'cvars' && key !== 'commands')) return false;
   if (req.cvars !== undefined) {
-    if (!plainObject(req.cvars) || Object.keys(req.cvars).length > 32) return false;
+    if (!plainObject(req.cvars)) return false;
     const seen = new Set();
     for (const [name, value] of Object.entries(req.cvars)) {
       if (!CVAR_RE.test(name) || seen.has(name.toLowerCase())) return false;
       seen.add(name.toLowerCase());
       const ok = typeof value === 'boolean' || (Number.isSafeInteger(value) && Math.abs(value) < 1e15) ||
-        (typeof value === 'string' && value.length <= 64 && PRINTABLE_RE.test(value));
+        (typeof value === 'string' && PRINTABLE_RE.test(value));
       if (!ok) return false;
     }
   }
   if (req.commands !== undefined) {
     if (!plainObject(req.commands) || Object.keys(req.commands).some(key => key !== 'activate' && key !== 'deactivate')) return false;
     for (const list of Object.values(req.commands)) {
-      if (!Array.isArray(list) || list.length > 16) return false;
+      if (!Array.isArray(list)) return false;
       for (const line of list) {
         if (typeof line !== 'string') return false;
         const trimmed = line.replace(/^ +| +$/g, '');
-        if (!trimmed || trimmed.length > 256 || !PRINTABLE_RE.test(trimmed) || trimmed.includes(';')) return false;
+        if (!trimmed || !PRINTABLE_RE.test(trimmed) || trimmed.includes(';')) return false;
       }
     }
   }
