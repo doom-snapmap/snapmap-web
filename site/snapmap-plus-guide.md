@@ -8,7 +8,7 @@ title: Guide to Snapmap+
 ## What is Snapmap+
 
 Snapmap+ is a tool that reads and writes a DOOM (2016) SnapMap file directly, instead of going through
-the game's built-in editor UI. That gives you three things the stock editor can't:
+the game's built-in editor UI. That gives you four things the stock editor can't:
 
 - **Properties the Properties menu doesn't expose.** Every entity in DOOM's engine has far more fields
   than SnapMap's UI shows you — Snapmap+ lets you read and write all of them.
@@ -19,11 +19,14 @@ the game's built-in editor UI. That gives you three things the stock editor can'
   that isn't in SnapMap's own picker at all.
 - **Entities SnapMap was never built to place.** The DOOM engine contains far more object types than
   SnapMap's palette exposes. Snapmap+ can place and configure any of them.
+- **Mods.** New demons, props, sounds and whole arenas in DOOM's own Toybox, and small Lua scripts
+  that drive them. A map that uses mods brings them along: other Snapmap+ players are offered the
+  download when they open it. See [Mods](#mods) and [Mod scripts](#mod-scripts).
 
-Edits that use stock engine behavior and installed assets can travel with the
-**map file itself**, including to console players. Features that supply new
-runtime resources have additional requirements: **resized Grid Rooms require
-Snapmap+ on the player's PC** and cannot be delivered to vanilla or console players.
+Edits that use stock engine behavior and installed assets travel with the **map file itself**,
+including to console players. Features that supply new runtime resources need **Snapmap+ on the
+player's PC** and cannot reach vanilla or console players: resized Grid Rooms, Unlock Map Bounds and
+every map that uses a mod. Each of those sections says so.
 
 ![Snapmap+ full window: Entities tab open, DOOM editor visible behind it](images/snapmap-window-and-doom.png)
 
@@ -41,7 +44,7 @@ console, Snapmap+'s commands and cvars all carry the short `sh_` prefix — `sh_
 
 A few practical notes:
 
-- **"Windows protected your PC"?** Snapmap+'s files are not code-signed yet, so Windows SmartScreen
+- **"Windows protected your PC"?** Snapmap+'s files are not code-signed, so Windows SmartScreen
   may stop `snapmap-plus.exe` the first time. Choose **More info**, check that the file came from the
   Snapmap+ site or the project's GitHub Releases page, then choose **Run anyway**. Every release is
   built from source on GitHub; anyone with the GitHub CLI can confirm a download with
@@ -50,21 +53,26 @@ A few practical notes:
   close it rather than failing cryptically.
 - If auto-detection can't find DOOM (a non-Steam copy, say), run it from a terminal instead and point
   it at the folder: `snapmap-plus install --doom "C:\path\to\DOOM"`.
-- The installer takes the newest **stable** release. To try betas as well, use
-  `snapmap-plus update --beta`, which takes the newest release of either kind. Snapmap+ never moves you
-  to an older version by itself; `snapmap-plus update --release <version>` installs a specific one.
+- The installer takes the newest **stable** release. `snapmap-plus update --beta` also takes test
+  releases, whichever is newest. Snapmap+ never moves you to an older version by itself;
+  `snapmap-plus update --release <version>` installs a specific one.
 - **Already installed?** Double-clicking `snapmap-plus.exe` again shows your installed version, tells you
   when a newer one is available (press Enter to update), and takes any command — `update`, `changelog`,
   `uninstall`, `status` — right there, no terminal needed.
 - **Updating later:** run `snapmap-plus update` — it updates both Snapmap+ and `snapmap-plus.exe`
   itself. You never need to re-download anything from the site.
-- **Coming from the original SnapHak?** If your DOOM folder still has the original (closed-source)
-  SnapHak in it, the installer notices, tells you, and removes its files as part of the install —
-  Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps and prefabs
-  carry straight over: they are copied from the old `%USERPROFILE%\snaphak` folder into Snapmap+'s
-  own data folder (`%LOCALAPPDATA%\snapmap-plus`). Your old editor tweaks and custom strings (the
-  `overrides` and `strings` folders of SnapHak and early Snapmap+) become one mod named **My
-  overrides** in your mods list, and those two folders go to the Recycle Bin. Nothing to redo.
+- **Your mods and maps come along.** Every install and update converts what an earlier Snapmap+
+  left on this computer so it keeps working: every mod folder in `mods\`, every map you saved, your
+  rawmap and your prefabs. Your old editor tweaks and custom strings (the `overrides` and `strings`
+  folders of earlier versions and of the original SnapHak) become one mod named **My overrides**, and
+  those two folders go to the Recycle Bin. A map file the installer changes keeps a copy of itself
+  as it was beside it. A mod folder it converts but cannot build yet is still converted: the Mods
+  tab shows it with what to fix. If you later copy in a mod folder from an earlier version, the Mods
+  tab says so; run the installer again and it converts that folder too. Files beside a mod's
+  `mod.json` and `assets\` folder are left alone.
+- **Coming from the original SnapHak?** The installer notices it in your DOOM folder and removes
+  its files; Snapmap+ replaces it. Your maps and prefabs are copied from `%USERPROFILE%\snaphak`
+  into Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`).
 - **Uninstalling:** `snapmap-plus uninstall` restores your DOOM folder to exactly what it was before.
   If its record is gone, `snapmap-plus uninstall --doom "C:\path\to\DOOM"` still finds and removes
   Snapmap+'s files there.
@@ -75,9 +83,19 @@ A few practical notes:
 
 What actually lands in your DOOM folder is small: `XINPUT1_4.dll` in the folder itself and one
 `snapmap-plus-ui-*.dll` inside a `snapmap-plus\` subfolder. Everything is checked before a single file
-is touched, and the installer keeps a record so uninstall reverses exactly what it placed. Your settings
-are separate: Snapmap+ creates `%LOCALAPPDATA%\snapmap-plus\config.json` the first time it starts,
-rather than shipping one in the installer.
+is touched, both files go in together or not at all, and the installer keeps a record so uninstall
+reverses exactly what it placed. Your settings are separate: Snapmap+ creates
+`%LOCALAPPDATA%\snapmap-plus\config.json` the first time it starts, rather than shipping one in the
+installer.
+
+**If Snapmap+ does not start.** Snapmap+ checks the game before it changes anything. When your DOOM
+is not the build this release supports (usually because DOOM was updated), a box titled **Snapmap+ is
+off** says so, and the game runs without Snapmap+ for that session: run the installer again, and it
+installs the release that matches your DOOM or tells you that none does yet. When one feature cannot
+find what it needs in your game, only that feature is off: a line at the bottom of the Snapmap+
+window names it ("... is unavailable in this session"), and everything else works. When the two
+Snapmap+ files do not match each other, the window says only "Reinstall Snapmap+": run
+`snapmap-plus update`.
 
 
 ---
@@ -92,12 +110,13 @@ executable is actually running. Nothing to configure.
 The renderer lives in the `r_renderAPI` cvar (`0` is OpenGL, `1` is Vulkan), stored in
 `%USERPROFILE%\Saved Games\id Software\DOOM\base\DOOMConfig.local`. Changing it is what makes DOOM restart
 into the other executable — useful to know if you're chasing a graphics problem, but not something Snapmap+
-asks you to touch. OpenGL support is new: it is proven against the shipped OpenGL executable in our tests,
-so if you see Snapmap+ behave differently there than under Vulkan, that's worth reporting.
+asks you to touch. If you see Snapmap+ behave differently under OpenGL than under Vulkan, that's
+worth reporting.
 
 Once installed, open a SnapMap in editor mode. A second window — the Snapmap+ panel — will appear
 alongside the DOOM window; you'll need to switch windows (Alt+Tab) to see it, since it doesn't overlay
-the game.
+the game. The panel shows while the editor is open and steps aside during Play and outside the
+editor.
 
 **Set DOOM's display mode to Windowed or Borderless while you're editing with Snapmap+ — avoid true
 Fullscreen.** Snapmap+'s panel is a separate OS window, and switching away from a truly-fullscreen DOOM
@@ -136,6 +155,13 @@ The **status bar** along the bottom stays visible on every tab too:
 - The **?** icon next to it opens the feedback dialog — see [Reporting Bugs and Requesting
   Features](#reporting-bugs-and-requesting-features).
 
+When a Snapmap+ feature cannot work with your copy of the game, a line above the status bar names
+it ("... is unavailable in this session"); the rest of Snapmap+ works as usual.
+
+**Keyboard.** Every dialog closes with **Esc** and gives focus back where it was. **Shift+F10** opens a
+row's right-click menu, the arrow keys move between tabs and rows, and keys typed into a text box stay
+in that box. Messages that report an error stay until you dismiss them.
+
 ---
 
 ## The Entities Tab
@@ -143,8 +169,7 @@ The **status bar** along the bottom stays visible on every tab too:
 ![Entities tab: list populated, one row selected](images/entities-tab-dark.png)
 
 The Entities tab lists every entity placed in your map, by its **reference ID** and, if you've given it
-one, its display name. The list keeps itself up to date automatically as you edit — **Refresh** is there
-if you ever want to force an immediate re-sync yourself.
+one, its display name. The list keeps itself up to date automatically as you edit.
 
 - **Filter entities...** narrows the list by typing part of an ID or name.
 - **Show hidden** reveals the entities that exist in every map by default (the built-in filters like "any
@@ -161,8 +186,7 @@ if you ever want to force an immediate re-sync yourself.
 Follow Selection and Select in 3D are opposite directions of one mode, so they cannot be enabled together.
 Snapmap+ remembers the direction you choose (or that both are off) for the next launch.
 
-- **Deselect** clears whatever's selected in the 3D editor. Occasionally clicking off an object in-game
-  doesn't fully deselect it — this button is a reliable way to force it.
+Clicking the blank space of the list clears the selection in the 3D editor too.
 
 Right-clicking one or more selected rows gives you:
 
@@ -171,11 +195,11 @@ Right-clicking one or more selected rows gives you:
 - **Delete** — deletes the entity(ies) exactly as pressing Delete in the 3D editor would, following
   the same rules: objects the editor protects and room doors or caps are not deleted, and Ctrl+Z
   undoes it like any other delete. A message says what was deleted, or why nothing was.
-- **Push to stack 0** — adds the entity(ies) to SnapStack's scratch stack 0 (see
+- **Add to SnapStack (stack 0)** — adds the entity(ies) to SnapStack's scratch stack 0 (see
   [SnapStack](#snapstack-bulk-editing)).
-- **Clear stack 0** — empties stack 0 out, regardless of what's currently selected.
+- **Clear SnapStack (stack 0)** — empties stack 0 out, regardless of what's currently selected.
 
-**Fly to entity:** select one entity and press the crosshair button beside **Revert**, or right-click
+**Fly to entity:** select one entity and press **Fly to** beside **Revert**, or right-click
 the row and choose **Fly to entity**. Snapmap+ switches the editor to Object mode if you are in
 Blueprint and moves the camera in front of the entity with the cursor resting on it, so you can grab it
 or open its properties right away. The camera drops to the floor beneath you as it does after Tab; if
@@ -201,22 +225,26 @@ on the right.
   type a value that isn't listed.
 - **Displayname** — the name shown in the SnapMap editor and in the Entities list (not shown to players
   in-game). Editing it here bypasses the editor's character limit, and works even on entities the stock
-  editor won't let you rename (filters, for instance).
-- **Decl Text** — the entity's full underlying declaration, in the format described in
+  editor won't let you rename (filters, for instance). For a mod's **Script** node the field offers the
+  names that mod's scripts answer and fire, and a line under it says what the node does ("Script node:
+  runs "switch_used" in Door Logic.", or that no script uses the name). An object a mod's script
+  drives reads "Driven by a script in <mod>." See [Mod scripts](#mod-scripts).
+- **Declaration** — the entity's full underlying declaration, in the format described in
   [Understanding the Decl Format](#understanding-the-decl-format). This is the same data the Properties
   menu edits a slice of — here you see and can edit all of it. Syntax is colorized as you type, and
   anything the checker flags (an unknown property, a value that doesn't look like the type it expects, an
   enum value outside the known set) shows up as an underline plus a count in the corner — **hover a
   warning to jump to it**. A count of "no problems" doesn't guarantee the map will load — the checker
-  catches likely mistakes, it doesn't validate everything the engine does.
+  catches likely mistakes, it doesn't validate everything the engine does. **Ctrl+Space** offers the
+  property names and values that fit where the cursor is.
 - **Focus mode** (the expand icon next to the problem count) — expands the decl editor to fill the
   window, hiding the fields above and below it, for distraction-free editing of a long decl. Save,
   Revert, and the problem count stay right there next to the toggle; press **Esc** or click the icon
   again to leave.
-- **Save to Decl** — commits your edits (**Ctrl+S** works as a shortcut while the decl editor has focus).
+- **Save** — commits your edits (**Ctrl+S** works as a shortcut while the declaration editor has focus).
   Most visual changes won't appear in the 3D editor until you reload the map (copy-pasting the entity, or
   playing the map, will reflect the change immediately even without a reload). **You still need to save
-  the map itself from SnapMap's own menu** — Save to Decl only writes the change into the in-memory map
+  the map itself from SnapMap's own menu** — Save only writes the change into the in-memory map
   the editor is holding.
 - **Revert** — discards your unsaved edits, reloading the entity's last-saved state.
 - **Inherit / Class Descriptions** (collapsible, below the editor) — a short description of what the
@@ -228,7 +256,7 @@ on the right.
 
 ## Understanding the Decl Format
 
-The Decl Text editor uses the same syntax the engine itself uses to store entities, so it's worth
+The Declaration editor uses the same syntax the engine itself uses to store entities, so it's worth
 learning the shape of it before you start editing.
 
 A property is written as `propertyName = value;` on its own line — the semicolon matters; a missing one
@@ -266,7 +294,7 @@ renderModels = {
 ```
 
 `item[N]` entries are the list's contents, numbered from 0; `num` is the count. **Keep `num` accurate** —
-too low, and Save to Decl will silently drop the out-of-range items; too high, and the game can crash
+too low, and Save will silently drop the out-of-range items; too high, and the game can crash
 when you try to play the map. You can freely add or remove items as long as you keep `num` matching.
 
 A couple of things to keep in mind while editing:
@@ -354,7 +382,9 @@ land on the thing you want.
 
 **Asset** (right) — once you pick something, its actual preview shows here: materials and images render
 as real pixels (decoded straight from the game's own texture data, not a stand-in icon), and sounds get a
-play/stop button so you can listen before committing. Below the preview:
+play/stop button so you can listen before committing. Sounds play only while a map is open, and your
+sound settings are put back as they were when the sound stops. When a preview or a sound cannot be
+shown, the panel says why. Below the preview:
 
 - **Copy** — copies the asset's path, for pasting into a decl by hand.
 - **Apply to selection** — writes the asset onto whichever entity you currently have selected, immediately.
@@ -399,7 +429,7 @@ A worked example — turning a prop into a Mover (a scriptable-movement entity):
 
 1. Change **Classname** to `idMover`
 2. Change **Inherit** to `snapmaps/func/snap_lift`
-3. Save to Decl
+3. Save
 4. Save the map and exit the editor
 5. Re-open the map
 
@@ -430,7 +460,7 @@ Steps to reclass one manually, if you're not starting from the *Custom tab:
 
 1. Change **Classname** to the type you want.
 2. Change **Inherit** to `snapmaps/unknown`.
-3. Save to Decl — only after **both** fields are changed, not one at a time, or the map will likely
+3. Save — only after **both** fields are changed, not one at a time, or the map will likely
    crash from the momentary mismatch.
 4. Save the map, exit, and re-open it (or copy-paste the entity and delete the original).
 
@@ -507,12 +537,11 @@ A Timeline is organized into **entity events** and **eventcalls**. For every ent
 you add one entity-event tab; under that tab, you add one eventcall per script you want to run on that
 entity.
 
-- The **+** tab adds a new entity-event tab, labeled **Item N** (matching the underlying decl's own
-  `item[N]` numbering).
+- The **+** tab adds a new entity-event tab, labeled with the name (or ID) of the entity it runs on.
 - **Runs on** picks which entity that tab's eventcalls apply to — type an ID, pick from the dropdown, or
   select the entity in the SnapMap editor and click **Use current selection** (exactly one entity must be
   selected for that to work).
-- **Add Eventcall** appends a new, blank script call under the current tab.
+- **Add event** appends a new, blank script call under the current tab.
 - Each eventcall has a **Time** (milliseconds of delay between the Timeline firing and this eventcall
   running — can be left blank) and an event/script name — type to search, or pick from the dropdown. Once
   a script is picked, its specific parameters appear below it as proper typed fields (a checkbox for a
@@ -520,7 +549,7 @@ entity.
   every one of these needs a value, or you'll hit errors.
 - **What does this event do?** (collapsible, under a configured eventcall) gives a short explanation of
   the selected script, when one's on file.
-- **Save Timeline** commits your edits to the Timeline entity. As with any other entity, **you still need
+- **Save** commits your edits to the Timeline entity. As with any other entity, **you still need
   to save the map itself** from SnapMap's own menu afterward. **Revert** discards local edits and re-reads
   the Timeline as it currently exists on the map.
 
@@ -551,8 +580,10 @@ tags, plus an **interactive 3D preview** of what you're about to place: drag to 
 double-click to frame it. The preview colors entities by what they do — solid, blocking, AI Navigation,
 interactable, logic/I/O, triggers — so you can tell what a prefab actually contains before you drop it in.
 It shows the prefab level and upright, the way it pastes, even when it was created while hovering a tilted
-ramp. Blocking Boxes ticked for **AI Navigation** are tinted green, and their number appears beside the
-entity count. Click **Load / Place** to stage the prefab for placement with SnapMap's built-in paste
+ramp. The key button at the bottom left of the preview opens its legend. Blocking Boxes ticked for **AI
+Navigation** are tinted green, and their number appears beside the entity count. Objects a mod adds show
+as boxes. Under the preview, **Limits** lists what the prefab adds to the map's editor limits and where
+the open map would stand after placing it. Click **Load / Place** to stage the prefab for placement with SnapMap's built-in paste
 function, then switch to the editor and press **Ctrl+V** to actually drop it into the map. When the
 placed prefab brings in AI Navigation boxes, Snapmap+ updates the navmesh by itself once you drop
 it, just as **View > Update Navmesh** would.
@@ -566,9 +597,10 @@ first module marked as the anchor, plus the module, object and door counts. **Pl
 only enabled in Blueprint mode: the rooms appear under your cursor already grabbed, like SnapMap's own
 Duplicate, so move them, rotate with **Q** and **E**, press **Space** to drop them (one undo step) or
 **Esc** to discard them. A placement that would push the map over the editor's limits is refused and
-taken back.
+taken back; if it cannot be taken back, it becomes one undo step and the message says to press
+**Ctrl+Z**.
 
-**Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter prefabs...** narrows
+**Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter by name or tag...** narrows
 the list by name or tag. Folders start closed, and the ones you open stay open when you switch tabs or
 restart the game; a filter shows every folder that has a match. **Shift-click** selects a run of rows and
 **Ctrl-click** adds or removes one (folders too). With more than one prefab selected the details pane
@@ -585,17 +617,21 @@ right away.
 **Sharing a prefab:** select it and click **Export** in the details pane. A Save As dialog opens, proposes
 `<name>.zip`, and writes the prefab with every mod it uses into that one `.zip` wherever you choose. Send
 that file. On the other end, **Import** at the top of the list opens a file dialog: pick the `.zip` (or,
-if it was already extracted, the `.json` inside the extracted folder) and Snapmap+ installs any mods they
-do not have yet and adds the prefab to their list. Importing the same export twice changes nothing; an
+if it was already extracted, the `.json` inside the extracted folder) and Snapmap+ adds the prefab to
+their list and installs the mods they do not have yet into their own mods folder, where every map of
+theirs can use them. Importing the same export twice changes nothing; an
 export whose prefab has the same name but different contents lands as `<name> (2)`. The console does the
-same with `sh_prefab export "<name>" "<path.zip>"` and `sh_prefab import "<path.zip or path.json>"`.
+same with `sh_prefab export "<name>" "<path.zip>"` and `sh_prefab import "<path.zip or path.json>"`;
+`sh_prefab mods "<name>"` lists the mods a prefab needs and whether each is installed. A prefab name
+may not contain `..` or be a Windows device name such as `CON`.
 
 **Prefabs that use mods:** the list shows **Mods:** with their names, or **Needs mods:** when one is not
 installed, and the details pane lists each mod as Installed or Not installed. **Load / Place** checks
-first: if the mod store has the missing mods, the game asks whether to download them, then places the
-prefab and adds the mods to the open map (the Mods tab's **Remove from map** takes them out again); if
-the store does not have them, nothing is placed and the message names each mod and asks for the
-prefab's export. A prefab whose mods you already have places as any other.
+first: if the mod store has the missing mods, the game asks whether to download them, installs them in
+your own mods folder, then places the prefab and adds the mods to the open map (the Mods tab's **Remove
+from map** takes them out again); if the store does not have them, nothing is placed and the message
+names each mod and asks for the prefab's export. A prefab whose mods you already have places as any
+other. Placing a prefab never changes where the open map finds its other mods.
 
 ---
 
@@ -609,48 +645,52 @@ All rawmap actions are in the **File** menu:
 
 | Menu option | What it does |
 |---|---|
-| **Load Rawmap...** | Pick a rawmap file. Snapmap+ asks if you want to open it now. **OK** opens it as a new map and discards unsaved edits in the editor. **Cancel** keeps the file waiting, so you can save your work first. |
+| **Load Rawmap...** | Pick a rawmap file (`.json` or `.zip`). Snapmap+ asks whether to open it now; **Open** opens it in the editor as a new map and discards unsaved edits, **Cancel** opens nothing. If the file cannot be opened, the message says why. |
 | **Save Rawmap** | Write the map you are editing to the **Save Path**, including unsaved edits. |
 | **Save Rawmap As...** | Pick a file and write the map you are editing to it. Later **Save Rawmap** clicks go to the same file. |
-| **Open *file* as New Map** | Open the rawmap that is waiting. It shows the file name, and it is grey when no file is waiting. Use it after you cancel **Load Rawmap...**, or to open a rawmap again after you change it in a text editor. |
+| **Open *file* Again** | Open the last rawmap you loaded again, for example after you change it in a text editor. It names the file, and it is grey until you have loaded one. |
 | **Keep This Save Path** | Ticked after **Save Rawmap As...**. Untick it to send saves back to the default file. Opening another map also sends saves back to the default file. |
-| **Use Rawmaps for Every Save/Load** | Off by default. On, every map you open is replaced by the **Load Path** file, and every DOOM Save also writes the **Save Path** file. The console commands `sh_rawmaps on` and `sh_rawmaps off` do the same. |
 
 Under these options, **Load Path** and **Save Path** show the files Snapmap+
 uses. Hover over one to see the full path.
 
-A rawmap you open is a new map. DOOM's own Save asks for a new name, so it
-does not replace the saved map it opened over. If Snapmap+ cannot give that
-protection, it refuses to load rawmaps. Opening a rawmap in place needs at least
-one local map saved through DOOM. You can also open a map from DOOM's list while
-a rawmap is waiting.
+A rawmap you open is a new map: DOOM's own Save asks for a new name, so it
+does not replace the saved map it opened over. A save is refused when no map is
+open in the editor.
 
-A save is refused when no map is open in the editor. A save is cancelled if you
-leave the map before it runs.
-
-A map that uses mods also gets a `.zip` beside its `.json` on every save, and
-**Load Rawmap...** opens either. Share the `.zip`; see
-[Sharing a map that uses mods](#sharing-a-map-that-uses-mods).
+**Rawmaps of maps that use mods.** Every save of such a map also writes a `.zip`
+beside the `.json` (for example `rawmap.zip` beside `rawmap.json`), and **Save
+Rawmap As...** offers `.zip` first. The `.zip` holds the map and every mod it
+uses: share that one file. Opening it installs its mods into
+`mods\maps\<the .zip's name>\`, the map's own folder of mods, and the map opens.
+The map remembers that folder: if you save it to My Maps, it reopens with its
+mods. To make one of those mods your own, use **Add to my mods** in the Mods
+tab (see [Mods](#mods)). A rawmap whose mods you do not have is never opened
+without them: when the mod store has them, the game offers to download them;
+otherwise the message names each one, and you can ask the map's author for the
+`.zip`.
 
 Rawmaps are saved as compact JSON on one line. To save them with line breaks and
 indents, type `sh_pretty_on 1` in the console before you save. Type
 `sh_pretty_on 0` to go back to compact JSON.
 
-Run `sh_rawmaps help` for the console commands. `sh_rawmaps list [folder]`
-lists rawmap files, `sh_rawmaps load <path>` stages a file, `sh_rawmaps load`
-opens it, and `sh_rawmaps save [path]` exports the live map. Console loads
-discard unsaved edits without a confirmation prompt. The advanced command
-`sh_rawmaps overwrite on` allows DOOM's Save to replace the borrowed saved map;
-that choice lasts only until DOOM closes. Keep it off to preserve that map.
+Run `sh_rawmaps help` for the console commands: `sh_rawmaps list [folder]`
+lists rawmap files, `sh_rawmaps load <path>` opens a file in the editor at once
+as a new map (no confirmation: unsaved edits are discarded), `sh_rawmaps load`
+opens the Load Path again, and `sh_rawmaps save [path]` writes the open map.
+The advanced command `sh_rawmaps overwrite on` lets DOOM's Save replace the
+saved map a rawmap opened over; that choice lasts only until DOOM closes. Keep
+it off to preserve that map.
 
 ---
 
 ## Mods
 
 A **mod** adds content SnapMap does not offer: campaign demons such as the Cyberdemon, Hell Guards
-and the Spider Mastermind, props, doors, sounds, and whole arenas as modules. A mod is a folder in
-`%LOCALAPPDATA%\snapmap-plus\mods\` holding a small `mod.json` and an `assets\` folder of game files.
-Its new objects appear in the Toybox with a name and a description, and they play like any other.
+and the Spider Mastermind, props, doors, sounds, whole arenas as modules, and scripts that drive
+them. A mod is a folder in `%LOCALAPPDATA%\snapmap-plus\mods\` holding a small `mod.json` and an
+`assets\` folder of game files. Its new objects appear in the Toybox with a name and a description,
+and they play like any other.
 
 ![DOOM's Toybox showing the Hell Guard, Cyberdemon and Spider Mastermind tiles added by mods](images/mods-toybox-demons.jpg)
 
@@ -658,216 +698,22 @@ A map that uses a mod needs Snapmap+ on every PC that plays it. Console players 
 Snapmap+ cannot play it. Published maps that use mods carry the search tag **mods**, so players can
 tell before they open one.
 
-### The Mods tab
+### Playing maps that use mods
 
-The **Mods** tab lists every mod installed on this computer, sorted by name. Each row shows one
-icon, the mod's name and its size:
+You do not need to install anything to play someone else's map. Open it as usual. If it uses mods
+you do not have, the game asks once, for example "This map needs 1 mod: Hell Guards (1.2 MB).
+Download and install now?". **Yes** downloads only what you approved, checks every file and starts
+the map. **No** leaves the map unloaded. Joining a lobby asks the same way. A map whose mods you
+have starts at once.
 
-- a **green check**: installed and working;
-- a **map icon**: the map open in the editor uses this mod;
-- a **yellow triangle**: the mod needs attention. Hover the icon to read why.
+The mods a map downloads are that map's own: they go into `mods\maps\<map title>\` and are used only
+by that map, so they never change your own maps or another map's mods. When the map's mods include
+scripts, the question says so: scripts run only inside that map and cannot read or change your
+files (see [Mod scripts](#mod-scripts)).
 
-You can sort `mods\` into subfolders of your own. A folder without a `mod.json` is only a grouping
-folder: the list shows it as a folder row with a count, and clicking it opens or closes it.
-
-The buttons at the top of the list, by their hover text:
-
-- **Show only the mods that need attention** (the yellow triangle; shown only when a mod needs it).
-- **This map**: the open map's details and the mods it uses (see [The map window](#the-map-window)).
-- **Read the mods folder again**.
-- **Open mods folder**.
-- **New mod** (see [Making your own mod](#making-your-own-mod)).
-- **Install a mod folder** (the download icon).
-
-Below them, **Filter by name or id...** narrows the list.
-
-When you update Snapmap+, the installer converts what you already have, once: every mod folder
-in `mods\`, anything left in an old `overrides` folder (packaged mods become mods of their own, and
-loose editor tweaks join your **My overrides** mod together with the old `strings` file), and every
-map saved on this computer, so your maps and mods keep working together. Nothing else needs doing,
-and there is nothing to run later. A folder in an older shape that was not converted is listed with
-a yellow triangle and the reason; the game does not use it.
-
-### Installing a mod
-
-Click **Install a mod folder** and pick a mod folder. You can pick several at once, or a folder that
-holds many mods: every mod found inside it is installed in one go. Snapmap+ checks each one, copies
-it into `mods\` and makes it available at once, with no restart.
-
-You can also copy a mod folder into `mods\` yourself. Snapmap+ notices it a moment later and lists it.
-
-### The details pane
-
-Select a mod to read about it. The line under its name says how it is doing, for example
-"Installed and serving 24 files, 476 more read from your install".
-
-- **About**: its description and author, and its folder (click it to open it in
-  Explorer). One line says where it came from: added by hand, imported from an export, or
-  downloaded for a map you played.
-- **What it adds**: the Toybox rows it adds, by name, and any sounds, movies or modules it brings.
-- **What it is made of**: what its files do to the game, such as which game files it edits.
-- **Files**: how many files it carries and their size, and how many more it reads from your own
-  game. Files identical to the game's own are never stored or uploaded.
-- **Requirements**: the console settings and commands the mod needs while a map uses it.
-- **Build**: when it was last built, and a **Bundle** number to quote when you ask for help.
-- **Sharing**: how many of your published maps use it.
-
-Colour marks what a thing is, in the Decl Text editor's own colours: the mod's own files, the game
-files it edits, and console settings each have theirs. Hover any coloured part to see what it means.
-The warning colour is kept for problems.
-
-The buttons above the details, left to right, are **Files**, **Use in this map** (only while a map
-is open in the editor), **Verify** (check every file against its recorded hash), **Rebuild** (build
-the mod again from its folder) and **Uninstall**.
-
-### Browsing a mod's files
-
-**Files** opens the mod's folder in a window. On the left is the folder as a tree, with a filter.
-On the right is the selected file: its path, what it is to the game (for example "New file" or
-"Your edit of a game file"), and its text in the Decl Text editor's colours.
-
-The window is read-only. You can select and copy text; to change a mod, edit its files in its folder.
-A file with a problem carries a yellow triangle in the tree, and the problem is shown under its
-text. The game's own files, unchanged, are greyed out with a gamepad icon. The window opens on the
-file with a problem when there is one, else on `mod.json`.
-
-### Making your own mod
-
-Click **New mod**, give it a name and click **Create**. Snapmap+ makes a folder for it in `mods\`
-with an example crate you can place right away, and the Files window opens on the crate's Toybox
-row.
-
-Place **Example crate** from the Toybox in your map, change the mod's files in its folder, and save.
-Snapmap+ notices every change in `mods\` by itself: the changed mod is built again and the running
-game takes the change, with no restart. New Toybox rows appear and removed ones disappear. A change
-made during Play applies when you return to the editor. A few changes, such as a changed sound bank,
-still need a restart; Snapmap+ says so when that happens. **Read the mods folder again** runs the
-same check at once.
-
-Your own maps follow your own mod. When you change it, a map that uses it picks up the change the
-next time you open, play or save it.
-
-A mod folder you make by hand is renamed the first time Snapmap+ builds it, to its name plus a short
-code (for example `cyberprobe_2uxk`), and its own references are updated to match. About says
-"Renamed from ..." when this happens. The code keeps two mods with the same name apart.
-
-### What goes in a mod folder
-
-```
-blue_imp_2uxk\
-  mod.json
-  assets\
-    generated\decls\entitydef\mods\blue_imp_2uxk\imp_blue.decl
-    generated\decls\snapeditorentitydef\mods\blue_imp_2uxk\imp_blue.decl
-    ...
-```
-
-`assets\` mirrors the game's own resource paths, and every file is already in the game's formats.
-Snapmap+ does not convert models, textures or sounds from other games; that is the job of
-Doomforge, the companion import tool.
-
-- **New files** go under `mods/<your folder's name>/`, so they never collide with the game's files
-  or another mod's.
-- **To change a game file**, put your edited copy of it at the game's own path. Snapmap+ records
-  what your copy changes, and a map that uses the mod gets the game's file with your changes. Two
-  mods that add to the same list both apply. A model or image at a game path with other bytes is
-  refused: put it under `mods/<your folder's name>/` and point your files at it.
-- **Unchanged copies of game files** cost nothing: they are read from each player's own game, never
-  stored or uploaded. `sh_mods copystock "<engine path>" "<file>"` writes a game file out so you
-  can start from it.
-- **Campaign content comes complete.** When a file of yours names something the game ships only
-  in the campaign (a model, its skeleton and clips, an effect's particles, a screen), Snapmap+
-  brings it along the same way, so the object loads whole in SnapMap. The details pane counts
-  them as game files borrowed for completeness. A name no archive holds is a build warning.
-
-`mod.json` is the part you write:
-
-```json
-{
-  "name": "Blue Imp",
-  "author": "alex",
-  "description": "A recoloured Imp with its own Toybox entry.",
-  "strings": {
-    "en": {
-      "blue_imp_2uxk_imp_blue_name": "Blue Imp",
-      "blue_imp_2uxk_imp_blue_desc": "An Imp with a blue hide."
-    }
-  },
-  "requirements": {
-    "cvars": { "g_useResourceBlackList": "0", "g_useImageBlackList": "0" }
-  }
-}
-```
-
-| Field | What it does |
-|---|---|
-| `name`, `author`, `homepage`, `description` | What players see in the Mods tab. `name` is required. A mod has no version number: it is its folder as it is now, and a published map carries the files it was published with. |
-| `strings` | The Toybox names and descriptions your files refer to as `#str_...`, under `"en"`: `"blue_imp_2uxk_imp_blue_name": "Blue Imp"` supplies `#str_blue_imp_2uxk_imp_blue_name`. Start each name with your folder's name so it never meets another mod's. |
-| `requirements` | Console settings the game needs while a map uses the mod. `cvars` maps a setting to its value (up to 32); `commands` holds two lists of console lines, `activate` and `deactivate` (up to 16 each, no `;`). The two settings above are needed by any mod that brings campaign-only models or images into SnapMap. |
-| `companions` | Helper objects that spawn with every placed copy of one of your tiles and move with it, such as the screens of a control panel. |
-| `scenes` | Where one of your scene nodes plays its scene, and which demons appear at the node when it starts. |
-| `hud` | How the ammo panel shows a weapon your mod adds, for example the campaign pistol's infinity symbol. |
-
-Snapmap+ adds one member of its own to `mod.json`, `"snapmap-plus"`, when it builds the folder.
-Leave it alone. The rest of the file, your formatting included, is never changed.
-
-A mod can also carry its own sounds (a sound bank, or a sound decl that reuses one of the game's
-sounds), Flash movies, whole modules and virtual-texture families. The full format is in the product
-repository's [capabilities](https://github.com/doom-snapmap/snapmap-plus/blob/main/docs/capabilities.md#mods)
-and [architecture](https://github.com/doom-snapmap/snapmap-plus/blob/main/docs/architecture.md#mods)
-pages.
-
-### Editor tweaks
-
-Some files change only the editor itself, such as wider property lists or extra choices for stock
-objects. These **editor tweaks** always apply in this computer's editor, whatever map is open. They
-are never saved with a map and never used in Play, so a map made with them needs nothing. A folder
-that holds only editor tweaks has no **Use in this map** button, and its Requirements section reads
-"Changes only this computer's editor; maps made with it need nothing."
-
-### Using a mod in a map
-
-Place one of the mod's objects from the Toybox. When you save, the map records the mod. In the
-editor every installed mod offers its Toybox rows. In Play, a map gets exactly the mods it records,
-and a mod it does not record changes nothing in it.
-
-A mod that changes game files or sets console settings without adding objects can be used by the
-whole map: select it and click **Use in this map**. The map lists it when you save. Once the open
-map uses the selected mod, the same button reads **Remove from map**.
-
-### The map window
-
-The map icon at the top of the list opens a window about the map open in the editor: its name,
-saved-map id, whether it is published and its mods uploaded, whether it carries the **mods** search
-tag, how many mods it uses and how much a player would download, and when it was last saved.
-
-**Mods in this map** lists each mod with how many placed objects use it, or "Used by the whole map",
-and the wires and timelines that reference them. When two of the map's mods edit the same setting
-of a game file differently, **Choices between mods** lets you pick whose edit this map uses.
-
-**Remove from map** first shows what will go: the objects by name, the wires and timeline
-references to them, and the **mods** tag if this is the last mod. The mod stays installed. The
-buttons are **Cancel** and **Delete from map**. Ctrl+Z in the editor brings the objects back, also
-after a Play round. A published copy of the map changes only when you publish again. When the last
-mod is gone, the window says the map is now vanilla: it plays without Snapmap+.
-
-### Publishing a map that uses mods
-
-Publish from DOOM's editor as usual. Before the map goes up, Snapmap+ uploads the mods it uses to
-the mod store, so other players can download them. Files identical to the game's own are never
-uploaded. The first time, the game asks once whether you agree to upload; **No** leaves the map
-unpublished. A map over SnapMap's 10 MB limit is refused before anything is sent.
-
-Plain saves never upload anything. Publishing the map again sends your mod as it is now.
-Unpublishing a map releases its mods on the mod store. Deleting a map from My Maps does not, while
-its published copy stays available.
-
-### Playing a map that uses mods
-
-Open the map as usual. If you are missing a mod it uses, the game asks first, for example "This map
-needs 1 mod: Hell Guards (1.2 MB). Download and install now?". **Yes** downloads only what you
-approved, checks every file, installs it and starts the map. **No** leaves the map unloaded. Joining
-a lobby asks the same way. A map whose mods you have starts at once.
+`mods\maps\` is a cache. When DOOM starts, Snapmap+ removes the mods of a downloaded map that none of
+your saved maps uses and that you have not played for 30 days. Playing that map again downloads
+them again.
 
 When a mod cannot be had, the map does not load, and the game says why:
 
@@ -880,71 +726,636 @@ When a mod cannot be had, the map does not load, and the game says why:
 Opening such a map in the editor names the missing mod and what to do: restore its folder from the
 Recycle Bin, or play the map from My Maps to get the mod from the mod store.
 
-### Sharing a map that uses mods
+### The Mods tab
 
-If your map uses mods, share the `.zip`, not the `.json`. Every time you save a rawmap, Snapmap+
-also saves a `.zip` next to it (for example `rawmap.zip` beside `rawmap.json`); **File > Save Rawmap
-As...** offers `.zip` first. The `.zip` holds the map and every mod it uses, so send that one file.
-Your friend opens it with **File > Load Rawmap...**, and the mods install by themselves. A published
-map needs none of this: the game offers its mods when someone opens it.
+The **Mods** tab lists your mods. **Your mods** holds the ones in your own `mods\` folder; below it,
+one group per downloaded map holds the mods that map brought, under the map's name. Each row shows
+the mod's name and one icon:
 
-If you open a rawmap and see "This map was not loaded. It needs mods you do not have...", the
-message names each missing mod; ask the map's author for the map's `.zip`. When the mod store has
-the mods, Snapmap+ offers to download them instead.
+- a **green check**: ready to use;
+- a **map icon**: the map open in the editor uses this mod;
+- a **yellow triangle**: the mod needs attention. Hover the icon to read why.
+
+You can sort `mods\` into subfolders of your own. A folder without a `mod.json` is only a grouping
+folder: the list shows it as a folder row with a count, and clicking it opens or closes it.
+
+The buttons at the top of the list, by their hover text:
+
+- **Show only the mods that need attention** (the yellow triangle; shown only when a mod needs it).
+- **This map**: the open map's details and the mods it uses (see [The map window](#the-map-window)).
+- **Refresh**: after you change a mod's files, build them again and bring the change into the game.
+- **Open mods folder**.
+- **New mod** (see [Making your first mod](#making-your-first-mod)).
+- **Install mods**: pick **Install mod folders...** or **Install mod ZIPs...** (a prefab's export ZIP
+  is one). You can pick several at once, or a folder that holds many mods. Snapmap+ copies each
+  into your own `mods\` folder and builds it; the game keeps running while it works, and the line
+  at the bottom of the list says how far it got.
+
+Below them, **Filter by name or folder...** narrows the list. At the bottom, the setting **Play maps
+whose mods include scripts** (on by default) decides whether Snapmap+ plays such maps at all: when
+it is off, a map whose mods include scripts is refused before anything downloads.
+
+**Refresh is the one action that reads your mods again.** Snapmap+ does not watch the folder: after
+you change a mod's files, press Refresh. It builds every mod whose files changed and brings the
+change into the running game. Most changes show at once. When one needs more, the message after
+Refresh says which:
+
+- a changed Flash movie or animation shows when you next open the map;
+- a changed sound bank or skeleton needs a restart of DOOM ("Restart DOOM to hear the new
+  <bank>.");
+- a change made during Play applies when you are back in the editor;
+- a changed script runs from the next Play.
+
+### The details pane
+
+Select one of your mods to read about it. The line under its name says how it is doing.
+
+- **About**: its description, author and folder (click the folder to open it in Explorer).
+- **What it adds**: the Toybox rows it adds, by name.
+- **Scripts** (only for a mod with scripts): its files, what they drive ("Drives ai/brute every
+  frame and on its animation events.") and which Script nodes they answer or fire. The **Script
+  log** under it shows what the scripts printed in the current or last Play, and why they stopped
+  if they did; **Copy log** copies it.
+- **What it changes in the game**: the game files it edits, the game texts it changes, the
+  encounters it adds, and its editor tweaks.
+- **What it borrows from the game**: the game files it uses from your own install. They are never
+  stored or uploaded with the mod.
+- **Console settings**: the console settings and commands the mod needs while a map uses it.
+- **Files**: how many files it has and their size, with **Show the files**.
+- **Warnings**, when its build found something to check.
+- **Sharing**: how many of your published maps use it.
+
+A mod a downloaded map brought shows a short view instead: which map it came with, whether it runs
+scripts, and the 30-day cleanup line. Its buttons are **Add to my mods**, which copies it into your
+own mods so your own maps can use it, and **Remove**.
+
+The buttons above the details are **Files** (browse the mod's files), **Use in this map** (only while
+a map is open in the editor; see [Using a mod in a map](#using-a-mod-in-a-map)) and **Uninstall**.
+
+### Browsing a mod's files
+
+**Files** opens the mod's folder in a window. On the left is the folder as a tree, with a filter.
+On the right is the selected file: its path, what it is to the game (for example "New file", "Your
+edit of a game file", or "A script; it runs in the maps that use this mod"), and its text in the
+Declaration editor's colours. Scripts show in Lua's colours.
+
+The window is read-only. **Open in editor** opens the file in your own text editor; press Refresh in
+the Mods tab after you save it. A file with a problem carries a yellow triangle in the tree, and the
+problem is shown under its text. Files Snapmap+ does not build into the mod (a README, notes) are
+marked "Not part of the mod; Snapmap+ ignores it".
+
+### Making your first mod
+
+1. Open a map in the editor and the **Mods** tab. Click **New mod**, give it a name (for example
+   "Crates") and click **Create**. Snapmap+ makes a folder for it in `mods\` with an example crate,
+   and the Files window opens on the crate.
+2. Place **Example crate** from the Toybox, under your mod's own category.
+3. In the Files window, select `mod.json`, click **Open in editor** and change `"Example crate"` to a
+   name of your own. Save the file.
+4. Press **Refresh** in the Mods tab.
+5. The Toybox shows the crate under its new name.
+
+That is the whole loop: change a file, save, Refresh.
+
+### What goes in a mod folder
+
+```
+Crates\
+  mod.json
+  assets\
+    generated\decls\entitydef\mods\Crates\big_crate.decl
+    generated\decls\snapeditorentitydef\mods\Crates\big_crate.decl
+    ...
+  README.txt
+```
+
+`assets\` mirrors the game's own resource paths, and every file is already in the game's formats.
+Snapmap+ does not convert models, textures or sounds from other games; that is the job of
+Doomforge, the companion import tool.
+
+- **New files** go under `mods\<your folder's name>\`, and in your files you write
+  `mods/<your folder's name>/...` to name them, as in `entityDef = "mods/Crates/big_crate";`. When
+  you press Refresh, Snapmap+ files them under the mod's own name, so they never collide with the
+  game's files or another mod's. The folder name is yours: rename the folder whenever you like.
+  The example crate's files already sit under that name, a short code of eight characters; you
+  never need to type it.
+- **To change a game file**, put your edited copy of it at the game's own path. Snapmap+ records
+  what your copy changes, and a map that uses the mod gets the game's file with your changes. Two
+  mods that add to the same list both apply. A model or image at a game path with other bytes is
+  refused: put it under `mods\<your folder's name>\` and point your files at it.
+- **Unchanged copies of game files** cost nothing: they are read from each player's own game, never
+  stored or uploaded. `sh_mods copystock "<engine path>" "<file>"` writes a game file out so you
+  can start from it.
+- **Campaign content comes complete.** When a file of yours names something the game ships only
+  in the campaign (a model, its skeleton and clips, an effect's particles, a screen), Snapmap+
+  brings it along from the player's own game, so the object loads whole in SnapMap, and sets the
+  console settings it needs by itself. The details pane lists them under what it borrows.
+- **Other files** beside `mod.json` and `assets\`, such as a README or your notes, are fine. They
+  are never built or shared.
+
+`mod.json` is the part you write:
+
+```json
+{
+  "name": "Crates",
+  "author": "alex",
+  "description": "Crates in every size.",
+  "strings": {
+    "en": {
+      "big_crate_name": "Big crate",
+      "big_crate_desc": "A crate twice the usual size.",
+      "snapentity_demon_baron": "Baron"
+    }
+  }
+}
+```
+
+| Field | What it does |
+|---|---|
+| `name`, `author`, `homepage`, `description` | What players see in the Mods tab. `name` is required. A mod is its folder as it is now, and a published map carries the files it was published with. |
+| `strings` | The Toybox names and descriptions your files refer to as `#str_...`, under `"en"`. Write plain names: `"big_crate_name"` supplies `#str_big_crate_name`, and Refresh keeps them apart from every other mod's. A name the game already has, such as `snapentity_demon_baron` above, changes that game text instead, in the maps that use the mod. |
+| `requirements` | Console settings the game needs while a map uses the mod: `cvars` maps a setting to its value, and `commands` holds two lists of console lines, `activate` and `deactivate` (no `;`). |
+| `companions` | Helper objects that spawn with every placed copy of one of your tiles and move with it, such as the screens of a control panel. |
+| `scenes` | Where one of your scene nodes plays its scene, and which demons appear at the node when it starts. |
+| `hud` | How the ammo panel shows a weapon your mod adds, for example the campaign pistol's infinity symbol. It follows the mods the open map uses, with no restart. |
+
+A mistake in `scenes` or `hud` fails the build, and the Mods tab names the block. Snapmap+ adds one
+member of its own to `mod.json`, `"snapmap-plus"`, when it builds the folder. Leave it alone; the
+rest of the file is yours.
+
+**Sounds.** A sound decl under `generated\decls\sound\mods\<your folder's name>\` can play any of the
+game's sounds by name. A sound bank of your own, built with Wwise, goes in
+`assets\sound\soundbanks\pc\` named `<your folder's name>_<name>.bnk`; Refresh renames it for the mod
+and keeps every file that names it in step. A changed bank is heard after you restart DOOM.
+
+**Modules.** A mod can carry whole modules, such as a multiplayer map's arena. A module has no tile
+in the Toybox: a map or a module prefab that names it loads it, and it then moves, saves and plays
+like a stock module. A prefab of rooms built from mod modules carries the mod like any prefab.
+
+**Virtual textures.** A mod's own virtual-texture pages are not drawn on lit models such as demons
+and props in this version: give a mod's models ordinary textures.
+
+### Editor tweaks
+
+Some files change only the editor itself, such as wider property lists or extra choices for stock
+objects. These **editor tweaks** always apply in this computer's editor, whatever map is open. They
+are never saved with a map and never used in Play, so a map made with them needs nothing. A folder
+that holds only editor tweaks has no **Use in this map** button, and its details read "Changes only
+this computer's editor; maps made with it need nothing."
+
+### Using a mod in a map
+
+Place one of the mod's objects from the Toybox. When you save, the map records the mod. In the
+editor every one of your mods offers its Toybox rows. In Play, a map gets exactly the mods it
+records, and a mod it does not record changes nothing in it. Your own maps always use your own
+mod folders as they are now.
+
+A mod that changes game files or sets console settings without adding objects can be used by the
+whole map: select it and click **Use in this map**. The map lists it when you save. Once the open
+map uses the selected mod, the same button reads **Remove from map**.
+
+### The map window
+
+The map icon at the top of the list opens a window about the map open in the editor: its name,
+whether it is published and its mods uploaded, how many mods it uses and how much a player would
+download, and when it was last saved.
+
+**Mods in this map** lists each mod with how many placed objects use it, or "Used by the whole map",
+and the wires and timelines that reference them. When two of the map's mods edit the same setting
+of a game file differently, **Choices between mods** lets you pick whose edit this map uses; "The
+first mod the map lists" clears the choice.
+
+**Remove from map** first shows what will go: the objects by name, the wires and timeline
+references to them, and whether the map then plays without Snapmap+. The mod stays installed. The
+buttons are **Cancel** and **Remove from map**. Ctrl+Z in the editor brings the objects back, also
+after a Play round. A published copy of the map changes only when you publish again.
+
+### Publishing a map that uses mods
+
+Publish from DOOM's editor as usual. Before the map goes up, Snapmap+ uploads the mods it uses to
+the mod store, so other players can download them. Files identical to the game's own are never
+uploaded, and a large mod goes up in parts by itself. The first time, the game asks once whether you
+agree to upload; **No** leaves the map unpublished. A map over SnapMap's own 10 MB map limit is
+refused before anything is sent.
+
+Plain saves never upload anything. Publishing the map again sends your mod as it is now; players
+of the map get the files it was published with. Unpublishing a map releases its mods on the mod
+store. Deleting a map from My Maps does not, while its published copy stays available.
+
+### Sharing a map or prefab that uses mods
+
+If your map uses mods, share the rawmap `.zip`, not the `.json`: it holds the map and every mod it
+uses (see [Rawmaps](#rawmaps)). Your friend opens it with **File > Load Rawmap...**; its mods go
+into that map's own folder. A published map needs none of this: the game offers its mods when
+someone opens it.
 
 A prefab that uses mods travels the same way: its **Export** writes one `.zip` with its mods (see
-[The Prefabs Tab](#the-prefabs-tab)). To share a mod on its own, send its folder; the other player
-installs it with **Install a mod folder**.
+[The Prefabs Tab](#the-prefabs-tab)), and importing it puts the mods in the other player's own mods
+folder. To share a mod on its own, send its folder or a ZIP of it; the other player uses
+**Install mods**.
 
 ### Uninstalling a mod
 
-**Uninstall** removes a mod from this computer. Before anything happens you see what it will do:
-if the open map uses the mod, the map is cleaned of it first, with the same list as Remove from map;
-the mod's Toybox rows leave the editor; and its folder moves to the Windows Recycle Bin. When the
-editor's undo history has to be cleared, the confirmation says so. It also says how many of your
-saved maps use the mod: they will not open until a mod folder provides it again, for example the
-folder restored from the Recycle Bin.
+**Uninstall** removes one of your mods from this computer. Before anything happens you see what it
+will do: if the open map uses the mod, the map is cleaned of it first, with the same list as Remove
+from map; the mod's Toybox rows leave the editor; and its folder moves to the Windows Recycle Bin.
+When the editor's undo history has to be cleared, the confirmation says so. It also says how many of
+your saved maps use the mod: they will not open until you restore the folder from the Recycle Bin.
+For a downloaded map's mod the button reads **Remove**.
 
 ### When something goes wrong
 
-A mod with a problem gets a yellow triangle, and the details pane starts with "Needs attention:" and
-the cause. A problem in one mod never affects the others. If a change you made breaks your own mod,
-the mod is not used until it builds again: fix the cause the details pane names, then use **Read the
-mods folder again**. Snapmap+ keeps no older copy of a mod to fall back on. When several mods need
-attention, the yellow triangle at the top of the list shows only those.
+A mod with a problem gets a yellow triangle, and the details pane says what to fix. A problem in one
+mod never affects the others. If a change you made breaks your own mod, the mod is not used until
+it builds again: fix the cause, then press Refresh. Snapmap+ keeps no older copy of a mod to fall
+back on. When several mods need attention, the yellow triangle at the top of the list shows only
+those.
+
+A mod folder made for an earlier version of Snapmap+, copied in by hand, reads "This mod was made
+for an earlier version of Snapmap+. Run the Snapmap+ installer again and it converts it."
 
 ### Mod console commands
 
-Everything the Mods tab does is also a console command. `sh_mods help` prints the full list.
+Everything the Mods tab does is also a console command. `sh_mods help` prints the full list. A
+folder is a name in `mods\` or a full path.
 
 | Command | What it does |
 |---|---|
 | `sh_mods` or `sh_mods status` | Show what the installed mods serve. |
-| `sh_mods list` | List the mod folders. |
-| `sh_mods rescan` (or `refresh`) | Read `mods\` again, build changed folders and bring the changes into the running game. |
+| `sh_mods list` | List the mod folders and why any of them does not build. |
+| `sh_mods rescan` (or `refresh`) | The Mods tab's Refresh: build changed folders and bring the changes into the running game. |
 | `sh_mods new "<name>"` | Make a new mod folder. |
 | `sh_mods build "<folder>"` | Check one folder and build it. |
 | `sh_mods rebuild "<folder>"` | Build one folder again, then rescan. |
-| `sh_mods install "<folder>"` | Copy a mod folder into `mods\` and make it available; a folder without `mod.json` installs every mod below it. |
-| `sh_mods verify "<mod>"` | Check one mod's files against their recorded hashes. |
+| `sh_mods install "<folder>"` | Copy a mod folder into `mods\` and build it; a folder without `mod.json` installs every mod below it. |
+| `sh_mods verify "<folder>"` | Check one mod's files against their recorded hashes. |
 | `sh_mods doctor [verify]` | Explain every mod's state and any conflicts; `verify` also checks every file. |
-| `sh_mods map` | Show the open map's details and the mods it uses. |
-| `sh_mods map add "<id>"` | Use a mod in the whole open map without placing anything. |
-| `sh_mods map remove "<id>" [--yes]` | Show what removing the mod from the open map deletes; `--yes` does it. |
-| `sh_mods uninstall "<id>" [--yes]` | Show what uninstalling the mod does; `--yes` does it. |
-| `sh_mods choose "<game file>/<path>" "<key>"` | Pick whose edit the open map uses where two of its mods disagree. |
-| `sh_mods palette rebuild` | Rebuild the editor's Toybox rows (a rescan does this for you). |
-| `sh_mods palette check` | Diagnostic: report the editor's Toybox rows. |
-| `sh_mods held [filter]` | Print what the game was given under each file name this session. |
+| `sh_mods map` | Show the open map and the mods it uses. |
+| `sh_mods map add "<mod folder>"` | Use a mod in the whole open map without placing anything. |
+| `sh_mods map remove "<mod folder>" [--yes]` | Show what removing the mod from the open map deletes; `--yes` does it. |
+| `sh_mods uninstall "<mod folder>" [--yes]` | Show what uninstalling the mod does; `--yes` does it. |
+| `sh_mods choose "<game file>/<path>" "<mod name>"` | Pick whose edit the open map uses where two of its mods disagree; no name clears the choice. |
+| `sh_mods palette rebuild` | Rebuild the editor's Toybox rows (Refresh does this for you). |
 | `sh_mods copystock "<engine path>" "<file>"` | Write a game file's bytes to a file. |
 | `sh_mods export "<path.zip>"` | Write the open map and its mods to one ZIP. |
-| `sh_mods import "<path.zip>"` | Install a ZIP's mods and stage its map. |
-| `sh_mods push "<mod>" "<ref>"` | Upload a mod to the mod store by hand. |
-| `sh_mods pull "<bundle hash>"` | Download and install a mod from the mod store by hand. |
+| `sh_mods import "<path.zip>"` | Open such a ZIP as **Load Rawmap...** does. |
+| `sh_mods push "<mod folder>" "<ref>"` | Upload a mod to the mod store by hand. |
 | `sh_mods release "<ref>"` | Release an upload on the mod store. |
 | `sh_mods retry` | Retry uploads that failed and wait in the queue. |
-| `sh_mods cancel` | Stop the running mod store job. |
-| `sh_mods removed` | Say where uninstalled mods go: the Windows Recycle Bin. |
+| `sh_mods cancel` | Stop the running upload. |
+
+---
+
+## Mod scripts
+
+A mod can carry **scripts**: small files of Lua code that make its objects do things during Play. A
+script can move and turn the mod's own objects, heal players, drive the mod's own demons (walk, turn,
+aim, fire, attack), deal damage with the mod's own damage decls, play its effects and sounds, and
+talk to SnapMap logic through **Script nodes** and the map's variables.
+
+Scripts run only during Play, only on the host of a game, and only for the mods the map uses. They
+never run in the editor.
+
+### Where a script goes
+
+A script is a text file ending in `.lua` in the mod's `scripts` folder:
+
+```
+door-logic\
+  mod.json
+  assets\
+    mods\door-logic\scripts\door.lua        an entry file: it runs when the map starts
+    mods\door-logic\scripts\lib\count.lua   a library: it runs only when a script asks for it
+```
+
+Write it under your folder's name, as every other new file; Refresh files it under the mod. Every
+entry file starts with the line
+
+```lua
+api = 1
+```
+
+which says the file is written for version 1 of the scripting calls. Comments may come before it.
+Entry files run once when the map starts, in name order; then the `on.map_start` handlers run. A
+library is loaded with `local count = require("count")` for `scripts\lib\count.lua`, once, and only
+from the same mod. `mod.json` says nothing about scripts.
+
+Press **Refresh** after every change. Refresh checks each script without running it: a mistake shows
+on the mod's row at once, with the file and line. A script changed during Play runs from the next
+Play.
+
+### Three examples
+
+These three mods come with the Snapmap+ sources (`tests\fixtures\scripts\`). Each walk-through says
+what the author writes and what happens.
+
+**A door that opens when three switches are on (map logic).** The mod is one file:
+
+```lua
+api = 1
+
+local on_count = 0
+
+on.input("switch_used", function(switch_node, activator)
+  on_count = on_count + 1
+  if on_count == 3 then
+    node("open_door"):fire(activator)
+  end
+end)
+```
+
+`on.input("switch_used", ...)` gives the mod a **Script** row in the Toybox, under the mod's own
+category. In the map, place two Script nodes and name them (their **Displayname**) `switch_used` and
+`open_door`. Wire each switch's **On Used** to `switch_used`, and wire `open_door`'s **On Fired** to the
+door's **Open**. In Play, each switch runs the function; `on_count` keeps its value for the whole
+map. At the third switch, `node("open_door"):fire(activator)` fires every Script node of this mod
+named `open_door`, and the wire opens the door. Name the handler's first value anything but `node`,
+or it hides the `node` call.
+
+**A pickup that spins and heals (an object that thinks).** The mod has an entityDef
+`generated\decls\entitydef\mods\spin-heal\pickups\spin_heal.decl` (a prop) with a Toybox row for it, as the example crate has,
+and this script:
+
+```lua
+api = 1
+
+on.think("pickups/spin_heal", function(self, dt)
+  self:set_yaw(self:yaw() + 90 * dt)
+  for _, p in ipairs(players()) do
+    if p:distance(self) < 40 and p:health() < 100 then
+      p:set_health(math.min(100, p:health() + 25))
+      self:remove()
+      return
+    end
+  end
+end)
+```
+
+Names in a script are the mod's own, without the folder: `"pickups/spin_heal"` is the entityDef above.
+`on.think` runs the function every frame for every placed or spawned `spin_heal`, with `self` the
+object and `dt` the seconds since the last frame, so it turns 90 degrees a second. When a player comes
+within 40 units with less than 100 health, it gives back 25 and removes itself.
+
+**A two-attack enemy (a demon).** The mod has a demon entityDef `ai/brute` with its own animWeb that
+has `melee` and `throw` nodes; the throw clip's release frame has the md6 row `ae_notify "throw"`, and
+both clips end with `ae_notify "attack_done"`. It also has a projectile decl `brute/rock`. The script:
+
+```lua
+api = 1
+
+on.think("ai/brute", function(self)
+  local p = self:enemy() or players()[1]
+  if not p or self.state.busy then return end
+  self:set_enemy(p)
+  self:face(p)
+  local d = self:distance(p)
+  if d < 120 then
+    self.state.busy = true
+    self:anim_state("melee")
+  elseif self:can_see(p) and now() > (self.state.next_throw or 0) then
+    self.state.busy = true
+    self.state.next_throw = now() + 3
+    self:anim_state("throw")
+  else
+    self:move_to_entity(p)
+  end
+end)
+
+on.anim("ai/brute", "throw", function(self)
+  self:fire("brute/rock", "hand_r", self:enemy())
+end)
+
+on.anim("ai/brute", "attack_done", function(self)
+  self.state.busy = false
+end)
+```
+
+Each frame the brute picks the player it fights and turns to them. Up close it plays `melee`; further
+away, when it can see the player and three seconds have passed since the last throw, it plays
+`throw`; otherwise it walks to the player. `self.state` is a table of the script's own for each
+object. The `ae_notify "throw"` row runs the second function on the release frame, which fires a rock
+from the `hand_r` joint at the enemy; `ae_notify "attack_done"` frees the brute for its next choice.
+The first command a script gives a demon takes it over for the rest of the map; the game still plays
+its pain, damage and death.
+
+### Handlers
+
+A handler is a function the game calls when something happens to one of the mod's objects. `name` is
+an entityDef of the mod (it also covers entityDefs that inherit it); names compare without case.
+
+| Handler | Called |
+|---|---|
+| `on.spawn(name, fn(self))` | when such an object appears, placed or spawned |
+| `on.think(name, fn(self, dt))` | every frame, `dt` the seconds since the last |
+| `on.remove(name, fn(self))` | once, when it is gone |
+| `on.damage(name, fn(self, hit))` | when it takes damage: `hit.amount`, `hit.attacker`, `hit.inflictor`, `hit.damage` (the damage decl), `hit.location` (the body zone), `hit.direction` |
+| `on.death(name, fn(self, hit))` | once, when it dies |
+| `on.pain(name, fn(self, reaction, damage, attacker))` | when a demon starts a pain reaction, such as `PAIN_FALTER` |
+| `on.anim(name, notify, fn(self))` | on an md6 row `ae_notify "<notify>"` of its animations |
+| `on.frame_event(name, command, fn(self, args))` | on an md6 row `ae_notify "<command>:<a>:<b>"`; `args` is `{a, b}` |
+| `on.projectile(name, fn(self, p, decl, origin, dir))` | for every projectile the object launches |
+| `on.input(node name, fn(node, activator))` | when a wire reaches a Script node with that name |
+| `on.map_start(fn)` | once, after the entry files ran |
+| `on.map_end(fn)` | once, when the map ends |
+
+### Calls
+
+Positions are tables `{x = ..., y = ..., z = ...}`; wherever a position is asked for, an object stands
+for its own position. Names are the mod's own, without the folder. A call that changes an object
+works only on the mod's own objects (placed from its entityDefs or spawned by its scripts), except
+that any script may heal a player. Reading works on any object. An object that is gone answers `nil`.
+
+**Time and the log**
+
+| Call | What it does |
+|---|---|
+| `now()` | The game time in seconds. Paused time does not count. |
+| `after(seconds, fn)` | Runs `fn` once, later. Returns a handle; `handle:cancel()` stops it. |
+| `every(seconds, fn)` | Runs `fn` again and again. Returns a handle with `cancel()`. |
+| `run(fn)` | Runs `fn` as a sequence that may `wait`. Returns a handle with `cancel()`. |
+| `wait(seconds)` | Inside `run(...)` only: carries on after that time. |
+| `print(...)`, `warn(...)` | Write a line to the mod's script log. |
+| `require(name)` | Loads `scripts\lib\<name>.lua` of the same mod. |
+
+**Objects**
+
+| Call | What it does |
+|---|---|
+| `spawn(def, pos, [yaw])` | Spawns one of the mod's entityDefs and returns it. |
+| `players()` | The players in the game, as a list. |
+| `entities_near(pos, radius)` | The objects within `radius`, nearest first. |
+| `trace(from, to, [radius], [ignore])` | The first thing on the line: `{pos, normal, fraction, entity}`, or `nil`. A radius makes the line thick. |
+| `nav_ground(pos)` | The floor under a point. |
+| `difficulty()` | The game's difficulty, 0 (easiest) to 4 (Nightmare). |
+| `e:pos()`, `e:set_pos(pos)` | Its position. |
+| `e:yaw()`, `e:set_yaw(degrees)` | Its heading. |
+| `e:axis()` | Its forward, left and up directions. |
+| `e:velocity()`, `e:set_velocity(v)` | Its speed and direction of movement. |
+| `e:health()`, `e:set_health(n)` | Its health. `set_health` heals a player; on the mod's own objects it can also lower health, but not to 0 (use `damage`, so the death plays). |
+| `e:alive()` | Whether it is alive. |
+| `e:def()` | Its entityDef's name. |
+| `e:distance(other)` | The distance to another object or a position. |
+| `e:is_player()` | Whether it is a player. |
+| `e:remove()` | Removes it. |
+| `e:view_angle_to(other, [use_view_pos])` | The angle between where it looks and the other. |
+| `e.state` | A table of your own for this object, kept while it exists. |
+
+**Animation**
+
+| Call | What it does |
+|---|---|
+| `e:anim_state(node, [via])` | Moves its animWeb to that node, through `via` if given. |
+| `e:anim_force(node, [blend])` | Jumps to that node, blending over `blend` seconds. |
+| `e:anim_current()` | The node it is in now. |
+| `e:anim_finished()` | Whether the node asked for has finished. |
+| `e:anim_event(name)` | Whether a step of the last request happened: `DEST_BLEND_START`, `DEST_REACHED`, `VIA_BLEND_IN_START`, `VIA_BLEND_OUT_START` or `FINISHED`. |
+
+**Demons** (only on the mod's own demons; the first command takes the demon over for the map)
+
+| Call | What it does |
+|---|---|
+| `ai:move_to(pos, [tolerance], [{run, strafe, aim_while_moving}])` | Walks or runs to a point. |
+| `ai:move_to_entity(e)` | Goes to an object, following it as it moves. |
+| `ai:stop()` | Stands still. |
+| `ai:move_done()` | Whether the last move ended, and whether it failed. |
+| `ai:face(e or pos)`, `ai:turn_done()` | Turns to face something; whether it has. |
+| `ai:aim_at(e or nil)`, `ai:aim_point(pos or nil)` | Aims at an object or a point; `nil` stops. |
+| `ai:focus_tag(tag or nil)` | Aims from a named joint of its model. |
+| `ai:set_enemy([e])`, `ai:enemy()` | Chooses its enemy (no value: the nearest player); reads it. |
+| `ai:can_see(e)`, `ai:can_see_from(e, joint)` | Whether it sees the object, from its eyes or from a joint. |
+| `ai:aware()`, `ai:awareness([e])` | Whether it knows of its enemy; how well: `unaware`, `lost`, `suspected` or `confirmed`. |
+| `ai:angle_to(target)` | The angle from its facing to the target. |
+| `ai:path_length(pos)`, `ai:can_reach(pos)`, `ai:path_points(pos)` | The walking route to a point. The game works it out in the background, so a call may answer "searching": ask again next frame. |
+| `ai:find_position({...})`, `ai:firing_position({...})` | A good place to go near a target (the settings table names the target, the distances and the kind of place). |
+| `ai:spline_clear(target, spline, seconds, [flags])` | Whether a curved path ahead is free. |
+| `ai:anim_valid(node, tests, [side])` | Whether an animation would end in a good place. |
+| `ai:anim_force_via(dest, via, [blend])` | Plays `via`, then goes to `dest`. |
+| `ai:trigger(on)`, `ai:trigger_pulled()`, `ai:weapon_ready()` | Holds or releases its weapon's trigger; whether it is held; whether the weapon can fire again. |
+| `ai:equip(index)` | Equips an item of its inventory. |
+| `ai:laser(tag, on)`, `ai:laser_state(tag, on)`, `ai:laser_sweep(name)` | Its aiming lasers. |
+| `ai:recoil(weight)` | How much its weapon's recoil animation shows, 0 to 1. |
+| `ai:fire(projectile, joint, target)` | Fires one of the mod's projectiles from a joint at an object or a point; returns the projectile. |
+| `ai:monster_type()` | The game's name for its kind of demon. |
+| `ai:pain_string(text or nil)` | Picks which of its pain animations play. |
+| `ai:block_pain(reaction, seconds)` | Holds back one pain reaction for a time. |
+
+**Combat, effects and sound** (with the mod's own decls; an attacker is one of the mod's own objects,
+and without one the damage comes from the world)
+
+| Call | What it does |
+|---|---|
+| `damage(e, damage, [attacker], [from])`, `e:damage(...)` | Applies a damage decl to an object. |
+| `hitscan(from, dir, damage, [range], [attacker])` | A shot along a line; returns `{pos, normal, entity}` or `nil`. |
+| `radius_damage(pos, damage, [attacker])` | Damage around a point, with the decl's own radius. |
+| `explode(pos, damage, [effect], [attacker])` | An explosion with an effect. |
+| `fx(e, condition)`, `fx_stop(e, condition)` | Starts or stops an effect of the object's own fx decl. |
+| `fx(effect, pos, [dir])`, `fx_move(e, pos, [dir])`, `fx_stop(e)` | Places, moves and removes an effect of the mod. |
+| `sound(e, sound, [channel])` | Plays a sound on an object; `channel` is `any`, `voice`, `body`, `weapon` or `item`. |
+| `e:tag(joint)` | A joint's position and forward direction. |
+| `e:pain()` | The pain reaction a demon is in, or `nil`. |
+| `p:steer(target, [speed])`, `p:explode()` | Steers or explodes a projectile the mod's objects launched. |
+
+**Script nodes and map variables**
+
+| Call | What it does |
+|---|---|
+| `node(name):fire([activator])` | Fires every Script node of this mod with that name; returns how many. |
+| `vars.get(name)` | Reads a map variable (Integer, Number, Boolean or String) by its editor name. |
+| `vars.set(name, value)` | Writes it, kept within the variable's bounds; wired logic that watches it reacts. Returns the value stored. |
+
+The rest of Lua's own `string`, `table`, `math`, `utf8` and `coroutine` libraries is there too;
+`math.random` is seeded for each map.
+
+### Script nodes and map variables
+
+A mod whose scripts call `on.input` gets one **Script** row in its Toybox category. A Script node is
+SnapMap logic: wire anything into it, and wire its **On Fired** out. Its **Displayname** is its role:
+`on.input("name", ...)` answers every Script node of the mod with that name, and `node("name"):fire()`
+fires them. In the Entities tab, the Displayname field offers the names the mod's scripts use, and the
+line under it says what the node does. A node whose name no script uses says so there; firing a name
+no node carries writes one warning to the script log.
+
+`vars.get` and `vars.set` read and write the map's own variables, the ones you make in the editor,
+so a script can drive logic the map's author wired, and the other way round. A name the map does not
+have, a name two variables share, or a value of the wrong type stops the script with a sentence that
+says which.
+
+A placed Script node is an object of the mod: a map, a prefab or a rawmap ZIP that holds one carries
+the mod like any other.
+
+### The script log and the console
+
+Each mod with scripts has a **Script log** in the Mods tab: the lines its `print` and `warn` wrote in
+the current or last Play, and the line that says why its scripts stopped. The row turns red while a
+script is stopped, until the next Play. The Snapmap+ window steps aside during Play, so read the log
+there in the console:
+
+| Command | What it does |
+|---|---|
+| `sh_scripts` | What each mod's scripts are doing in this map, or why they stopped. |
+| `sh_scripts log [mod]` | Print a mod's script log. |
+| `sh_scripts reload` | During Play, run the map's scripts again from the start. Outside Play, check every script of the open map's mods and print each mistake with its file and line. |
+
+### When a script goes wrong
+
+**At Refresh.** A mistake in a script fails the mod's build, like any other mistake in a mod, and the
+row and the Files view show it with the file and line:
+
+- `scripts\door.lua line 4: "end" expected to close "function" on line 2. Correct it, then press Refresh.`
+  (and the same for every other mistake of Lua's own grammar);
+- the file does not start with "api = 1": add `api = 1` as its first line;
+- the file asks for a version of the scripting calls this Snapmap+ does not have: update Snapmap+,
+  or write `api = 1`;
+- the file is compiled Lua, not script text: put the `.lua` source text in the file;
+- the file is not UTF-8 text: save it as UTF-8 text;
+- a `.lua` file outside `scripts\` and `scripts\lib\`: move it there;
+- `"require" found no scripts\lib\<name>.lua in this mod`, or `require` was given a name with
+  folders or `.lua`: add the file or correct the name (`require("fsm")` loads `scripts\lib\fsm.lua`);
+- a name under another mod's folder: name only this mod's own content;
+- a file at the path of the mod's own Script node: give it another name.
+
+A warning does not fail the build: "this mod has no entityDef "ai/dor" for on.spawn; check the name".
+
+**During Play.** Any error stops that mod's scripts for the rest of the map; other mods' scripts, and
+the game, carry on. The log gets one line:
+
+```
+Script stopped: Door Logic, scripts\door.lua line 9: "on_cout" is nothing here, so it cannot be used in arithmetic. Check that it is set before it is used.
+```
+
+The sentence names the mod, the file and line, what went wrong and what to do. The ones you meet most:
+
+- `"x" is nothing here` — a name with no value; check that it is set, and its spelling;
+- `"x" is not a function here` — a call misspelled; check the name of the call;
+- `"move_to" needs a position (a table with x, y and z), got nothing` — each call says what it needs,
+  which value it was given, and what it accepts;
+- `"spawn" can only use this mod's own content; "x" belongs to another mod`, or `... not the game's
+  "x"` — scripts name only their own mod's content;
+- `"set_health" can only heal a player; hurt players with damage(...)`, and `... cannot take health
+  to 0; kill with damage(...) so the death plays`;
+- `"wait" can only be used inside run(function() ... end)`;
+- `"x" works only on this mod's own demons`, or `... can only <do this to> this mod's own entities;
+  this one is not`;
+- `took too long ..., so this mod's scripts stopped for this map. Look for a loop that does not end.`;
+- `the file could not be read, so this mod's scripts did not run. Press Refresh in the Mods tab and
+  play the map again.` — a script was edited after the last Refresh;
+- your own `error("...")` text, as you wrote it.
+
+### What scripts cannot do
+
+Scripts are sandboxed text. A script cannot read or write files, start programs, reach the network,
+the clipboard or the registry, or see your settings, saves or other maps. It cannot run compiled
+code. It can name and change only its own mod's content and objects (players: healing, and damage
+through the mod's damage decls). It sees no other mod's scripts and cannot share values with them.
+Nothing it does outlives the map or reaches the editor. A script that runs on and on without
+returning is stopped after a few seconds, with the line above, so a mistake can never hang the game.
+
+### Co-op
+
+Scripts run on the host only. Players who join need the map's mods, as for any mod map, and run no
+scripts themselves: what the scripts do reaches them as the game's own movement, animation, damage
+and death do. Effects started with `fx` on an object show on every player's screen; put other
+visuals and sounds in the clips' md6 rows, which play on every machine.
 
 ---
 
@@ -979,14 +1390,13 @@ conflicting connection loops and new overlaps can prevent an edit.
 
 Out-of-range values clamp and the panel shows the applied dimensions. Only the
 value you changed is adjusted. If a room cannot grow further on that axis, the
-panel keeps the size that fits; the Snapmap+ log (`sh_backend.log`) says which
-room or connected module reached which limit. A room that already extends past
+panel keeps the size that fits, and a message says which room or connected
+module reached which limit. A room that already extends past
 the limit can always be made smaller. The maximum
 follows the current `snapEdit_environmentModuleBounds` cvar, the room's world
 position and its connected neighbors. Raising that cvar allows larger rooms
 without restarting, up to native collision and navigation coordinate limits.
-Snapmap+ does not change the cvar for you. The current process retains up to
-64 distinct size/type combinations; restart DOOM if that cache fills.
+Snapmap+ does not change the cvar for you.
 Keep the world cvar large enough when reopening or playing a map authored with
 a raised limit; the room dimensions are saved, but this cvar is not stored in
 the map. For example, `snapEdit_environmentModuleBounds 30000` permits a larger
@@ -994,8 +1404,8 @@ world box, while each room still has to fit at its actual position.
 
 Save and load normally. Collision, navigation and marked blocking-volume
 navigation use the resized room. **Players need Snapmap+ to load these maps.**
-The resizing feature is included in the existing backend DLL; it needs no
-separate file beside the map.
+The console command `sh_gridsize` prints the selected Grid Room's size, and
+`sh_gridsize <x> <y> <z>` resizes it the same way the panel does.
 
 To return a map to vanilla compatibility, restore every Grid Room to its
 original dimensions, turn **Unlock View Distance** off, and remove any
@@ -1044,9 +1454,7 @@ placement. Turning it on widens that box to the largest size the game can
 handle, 32671 units, for this map; the editor camera, the Blueprint floor grid
 and the Blueprint floor range follow. Choose **Apply**, then save the map; the
 setting is stored inside the map and is used whenever the map is edited, played
-or loaded directly. A map saved by an earlier Snapmap+ version with a number
-between the two keeps that number and shows the setting as On until you change
-it.
+or loaded directly.
 
 The highest value is 32671. Collision and AI navigation store world positions
 as 16-bit numbers that end at 32767, and navigation reaches up to 96 units
@@ -1100,10 +1508,10 @@ another map uses that map's own setting.
   Set Environment nodes still change the environment; only the distance is
   replaced and the fog stretched to match. It is not infinite.
 
-Turning the setting on modifies the map: it is stored in the map as a string
-variable named `smp.render.v1`. Turning it off and applying removes that
-variable again, so the next save writes the map exactly as the unmodified game
-would. Players without Snapmap+ can load a map saved with it on; they see the
+Turning the setting on modifies the map: it is stored in the map's own Snapmap+
+data, a part of the map file the game ignores (it never appears among the map's
+variables). Turning it off and applying removes it again, so a map with nothing
+else of Snapmap+ saves exactly as the unmodified game would. Players without Snapmap+ can load a map saved with it on; they see the
 map with its original environments.
 
 On a four-room test map, frame times were the same with the setting on and off
@@ -1113,12 +1521,6 @@ cost more, because nothing past the old distance is cut away any more.
 
 Fog is not a map setting. Use environments and Set Environment nodes for fog;
 with this setting on their fog is kept but drawn farther out.
-
-Maps saved with earlier Snapmap+ versions, which stored a View Distance number,
-read as follows: a distance of 8192 (the old default) reads as **Off**, and its
-variable is removed the next time the map is saved; any other distance,
-including 0, reads as **On**. Their old map fog values are ignored. Maps saved
-with the former enable switch off read as **Off**.
 
 ### AI navigation on Blocking Boxes
 
@@ -1219,7 +1621,8 @@ landing points clear.
 
 Build navigation from the editor's Start menu with **Build Navmesh**, below
 **Save As** and above **Play**. The game shows **Building Navmesh** while the worker runs, then a
-native completion toast, just like ordinary Save. This does not save or name
+native completion toast, just like ordinary Save; if the build does not finish within a minute, the
+message closes and a toast says so. This does not save or name
 the map, and it does not require a player start. It also works in Blueprint mode
 and with the green preview turned off.
 
@@ -1235,6 +1638,10 @@ boxes and position are unchanged is not baked again at the next Play, after
 reloading the map, or when it is launched from outside the editor. Build Navmesh and the preview bake all three demon sizes, so the first Play
 reuses them. If the View menu says **Could not read this map**,
 run `sh_navmesh` for the reason.
+
+A map can be too large for Play to load: the game holds a fixed number of world
+areas. When a map needs more, a **Map Too Large** message says so before you
+choose Play; make the map smaller.
 
 Duplicated boxes that share an ID keep their navigation when the map assigns
 that ID to one module. An ID assigned to different modules is ambiguous, so the
@@ -1259,21 +1666,23 @@ them each time.
 
 - `sh psel [stack]` — takes your current in-game selection and pushes it onto a stack (default stack 0).
   De-selects everything in-game once it's stored, and reports how many entities landed in which stack.
-  Right-clicking a row in the Entities tab and choosing **Push to stack 0** does the same thing for that
-  one entity.
+  Right-clicking rows in the Entities tab and choosing **Add to SnapStack (stack 0)** does the same thing
+  for those entities.
 - `sh phov [stack]` — pushes whatever entity you're currently hovering (not necessarily selected) onto a
   stack. Pushing the same one twice doesn't duplicate it.
 - `sh pr [stack] [lo] [hi]` — pushes every valid id in the inclusive range `lo..hi` onto a stack, without
   needing to select any of them first.
-- `sh pg [name] [stack]` — pushes a named group's ids onto a stack (`sh pg [name]` alone targets stack 0)
+- `sh pg [stack] [name]` — pushes a named group's ids onto a stack (`sh pg [name]` alone targets stack 0)
   — the reverse direction of `pop2g` below.
 - `sh pop2g [stack] [name]` — moves a stack's contents into a named group (replacing that group's
   previous contents, if any).
 - `sh popsel [stack or group]` — re-selects, in-game, everything stored in a stack or group. Useful both
   for finding something you can only see in the Entities list, and for pulling a group's contents back
   into a stack you can run other commands against.
-- `sh cstk [stack]` — empties a stack out. (Right-clicking in the Entities tab and choosing **Clear stack
-  0** does the same thing for stack 0 specifically.)
+- `sh cstk [stack]` — empties a stack out. (Right-clicking in the Entities tab and choosing **Clear
+  SnapStack (stack 0)** does the same thing for stack 0 specifically.)
+
+Stacks and groups belong to the map you are editing: opening another map empties them.
 
 ### Narrowing a stack
 
@@ -1302,9 +1711,10 @@ stack once they run:
 | `sh acctargets [stack]` | Appends every OTHER entity in the stack to the `targets` list of the LAST entity selected before `sh psel` |
 
 `[property path]` uses dots for nested properties — `clipModelInfo.size.x`, `renderModelInfo.color.r`,
-and so on, the sub-property you want to change written last. Get `inherit`/`classname` wrong together
-(with `bsin`/`bscls` alone rather than `bsincls`) and you risk the same mismatch crash as reclassing a
-single entity by hand — see [Reclassing an Entity](#reclassing-an-entity).
+and so on, the sub-property you want to change written last. `bsin`, `bscls` and `bsincls` check each
+entity's final inherit and classname together and refuse a pair that does not match, so they cannot
+cause the mismatch crash of reclassing by hand (see [Reclassing an Entity](#reclassing-an-entity)).
+Each command reports how many of the entities it changed.
 
 `bse`, `accl`, and `acctargets` all need to know which entity was selected *last* — since groups don't
 track that, those three only work against a stack.
@@ -1351,7 +1761,6 @@ guessing what's in them:
 | `sh chkstk [N]` | Inspect stack `N` (ids + id-strings); omit `N` to summarize every non-empty stack. |
 | `sh chkgrp [name]` | Inspect a group's ids; omit `name` to list every group and its count. |
 | `sh clrgrp <name>` or `sh clrgrp *` | Delete a named group entirely (`*` deletes all of them). |
-| `sh snapstack_diag` | Diagnostic: reports which SnapStack implementation is currently handling commands. |
 
 ---
 
@@ -1362,8 +1771,7 @@ DOOM's own console (press **~** to open it) — some are shortcuts for things th
 others are console-only tools with no window equivalent. Run **`sh_help`** at any time to print the
 full, current list with descriptions directly from the running build; the tables below are the same
 list, organized by what each command is for. (Not repeated here: `sh` and its bulk-edit subcommands,
-`sh_target_any`, and `sh_mods` — those are covered in their own
-sections above.)
+`sh_target_any`, `sh_mods` and `sh_scripts` — those are covered in their own sections above.)
 
 ### Inspecting entities and resources
 
@@ -1376,22 +1784,33 @@ sections above.)
 | `sh_listres <resource class> [filter]` | List every resource of a given class (e.g. `idMaterial`), optionally filtered by name. |
 | `sh_type <type or enum> [-v]` | Print the fields of an idTech class, or the values of an enum. Add `-v` to also see each field's byte offset and size. |
 | `sh_validclasses <inherit>` | List the engine-valid classnames for a given inherit — the same list that fills the Classname dropdown in the [Entity State Panel](#the-entity-state-panel). |
+| `sh_event info <name>` / `sh_event list [filter]` | Print an engine event's number and arguments, or list every event (optionally those matching the filter). |
 | `sh_dumpmap <name>` | Dump the currently generated `.map` (including SnapMap's own auto-generated version) to a file, for debugging. Works in the SnapMap menu as well as in the editor. The name is **game-relative**, not a Windows path: a bare name lands in `<game dir>\base\mapdumps\<name>.map`, and the `.map` extension is always forced. Dumping the same name twice never overwrites — repeats become `<name>_2.map`, `<name>_3.map`, and so on. Pass a name containing a `/` (e.g. `arena/pass1`) to choose your own subfolder under `base\`; it is created for you. The command prints the full path it wrote. |
 
-### Rawmaps
+### Rawmaps and prefabs
 
 | Command | What it does |
 |---|---|
-| `sh_rawmaps` or `sh_rawmaps status` | Show the rawmap state, the Load Path and the Save Path, and what the last save wrote. See [Rawmaps](#rawmaps). |
+| `sh_rawmaps` or `sh_rawmaps status` | Show the Load Path and the Save Path, and what the last save wrote (and the `.zip` beside it for a map with mods). See [Rawmaps](#rawmaps). |
 | `sh_rawmaps help` | List every `sh_rawmaps` verb. |
 | `sh_rawmaps list [folder]` | List rawmap files in the default folder, the Load Path's folder, or a folder you name. |
-| `sh_rawmaps on` / `sh_rawmaps off` | Turn **Use Rawmaps for Every Save/Load** on or off. `sh_rawmaps_on` and `sh_rawmaps_off` do the same. |
-| `sh_rawmaps load <path>` | Point the Load Path at a `.json` or `.zip` and stage it. |
-| `sh_rawmaps load` | Open the Load Path as a new map, or stage it for the next map you open if the editor is not up yet. |
+| `sh_rawmaps load <path>` | Open a `.json` or `.zip` in the editor now, as a new map. A map must be open in the editor. |
+| `sh_rawmaps load` | Open the Load Path again. |
 | `sh_rawmaps save [path]` | Write the open map to the Save Path, or to the path you give, and keep saving there. |
 | `sh_rawmaps savepath [default\|rawmap\|<path>]` | Choose where saves go: the default file, the rawmap you opened, or a file you name. |
 | `sh_rawmaps default` | Put both paths back to the default files. |
 | `sh_rawmaps overwrite [on\|off]` | Off by default. On lets DOOM's Save replace the saved map a rawmap opened over, until you close DOOM. |
+| `sh_prefab mods "<name>"` | List the mods a prefab needs and whether each is installed. |
+| `sh_prefab export "<name>" "<path.zip>"` | Write a prefab with its mods to one ZIP. |
+| `sh_prefab import "<path.zip or path.json>"` | Install a prefab ZIP's mods and add the prefab to your list. |
+
+### Editor
+
+| Command | What it does |
+|---|---|
+| `sh_gridsize [x y z]` | Print the selected Grid Room's size, or resize it. See [Resizing Grid Rooms](#resizing-grid-rooms). |
+| `sh_navmesh` | Show the baked AI navigation the current map uses, room by room, and why anything was left out. `sh_navmesh reads` counts what reading the map has cost; `sh_navmesh detail` adds the bake's internal state. See [AI navigation on Blocking Boxes](#ai-navigation-on-blocking-boxes). |
+| `sh_perf` | Show where Snapmap+ spends frame time, such as reading the map and building navigation previews. `sh_perf reset` sets the counters to zero. `sh_perf read` times reading the open map whole and entity by entity. |
 
 ### Compiling assets
 
@@ -1400,7 +1819,7 @@ sections above.)
 | `sh_genbmodel <input> <output>` | Generate a bmodel from a `.obj`, `.ase`, or `.lwo` file. |
 | `sh_genmd6model <input> <output>` | Compile a `.md6model` into a `bmd6model`. |
 
-### Player cheats
+### Playtesting
 
 Five toggles for your own player, mainly useful while testing a map solo:
 
@@ -1412,36 +1831,32 @@ Five toggles for your own player, mainly useful while testing a map solo:
 | `noPlayerKill` | You can't be killed outright. |
 | `noTarget` | Enemies ignore you. |
 
+**String Set commands.** A map can carry a behaviour as plain map data: a **Set (String)** logic node
+whose value starts with `smp:`. When a signal reaches the node, Snapmap+ runs the command on the player
+who caused it, on the host of the game; without Snapmap+ the node only stores the string, so the map
+plays everywhere.
+
+| Command | What it does |
+|---|---|
+| `smp:event <eventName> [args...]` | Fires any engine event on the activating player, for example `smp:event forcePraetorHandsAndBody 1`. `sh_event info <name>` shows what arguments it takes. A command the game refuses prints one line and does nothing. |
+| `smp:doomhands <0\|1>` | Switches the player's Doom hands on or off and rebuilds the hands and body. |
+| `sh_smp "smp:<command> ..."` | Runs a String Set command on the first player while you playtest. `sh_smp on`, `off` and `status` switch String Set commands for the session (on by default). |
+
 ### Cvars
 
 Settings you read or change with `<name>` or `<name> <value>` in the console:
 
 | Cvar | Default | What it does |
 |---|---|---|
-| `sh_pretty_on` | `0` | Type `sh_pretty_on 1` to turn on, `sh_pretty_on 0` to turn off. On, it pretty-prints every rawmap Snapmap+ saves: **Save Rawmap**, **Save Rawmap As...**, `sh_rawmaps save`, and DOOM's own Save while **Use Rawmaps for Every Save/Load** is on. At `0`, rawmaps are compact JSON. |
+| `sh_pretty_on` | `0` | `1` pretty-prints every rawmap Snapmap+ saves (**Save Rawmap**, **Save Rawmap As...**, `sh_rawmaps save`); `0` saves compact JSON. |
 | `sh_copy_reslist_to_clipboard` | `0` | Copy `sh_listres` output to the clipboard automatically. |
 
-### Developer and diagnostic tools
-
-The rest exist mainly for Snapmap+'s own developers to debug the engine hooks — you're unlikely to need
-them, but they're listed here for completeness since `sh_help` shows them too:
+### Other commands
 
 | Command | What it does |
 |---|---|
-| `sh_navmesh` | Show the baked AI navigation the current map uses: which modules and nav classes, or why a bake was refused. See [AI navigation on Blocking Boxes](#ai-navigation-on-blocking-boxes). |
-| `sh_navmesh marks [count]` | Mark navigation boxes red in the preview, the same way a refused bake marks them. It marks up to `count` boxes in each module (default `4`, maximum `24`). `sh_navmesh marks 0` clears the marks. |
-| `sh_perf` | Show where Snapmap+ spends frame time, such as reading the map and building navigation previews. `sh_perf reset` sets the counters to zero. `sh_perf read` times two ways to read the open map: the whole map at once, and each entity one at a time. It also estimates the cost to read only the navigation boxes. Run it with a map open in the editor. |
-| `sh_alginfo` | Report the status of Snapmap+'s optional math-acceleration layer. |
-| `sh_debugrender` | Renderer debug toggle; `sh_debugrender dumprenderinfo` prints how many rendermodels are active, then names them. |
-| `cs_dontuse` | Toggle higher-precision engine-math overrides — a performance tradeoff, off by default; the name is the warning. |
-| `sh_superscriptop` | Dump SuperScript / eventDef data. |
-| `cs_dumpeventdefs` | Dump every eventDef to a file. |
-| `cs_fieldinfo` | Print field info for a type. |
-| `cs_start_render_logging` | Set up the render-logging hook. |
 | `sh_disable_devmode` / `sh_reenable_devmode` | Turn DOOM's developer features off, or back on, without losing your Bethesda.net connection. |
-| `sh_dialogtest [id] [buttons] [text]` | Raise DOOM's own modal dialog carrying the given text. |
-| `sh_dialogpoll` | Read the answer to the dialog `sh_dialogtest` raised. |
-| `sh_dialogdump` | Print the engine's dialog queue: id, button set, and flag bytes. |
+| `sh_help` | List every Snapmap+ console command and cvar with its description. |
 
 ---
 
@@ -1471,14 +1886,21 @@ Click **Send** and it's filed as a public issue on the project's tracker under t
 If someone's already reported the same thing, Snapmap+ recognizes the duplicate and adds your report as
 a note on the existing issue instead of creating a new one.
 
-The same reporting pipeline also backs Snapmap+'s **crash report** dialog: if the game hits a serious
-fault, a crash dialog opens (right away if Snapmap+ recovered in place, or on your next launch otherwise)
-with the error, an optional description of what you were doing, and a checkbox to attach recent log text
-(anonymized — your Windows account and machine name are stripped before anything is sent). Sending it
-files a `crash`-labeled issue the same way, and repeat crashes at the same spot get grouped onto one
-issue rather than filing duplicates.
+**When the game hits a problem.** When Snapmap+ catches a serious fault and can recover, it returns
+you to the menu and says so: "Snapmap+ caught a problem in the game and returned you to the menu.
+Unsaved changes to this map were lost." A message then offers a crash report. If the game could not be
+saved from the fault, the crash report is offered on your next launch. When a saved map is damaged,
+the game's own message says the file was kept as it was.
 
-Nothing is sent unless you click Send — Snapmap+ makes no other network requests on its own.
+The **crash report** dialog shows the error, takes an optional description of what you were doing,
+and has a checkbox to attach recent log text (anonymized — your Windows account, profile folder and
+machine name are stripped before anything is sent, and a long log is cut to its newest lines).
+Sending it files a `crash`-labeled issue the same way, and repeat crashes at the same spot get grouped
+onto one issue rather than filing duplicates.
+
+Nothing is sent unless you click Send. The only other network requests Snapmap+ makes are to the mod
+store, and only for what you ask for: uploading the mods of a map you publish (after you agree once)
+and downloading the mods of a map you chose to play.
 
 **Reporting without the app.** If you open an issue on GitHub yourself, say which DOOM build you are
 on: run `snapmap-plus status` in a terminal and paste its `Game:` line (for example
