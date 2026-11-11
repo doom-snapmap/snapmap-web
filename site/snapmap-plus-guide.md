@@ -687,9 +687,10 @@ it off to preserve that map.
 ## Mods
 
 A **mod** adds content SnapMap does not offer: campaign demons such as the Cyberdemon, Hell Guards
-and the Spider Mastermind, props, doors, sounds, and whole arenas as modules. A mod is a folder in
-`%LOCALAPPDATA%\snapmap-plus\mods\` holding a small `mod.json` and an `assets\` folder of game files.
-Its new objects appear in the Toybox with a name and a description, and they play like any other.
+and the Spider Mastermind, props, doors, sounds, whole arenas as modules, and scripts that drive
+them. A mod is a folder in `%LOCALAPPDATA%\snapmap-plus\mods\` holding a small `mod.json` and an
+`assets\` folder of game files. Its new objects appear in the Toybox with a name and a description,
+and they play like any other.
 
 ![DOOM's Toybox showing the Hell Guard, Cyberdemon and Spider Mastermind tiles added by mods](images/mods-toybox-demons.jpg)
 
@@ -697,216 +698,22 @@ A map that uses a mod needs Snapmap+ on every PC that plays it. Console players 
 Snapmap+ cannot play it. Published maps that use mods carry the search tag **mods**, so players can
 tell before they open one.
 
-### The Mods tab
+### Playing maps that use mods
 
-The **Mods** tab lists every mod installed on this computer, sorted by name. Each row shows one
-icon, the mod's name and its size:
+You do not need to install anything to play someone else's map. Open it as usual. If it uses mods
+you do not have, the game asks once, for example "This map needs 1 mod: Hell Guards (1.2 MB).
+Download and install now?". **Yes** downloads only what you approved, checks every file and starts
+the map. **No** leaves the map unloaded. Joining a lobby asks the same way. A map whose mods you
+have starts at once.
 
-- a **green check**: installed and working;
-- a **map icon**: the map open in the editor uses this mod;
-- a **yellow triangle**: the mod needs attention. Hover the icon to read why.
+The mods a map downloads are that map's own: they go into `mods\maps\<map title>\` and are used only
+by that map, so they never change your own maps or another map's mods. When the map's mods include
+scripts, the question says so: scripts run only inside that map and cannot read or change your
+files (see [Mod scripts](#mod-scripts)).
 
-You can sort `mods\` into subfolders of your own. A folder without a `mod.json` is only a grouping
-folder: the list shows it as a folder row with a count, and clicking it opens or closes it.
-
-The buttons at the top of the list, by their hover text:
-
-- **Show only the mods that need attention** (the yellow triangle; shown only when a mod needs it).
-- **This map**: the open map's details and the mods it uses (see [The map window](#the-map-window)).
-- **Read the mods folder again**.
-- **Open mods folder**.
-- **New mod** (see [Making your own mod](#making-your-own-mod)).
-- **Install a mod folder** (the download icon).
-
-Below them, **Filter by name or id...** narrows the list.
-
-When you update Snapmap+, the installer converts what you already have, once: every mod folder
-in `mods\`, anything left in an old `overrides` folder (packaged mods become mods of their own, and
-loose editor tweaks join your **My overrides** mod together with the old `strings` file), and every
-map saved on this computer, so your maps and mods keep working together. Nothing else needs doing,
-and there is nothing to run later. A folder in an older shape that was not converted is listed with
-a yellow triangle and the reason; the game does not use it.
-
-### Installing a mod
-
-Click **Install a mod folder** and pick a mod folder. You can pick several at once, or a folder that
-holds many mods: every mod found inside it is installed in one go. Snapmap+ checks each one, copies
-it into `mods\` and makes it available at once, with no restart.
-
-You can also copy a mod folder into `mods\` yourself. Snapmap+ notices it a moment later and lists it.
-
-### The details pane
-
-Select a mod to read about it. The line under its name says how it is doing, for example
-"Installed and serving 24 files, 476 more read from your install".
-
-- **About**: its description and author, and its folder (click it to open it in
-  Explorer). One line says where it came from: added by hand, imported from an export, or
-  downloaded for a map you played.
-- **What it adds**: the Toybox rows it adds, by name, and any sounds, movies or modules it brings.
-- **What it is made of**: what its files do to the game, such as which game files it edits.
-- **Files**: how many files it carries and their size, and how many more it reads from your own
-  game. Files identical to the game's own are never stored or uploaded.
-- **Requirements**: the console settings and commands the mod needs while a map uses it.
-- **Build**: when it was last built, and a **Bundle** number to quote when you ask for help.
-- **Sharing**: how many of your published maps use it.
-
-Colour marks what a thing is, in the Declaration editor's own colours: the mod's own files, the game
-files it edits, and console settings each have theirs. Hover any coloured part to see what it means.
-The warning colour is kept for problems.
-
-The buttons above the details, left to right, are **Files**, **Use in this map** (only while a map
-is open in the editor), **Verify** (check every file against its recorded hash), **Rebuild** (build
-the mod again from its folder) and **Uninstall**.
-
-### Browsing a mod's files
-
-**Files** opens the mod's folder in a window. On the left is the folder as a tree, with a filter.
-On the right is the selected file: its path, what it is to the game (for example "New file" or
-"Your edit of a game file"), and its text in the Declaration editor's colours.
-
-The window is read-only. You can select and copy text; to change a mod, edit its files in its folder.
-A file with a problem carries a yellow triangle in the tree, and the problem is shown under its
-text. The game's own files, unchanged, are greyed out with a gamepad icon. The window opens on the
-file with a problem when there is one, else on `mod.json`.
-
-### Making your own mod
-
-Click **New mod**, give it a name and click **Create**. Snapmap+ makes a folder for it in `mods\`
-with an example crate you can place right away, and the Files window opens on the crate's Toybox
-row.
-
-Place **Example crate** from the Toybox in your map, change the mod's files in its folder, and save.
-Snapmap+ notices every change in `mods\` by itself: the changed mod is built again and the running
-game takes the change, with no restart. New Toybox rows appear and removed ones disappear. A change
-made during Play applies when you return to the editor. A few changes, such as a changed sound bank,
-still need a restart; Snapmap+ says so when that happens. **Read the mods folder again** runs the
-same check at once.
-
-Your own maps follow your own mod. When you change it, a map that uses it picks up the change the
-next time you open, play or save it.
-
-A mod folder you make by hand is renamed the first time Snapmap+ builds it, to its name plus a short
-code (for example `cyberprobe_2uxk`), and its own references are updated to match. About says
-"Renamed from ..." when this happens. The code keeps two mods with the same name apart.
-
-### What goes in a mod folder
-
-```
-blue_imp_2uxk\
-  mod.json
-  assets\
-    generated\decls\entitydef\mods\blue_imp_2uxk\imp_blue.decl
-    generated\decls\snapeditorentitydef\mods\blue_imp_2uxk\imp_blue.decl
-    ...
-```
-
-`assets\` mirrors the game's own resource paths, and every file is already in the game's formats.
-Snapmap+ does not convert models, textures or sounds from other games; that is the job of
-Doomforge, the companion import tool.
-
-- **New files** go under `mods/<your folder's name>/`, so they never collide with the game's files
-  or another mod's.
-- **To change a game file**, put your edited copy of it at the game's own path. Snapmap+ records
-  what your copy changes, and a map that uses the mod gets the game's file with your changes. Two
-  mods that add to the same list both apply. A model or image at a game path with other bytes is
-  refused: put it under `mods/<your folder's name>/` and point your files at it.
-- **Unchanged copies of game files** cost nothing: they are read from each player's own game, never
-  stored or uploaded. `sh_mods copystock "<engine path>" "<file>"` writes a game file out so you
-  can start from it.
-- **Campaign content comes complete.** When a file of yours names something the game ships only
-  in the campaign (a model, its skeleton and clips, an effect's particles, a screen), Snapmap+
-  brings it along the same way, so the object loads whole in SnapMap. The details pane counts
-  them as game files borrowed for completeness. A name no archive holds is a build warning.
-
-`mod.json` is the part you write:
-
-```json
-{
-  "name": "Blue Imp",
-  "author": "alex",
-  "description": "A recoloured Imp with its own Toybox entry.",
-  "strings": {
-    "en": {
-      "blue_imp_2uxk_imp_blue_name": "Blue Imp",
-      "blue_imp_2uxk_imp_blue_desc": "An Imp with a blue hide."
-    }
-  },
-  "requirements": {
-    "cvars": { "g_useResourceBlackList": "0", "g_useImageBlackList": "0" }
-  }
-}
-```
-
-| Field | What it does |
-|---|---|
-| `name`, `author`, `homepage`, `description` | What players see in the Mods tab. `name` is required. A mod has no version number: it is its folder as it is now, and a published map carries the files it was published with. |
-| `strings` | The Toybox names and descriptions your files refer to as `#str_...`, under `"en"`: `"blue_imp_2uxk_imp_blue_name": "Blue Imp"` supplies `#str_blue_imp_2uxk_imp_blue_name`. Start each name with your folder's name so it never meets another mod's. |
-| `requirements` | Console settings the game needs while a map uses the mod. `cvars` maps a setting to its value (up to 32); `commands` holds two lists of console lines, `activate` and `deactivate` (up to 16 each, no `;`). The two settings above are needed by any mod that brings campaign-only models or images into SnapMap. |
-| `companions` | Helper objects that spawn with every placed copy of one of your tiles and move with it, such as the screens of a control panel. |
-| `scenes` | Where one of your scene nodes plays its scene, and which demons appear at the node when it starts. |
-| `hud` | How the ammo panel shows a weapon your mod adds, for example the campaign pistol's infinity symbol. |
-
-Snapmap+ adds one member of its own to `mod.json`, `"snapmap-plus"`, when it builds the folder.
-Leave it alone. The rest of the file, your formatting included, is never changed.
-
-A mod can also carry its own sounds (a sound bank, or a sound decl that reuses one of the game's
-sounds), Flash movies, whole modules and virtual-texture families. The full format is in the product
-repository's [capabilities](https://github.com/doom-snapmap/snapmap-plus/blob/main/docs/capabilities.md#mods)
-and [architecture](https://github.com/doom-snapmap/snapmap-plus/blob/main/docs/architecture.md#mods)
-pages.
-
-### Editor tweaks
-
-Some files change only the editor itself, such as wider property lists or extra choices for stock
-objects. These **editor tweaks** always apply in this computer's editor, whatever map is open. They
-are never saved with a map and never used in Play, so a map made with them needs nothing. A folder
-that holds only editor tweaks has no **Use in this map** button, and its Requirements section reads
-"Changes only this computer's editor; maps made with it need nothing."
-
-### Using a mod in a map
-
-Place one of the mod's objects from the Toybox. When you save, the map records the mod. In the
-editor every installed mod offers its Toybox rows. In Play, a map gets exactly the mods it records,
-and a mod it does not record changes nothing in it.
-
-A mod that changes game files or sets console settings without adding objects can be used by the
-whole map: select it and click **Use in this map**. The map lists it when you save. Once the open
-map uses the selected mod, the same button reads **Remove from map**.
-
-### The map window
-
-The map icon at the top of the list opens a window about the map open in the editor: its name,
-saved-map id, whether it is published and its mods uploaded, whether it carries the **mods** search
-tag, how many mods it uses and how much a player would download, and when it was last saved.
-
-**Mods in this map** lists each mod with how many placed objects use it, or "Used by the whole map",
-and the wires and timelines that reference them. When two of the map's mods edit the same setting
-of a game file differently, **Choices between mods** lets you pick whose edit this map uses.
-
-**Remove from map** first shows what will go: the objects by name, the wires and timeline
-references to them, and the **mods** tag if this is the last mod. The mod stays installed. The
-buttons are **Cancel** and **Delete from map**. Ctrl+Z in the editor brings the objects back, also
-after a Play round. A published copy of the map changes only when you publish again. When the last
-mod is gone, the window says the map is now vanilla: it plays without Snapmap+.
-
-### Publishing a map that uses mods
-
-Publish from DOOM's editor as usual. Before the map goes up, Snapmap+ uploads the mods it uses to
-the mod store, so other players can download them. Files identical to the game's own are never
-uploaded. The first time, the game asks once whether you agree to upload; **No** leaves the map
-unpublished. A map over SnapMap's 10 MB limit is refused before anything is sent.
-
-Plain saves never upload anything. Publishing the map again sends your mod as it is now.
-Unpublishing a map releases its mods on the mod store. Deleting a map from My Maps does not, while
-its published copy stays available.
-
-### Playing a map that uses mods
-
-Open the map as usual. If you are missing a mod it uses, the game asks first, for example "This map
-needs 1 mod: Hell Guards (1.2 MB). Download and install now?". **Yes** downloads only what you
-approved, checks every file, installs it and starts the map. **No** leaves the map unloaded. Joining
-a lobby asks the same way. A map whose mods you have starts at once.
+`mods\maps\` is a cache. When DOOM starts, Snapmap+ removes the mods of a downloaded map that none of
+your saved maps uses and that you have not played for 30 days. Playing that map again downloads
+them again.
 
 When a mod cannot be had, the map does not load, and the game says why:
 
@@ -919,71 +726,283 @@ When a mod cannot be had, the map does not load, and the game says why:
 Opening such a map in the editor names the missing mod and what to do: restore its folder from the
 Recycle Bin, or play the map from My Maps to get the mod from the mod store.
 
-### Sharing a map that uses mods
+### The Mods tab
 
-If your map uses mods, share the `.zip`, not the `.json`. Every time you save a rawmap, Snapmap+
-also saves a `.zip` next to it (for example `rawmap.zip` beside `rawmap.json`); **File > Save Rawmap
-As...** offers `.zip` first. The `.zip` holds the map and every mod it uses, so send that one file.
-Your friend opens it with **File > Load Rawmap...**, and the mods install by themselves. A published
-map needs none of this: the game offers its mods when someone opens it.
+The **Mods** tab lists your mods. **Your mods** holds the ones in your own `mods\` folder; below it,
+one group per downloaded map holds the mods that map brought, under the map's name. Each row shows
+the mod's name and one icon:
 
-If you open a rawmap and see "This map was not loaded. It needs mods you do not have...", the
-message names each missing mod; ask the map's author for the map's `.zip`. When the mod store has
-the mods, Snapmap+ offers to download them instead.
+- a **green check**: ready to use;
+- a **map icon**: the map open in the editor uses this mod;
+- a **yellow triangle**: the mod needs attention. Hover the icon to read why.
+
+You can sort `mods\` into subfolders of your own. A folder without a `mod.json` is only a grouping
+folder: the list shows it as a folder row with a count, and clicking it opens or closes it.
+
+The buttons at the top of the list, by their hover text:
+
+- **Show only the mods that need attention** (the yellow triangle; shown only when a mod needs it).
+- **This map**: the open map's details and the mods it uses (see [The map window](#the-map-window)).
+- **Refresh**: after you change a mod's files, build them again and bring the change into the game.
+- **Open mods folder**.
+- **New mod** (see [Making your first mod](#making-your-first-mod)).
+- **Install mods**: pick **Install mod folders...** or **Install mod ZIPs...** (a prefab's export ZIP
+  is one). You can pick several at once, or a folder that holds many mods. Snapmap+ copies each
+  into your own `mods\` folder and builds it; the game keeps running while it works, and the line
+  at the bottom of the list says how far it got.
+
+Below them, **Filter by name or folder...** narrows the list. At the bottom, the setting **Play maps
+whose mods include scripts** (on by default) decides whether Snapmap+ plays such maps at all: when
+it is off, a map whose mods include scripts is refused before anything downloads.
+
+**Refresh is the one action that reads your mods again.** Snapmap+ does not watch the folder: after
+you change a mod's files, press Refresh. It builds every mod whose files changed and brings the
+change into the running game. Most changes show at once. When one needs more, the message after
+Refresh says which:
+
+- a changed Flash movie or animation shows when you next open the map;
+- a changed sound bank or skeleton needs a restart of DOOM ("Restart DOOM to hear the new
+  <bank>.");
+- a change made during Play applies when you are back in the editor;
+- a changed script runs from the next Play.
+
+### The details pane
+
+Select one of your mods to read about it. The line under its name says how it is doing.
+
+- **About**: its description, author and folder (click the folder to open it in Explorer).
+- **What it adds**: the Toybox rows it adds, by name.
+- **Scripts** (only for a mod with scripts): its files, what they drive ("Drives ai/brute every
+  frame and on its animation events.") and which Script nodes they answer or fire. The **Script
+  log** under it shows what the scripts printed in the current or last Play, and why they stopped
+  if they did; **Copy log** copies it.
+- **What it changes in the game**: the game files it edits, the game texts it changes, the
+  encounters it adds, and its editor tweaks.
+- **What it borrows from the game**: the game files it uses from your own install. They are never
+  stored or uploaded with the mod.
+- **Console settings**: the console settings and commands the mod needs while a map uses it.
+- **Files**: how many files it has and their size, with **Show the files**.
+- **Warnings**, when its build found something to check.
+- **Sharing**: how many of your published maps use it.
+
+A mod a downloaded map brought shows a short view instead: which map it came with, whether it runs
+scripts, and the 30-day cleanup line. Its buttons are **Add to my mods**, which copies it into your
+own mods so your own maps can use it, and **Remove**.
+
+The buttons above the details are **Files** (browse the mod's files), **Use in this map** (only while
+a map is open in the editor; see [Using a mod in a map](#using-a-mod-in-a-map)) and **Uninstall**.
+
+### Browsing a mod's files
+
+**Files** opens the mod's folder in a window. On the left is the folder as a tree, with a filter.
+On the right is the selected file: its path, what it is to the game (for example "New file", "Your
+edit of a game file", or "A script; it runs in the maps that use this mod"), and its text in the
+Declaration editor's colours. Scripts show in Lua's colours.
+
+The window is read-only. **Open in editor** opens the file in your own text editor; press Refresh in
+the Mods tab after you save it. A file with a problem carries a yellow triangle in the tree, and the
+problem is shown under its text. Files Snapmap+ does not build into the mod (a README, notes) are
+marked "Not part of the mod; Snapmap+ ignores it".
+
+### Making your first mod
+
+1. Open a map in the editor and the **Mods** tab. Click **New mod**, give it a name (for example
+   "Crates") and click **Create**. Snapmap+ makes a folder for it in `mods\` with an example crate,
+   and the Files window opens on the crate.
+2. Place **Example crate** from the Toybox, under your mod's own category.
+3. In the Files window, select `mod.json`, click **Open in editor** and change `"Example crate"` to a
+   name of your own. Save the file.
+4. Press **Refresh** in the Mods tab.
+5. The Toybox shows the crate under its new name.
+
+That is the whole loop: change a file, save, Refresh.
+
+### What goes in a mod folder
+
+```
+Crates\
+  mod.json
+  assets\
+    generated\decls\entitydef\mods\Crates\big_crate.decl
+    generated\decls\snapeditorentitydef\mods\Crates\big_crate.decl
+    ...
+  README.txt
+```
+
+`assets\` mirrors the game's own resource paths, and every file is already in the game's formats.
+Snapmap+ does not convert models, textures or sounds from other games; that is the job of
+Doomforge, the companion import tool.
+
+- **New files** go under `mods\<your folder's name>\`, and in your files you write
+  `mods/<your folder's name>/...` to name them, as in `entityDef = "mods/Crates/big_crate";`. When
+  you press Refresh, Snapmap+ files them under the mod's own name, so they never collide with the
+  game's files or another mod's. The folder name is yours: rename the folder whenever you like.
+  The example crate's files already sit under that name, a short code of eight characters; you
+  never need to type it.
+- **To change a game file**, put your edited copy of it at the game's own path. Snapmap+ records
+  what your copy changes, and a map that uses the mod gets the game's file with your changes. Two
+  mods that add to the same list both apply. A model or image at a game path with other bytes is
+  refused: put it under `mods\<your folder's name>\` and point your files at it.
+- **Unchanged copies of game files** cost nothing: they are read from each player's own game, never
+  stored or uploaded. `sh_mods copystock "<engine path>" "<file>"` writes a game file out so you
+  can start from it.
+- **Campaign content comes complete.** When a file of yours names something the game ships only
+  in the campaign (a model, its skeleton and clips, an effect's particles, a screen), Snapmap+
+  brings it along from the player's own game, so the object loads whole in SnapMap, and sets the
+  console settings it needs by itself. The details pane lists them under what it borrows.
+- **Other files** beside `mod.json` and `assets\`, such as a README or your notes, are fine. They
+  are never built or shared.
+
+`mod.json` is the part you write:
+
+```json
+{
+  "name": "Crates",
+  "author": "alex",
+  "description": "Crates in every size.",
+  "strings": {
+    "en": {
+      "big_crate_name": "Big crate",
+      "big_crate_desc": "A crate twice the usual size.",
+      "snapentity_demon_baron": "Baron"
+    }
+  }
+}
+```
+
+| Field | What it does |
+|---|---|
+| `name`, `author`, `homepage`, `description` | What players see in the Mods tab. `name` is required. A mod is its folder as it is now, and a published map carries the files it was published with. |
+| `strings` | The Toybox names and descriptions your files refer to as `#str_...`, under `"en"`. Write plain names: `"big_crate_name"` supplies `#str_big_crate_name`, and Refresh keeps them apart from every other mod's. A name the game already has, such as `snapentity_demon_baron` above, changes that game text instead, in the maps that use the mod. |
+| `requirements` | Console settings the game needs while a map uses the mod: `cvars` maps a setting to its value, and `commands` holds two lists of console lines, `activate` and `deactivate` (no `;`). |
+| `companions` | Helper objects that spawn with every placed copy of one of your tiles and move with it, such as the screens of a control panel. |
+| `scenes` | Where one of your scene nodes plays its scene, and which demons appear at the node when it starts. |
+| `hud` | How the ammo panel shows a weapon your mod adds, for example the campaign pistol's infinity symbol. It follows the mods the open map uses, with no restart. |
+
+A mistake in `scenes` or `hud` fails the build, and the Mods tab names the block. Snapmap+ adds one
+member of its own to `mod.json`, `"snapmap-plus"`, when it builds the folder. Leave it alone; the
+rest of the file is yours.
+
+**Sounds.** A sound decl under `generated\decls\sound\mods\<your folder's name>\` can play any of the
+game's sounds by name. A sound bank of your own, built with Wwise, goes in
+`assets\sound\soundbanks\pc\` named `<your folder's name>_<name>.bnk`; Refresh renames it for the mod
+and keeps every file that names it in step. A changed bank is heard after you restart DOOM.
+
+**Modules.** A mod can carry whole modules, such as a multiplayer map's arena. A module has no tile
+in the Toybox: a map or a module prefab that names it loads it, and it then moves, saves and plays
+like a stock module. A prefab of rooms built from mod modules carries the mod like any prefab.
+
+**Virtual textures.** A mod's own virtual-texture pages are not drawn on lit models such as demons
+and props in this version: give a mod's models ordinary textures.
+
+### Editor tweaks
+
+Some files change only the editor itself, such as wider property lists or extra choices for stock
+objects. These **editor tweaks** always apply in this computer's editor, whatever map is open. They
+are never saved with a map and never used in Play, so a map made with them needs nothing. A folder
+that holds only editor tweaks has no **Use in this map** button, and its details read "Changes only
+this computer's editor; maps made with it need nothing."
+
+### Using a mod in a map
+
+Place one of the mod's objects from the Toybox. When you save, the map records the mod. In the
+editor every one of your mods offers its Toybox rows. In Play, a map gets exactly the mods it
+records, and a mod it does not record changes nothing in it. Your own maps always use your own
+mod folders as they are now.
+
+A mod that changes game files or sets console settings without adding objects can be used by the
+whole map: select it and click **Use in this map**. The map lists it when you save. Once the open
+map uses the selected mod, the same button reads **Remove from map**.
+
+### The map window
+
+The map icon at the top of the list opens a window about the map open in the editor: its name,
+whether it is published and its mods uploaded, how many mods it uses and how much a player would
+download, and when it was last saved.
+
+**Mods in this map** lists each mod with how many placed objects use it, or "Used by the whole map",
+and the wires and timelines that reference them. When two of the map's mods edit the same setting
+of a game file differently, **Choices between mods** lets you pick whose edit this map uses; "The
+first mod the map lists" clears the choice.
+
+**Remove from map** first shows what will go: the objects by name, the wires and timeline
+references to them, and whether the map then plays without Snapmap+. The mod stays installed. The
+buttons are **Cancel** and **Remove from map**. Ctrl+Z in the editor brings the objects back, also
+after a Play round. A published copy of the map changes only when you publish again.
+
+### Publishing a map that uses mods
+
+Publish from DOOM's editor as usual. Before the map goes up, Snapmap+ uploads the mods it uses to
+the mod store, so other players can download them. Files identical to the game's own are never
+uploaded, and a large mod goes up in parts by itself. The first time, the game asks once whether you
+agree to upload; **No** leaves the map unpublished. A map over SnapMap's own 10 MB map limit is
+refused before anything is sent.
+
+Plain saves never upload anything. Publishing the map again sends your mod as it is now; players
+of the map get the files it was published with. Unpublishing a map releases its mods on the mod
+store. Deleting a map from My Maps does not, while its published copy stays available.
+
+### Sharing a map or prefab that uses mods
+
+If your map uses mods, share the rawmap `.zip`, not the `.json`: it holds the map and every mod it
+uses (see [Rawmaps](#rawmaps)). Your friend opens it with **File > Load Rawmap...**; its mods go
+into that map's own folder. A published map needs none of this: the game offers its mods when
+someone opens it.
 
 A prefab that uses mods travels the same way: its **Export** writes one `.zip` with its mods (see
-[The Prefabs Tab](#the-prefabs-tab)). To share a mod on its own, send its folder; the other player
-installs it with **Install a mod folder**.
+[The Prefabs Tab](#the-prefabs-tab)), and importing it puts the mods in the other player's own mods
+folder. To share a mod on its own, send its folder or a ZIP of it; the other player uses
+**Install mods**.
 
 ### Uninstalling a mod
 
-**Uninstall** removes a mod from this computer. Before anything happens you see what it will do:
-if the open map uses the mod, the map is cleaned of it first, with the same list as Remove from map;
-the mod's Toybox rows leave the editor; and its folder moves to the Windows Recycle Bin. When the
-editor's undo history has to be cleared, the confirmation says so. It also says how many of your
-saved maps use the mod: they will not open until a mod folder provides it again, for example the
-folder restored from the Recycle Bin.
+**Uninstall** removes one of your mods from this computer. Before anything happens you see what it
+will do: if the open map uses the mod, the map is cleaned of it first, with the same list as Remove
+from map; the mod's Toybox rows leave the editor; and its folder moves to the Windows Recycle Bin.
+When the editor's undo history has to be cleared, the confirmation says so. It also says how many of
+your saved maps use the mod: they will not open until you restore the folder from the Recycle Bin.
+For a downloaded map's mod the button reads **Remove**.
 
 ### When something goes wrong
 
-A mod with a problem gets a yellow triangle, and the details pane starts with "Needs attention:" and
-the cause. A problem in one mod never affects the others. If a change you made breaks your own mod,
-the mod is not used until it builds again: fix the cause the details pane names, then use **Read the
-mods folder again**. Snapmap+ keeps no older copy of a mod to fall back on. When several mods need
-attention, the yellow triangle at the top of the list shows only those.
+A mod with a problem gets a yellow triangle, and the details pane says what to fix. A problem in one
+mod never affects the others. If a change you made breaks your own mod, the mod is not used until
+it builds again: fix the cause, then press Refresh. Snapmap+ keeps no older copy of a mod to fall
+back on. When several mods need attention, the yellow triangle at the top of the list shows only
+those.
+
+A mod folder made for an earlier version of Snapmap+, copied in by hand, reads "This mod was made
+for an earlier version of Snapmap+. Run the Snapmap+ installer again and it converts it."
 
 ### Mod console commands
 
-Everything the Mods tab does is also a console command. `sh_mods help` prints the full list.
+Everything the Mods tab does is also a console command. `sh_mods help` prints the full list. A
+folder is a name in `mods\` or a full path.
 
 | Command | What it does |
 |---|---|
 | `sh_mods` or `sh_mods status` | Show what the installed mods serve. |
-| `sh_mods list` | List the mod folders. |
-| `sh_mods rescan` (or `refresh`) | Read `mods\` again, build changed folders and bring the changes into the running game. |
+| `sh_mods list` | List the mod folders and why any of them does not build. |
+| `sh_mods rescan` (or `refresh`) | The Mods tab's Refresh: build changed folders and bring the changes into the running game. |
 | `sh_mods new "<name>"` | Make a new mod folder. |
 | `sh_mods build "<folder>"` | Check one folder and build it. |
 | `sh_mods rebuild "<folder>"` | Build one folder again, then rescan. |
-| `sh_mods install "<folder>"` | Copy a mod folder into `mods\` and make it available; a folder without `mod.json` installs every mod below it. |
-| `sh_mods verify "<mod>"` | Check one mod's files against their recorded hashes. |
+| `sh_mods install "<folder>"` | Copy a mod folder into `mods\` and build it; a folder without `mod.json` installs every mod below it. |
+| `sh_mods verify "<folder>"` | Check one mod's files against their recorded hashes. |
 | `sh_mods doctor [verify]` | Explain every mod's state and any conflicts; `verify` also checks every file. |
-| `sh_mods map` | Show the open map's details and the mods it uses. |
-| `sh_mods map add "<id>"` | Use a mod in the whole open map without placing anything. |
-| `sh_mods map remove "<id>" [--yes]` | Show what removing the mod from the open map deletes; `--yes` does it. |
-| `sh_mods uninstall "<id>" [--yes]` | Show what uninstalling the mod does; `--yes` does it. |
-| `sh_mods choose "<game file>/<path>" "<key>"` | Pick whose edit the open map uses where two of its mods disagree. |
-| `sh_mods palette rebuild` | Rebuild the editor's Toybox rows (a rescan does this for you). |
-| `sh_mods palette check` | Diagnostic: report the editor's Toybox rows. |
-| `sh_mods held [filter]` | Print what the game was given under each file name this session. |
+| `sh_mods map` | Show the open map and the mods it uses. |
+| `sh_mods map add "<mod folder>"` | Use a mod in the whole open map without placing anything. |
+| `sh_mods map remove "<mod folder>" [--yes]` | Show what removing the mod from the open map deletes; `--yes` does it. |
+| `sh_mods uninstall "<mod folder>" [--yes]` | Show what uninstalling the mod does; `--yes` does it. |
+| `sh_mods choose "<game file>/<path>" "<mod name>"` | Pick whose edit the open map uses where two of its mods disagree; no name clears the choice. |
+| `sh_mods palette rebuild` | Rebuild the editor's Toybox rows (Refresh does this for you). |
 | `sh_mods copystock "<engine path>" "<file>"` | Write a game file's bytes to a file. |
 | `sh_mods export "<path.zip>"` | Write the open map and its mods to one ZIP. |
-| `sh_mods import "<path.zip>"` | Install a ZIP's mods and stage its map. |
-| `sh_mods push "<mod>" "<ref>"` | Upload a mod to the mod store by hand. |
-| `sh_mods pull "<bundle hash>"` | Download and install a mod from the mod store by hand. |
+| `sh_mods import "<path.zip>"` | Open such a ZIP as **Load Rawmap...** does. |
+| `sh_mods push "<mod folder>" "<ref>"` | Upload a mod to the mod store by hand. |
 | `sh_mods release "<ref>"` | Release an upload on the mod store. |
 | `sh_mods retry` | Retry uploads that failed and wait in the queue. |
-| `sh_mods cancel` | Stop the running mod store job. |
-| `sh_mods removed` | Say where uninstalled mods go: the Windows Recycle Bin. |
+| `sh_mods cancel` | Stop the running upload. |
 
 ---
 
