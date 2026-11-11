@@ -110,7 +110,7 @@ function zip(entries) {
 
 function archive(salt, files, method = 0) {
   const hash = sha(randomBytes(32));
-  const doc = { name: 'Pink Imp', version: '1.0.0', 'snapmap-plus': { format: 2, salt, build: hash,
+  const doc = { name: 'Pink Imp', 'snapmap-plus': { format: 2, salt, build: hash,
     files: files.map(f => ({ path: 'assets/' + f.request, sha256: sha(f.data), size: f.data.length, provides: { type: 'image', name: f.request }, needs: [] })) } };
   const modjson = Buffer.from(JSON.stringify(doc, null, 2) + '\n');
   return { hash, bytes: zip([{ name: 'mod.json', data: modjson, method }, ...files.map(f => ({ name: 'assets/' + f.request, data: f.data }))]) };
@@ -127,13 +127,13 @@ async function mods(mf) {
   const compressed = archive(salt, [], 8);
   const refused = await send('PUT', '/mods/build/' + compressed.hash, compressed.bytes, zipType(compressed.bytes));
   assert.equal(refused.status, 422);
-  assert.deepEqual(await refused.json(), { error: 'a compressed entry; the archive must be stored' });
+  assert.deepEqual(await refused.json(), { error: 'The archive has a compressed entry; Snapmap+ stores every file uncompressed.' });
   assert.equal(await bucket.head('build/' + compressed.hash), null, 'a refused archive was committed');
   const damaged = Buffer.from(big.bytes);
   damaged.writeUInt32LE(0, damaged.length - 6);   // the end record's central directory offset
   const late = await send('PUT', '/mods/build/' + big.hash, damaged, zipType(damaged));
   assert.equal(late.status, 422, 'a fault found only at the end of a streamed upload');
-  assert.equal((await late.json()).error, 'the end record places the central directory wrongly');
+  assert.equal((await late.json()).error, "The archive's end record places its central directory wrongly.");
   assert.equal(await bucket.head('build/' + big.hash), null, 'an archive refused at its last byte was committed');
 
   const created = await send('PUT', '/mods/build/' + big.hash, big.bytes, zipType(big.bytes));

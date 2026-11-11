@@ -74,26 +74,44 @@ and holds the claims (`mod_claim`, `mod_claim_build`), so claim counts, releases
 purges are decided in one transaction. The tables of the earlier blob and bundle store
 are dropped when the object starts.
 
-An archive is the mod's folder as the product's `modzip.c` writes it: a ZIP of stored
-entries (method 0) holding `mod.json`, the whole file, and `assets/<request>` for every
-carried file its builder block lists, nothing else. Stock pointers never upload: the
-player's own game holds them. The Worker does not recompute the build hash; the client
-checks every file's SHA-256 and the canonical hash against the map before it installs
-anything.
+An archive is the mod's folder as the product's `modsync.c` and `modzip.c` write it: a
+ZIP of stored entries (method 0) holding `mod.json`, the whole file, and
+`assets/<request>` for every carried file its builder block lists, nothing else, where
+the request is the block's `path` below `assets/` in lower case. Stock pointers never
+upload: the player's own game holds them. There is no mod version anywhere: an author's
+`version` key is an unknown author key and is ignored, and no response or index row
+carries one. The Worker does not recompute the build hash or check what a file
+provides; the client checks every file's SHA-256 and the canonical hash against the map
+before it installs anything. Every other rule mirrors the product's own reader of a
+built `mod.json` and of a downloaded archive (`modbundle.c`, `modsync.c`), so the store
+refuses what the product would refuse and nothing it writes.
 
 - `PUT /mods/build/:hash` needs `Content-Type: application/zip` (else 415) and
   `Content-Length` (else 411), at most 96 MiB (else 413; under the 100 MB request body
   limit of the Free and Pro plans). The body streams to `build/<hash>` while the Worker
-  reads it as a ZIP, holding only headers, the central directory and `mod.json`. It
-  refuses with 422 and the first cause: a body that is not a ZIP; bytes before, between
-  or after the entries; a ZIP64 or split archive; a compressed or encrypted entry; an
-  entry without its sizes in the local header; two entries of one name; a central
-  directory or end record that disagrees with the entries; a `mod.json` that is missing,
-  over 1 MiB, not UTF-8 JSON, without a `snapmap-plus` block of `format` 2, without a
-  valid `salt` (`[a-z][a-z0-9]{7}`), or whose `build` is not the path hash; a
-  `requirements` member outside the builder's shape; an entry outside `assets/`; a
-  request path that is not lowercase, has a `..`, `.` or empty segment, a backslash or
-  an extension outside the whitelist (a `.mega2` only as
+  reads it as a ZIP, holding only headers, the central directory, `mod.json` and the
+  scripts. It refuses with 422 and the first cause, one sentence: a body that is not a
+  ZIP; bytes before, between or after the entries; a ZIP64 or split archive; a
+  compressed or encrypted entry; an entry without its sizes in the local header; two
+  entries of one name; a central directory or end record that disagrees with the
+  entries; a `mod.json` that is missing, over 1 MiB, not UTF-8 JSON, without a
+  `snapmap-plus` block of `format` 2 holding only the keys the builder writes, without a
+  valid `salt` (`[a-z][a-z0-9]{7}`), recording a failed build (`cause`), or whose
+  `build` is not the path hash; an author part with a retired key (`id`, `key`,
+  `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`, `legacy`, `composes`,
+  `schema`, `hud.schema`), `files`, `bundle` or `build` at its top level, no name or a
+  name or author over 80 characters, `strings` or `hud` that is not an object, or
+  `requirements` outside the builder's shape (at most 32 cvars, each a printable string
+  of up to 64 characters, an integer or a boolean; up to 16 `activate` and 16
+  `deactivate` lines of 1 to 256 printable characters without `;`); more than 4,096
+  files and pointers; a file entry other than `path`, `sha256`, `size` (1 byte to 64
+  MiB), `provides` and `needs`, or a pointer entry other than the builder's; two entries
+  of one request; an entry outside `assets/` or not in lower case; a request path over
+  400 characters, with a `..`, `.` or empty segment, a backslash, a segment starting with
+  a space or ending in a dot or space, or a character outside `a-z 0-9 . _ - $ + @ ~ ( )`
+  and space; an engine file (`decls/renderprogs/`, `generated/glsl/`,
+  `generated/glslbinaries/`, `vulkan_pipelines.bin`); a type the builder does not carry
+  (a `.bswf` only under `generated/swf/`, a `.mega2` only as
   `virtualtextures/mods/<salt>/<family>_sq<1..16>.mega2`, never a `_vmtr` family); an
   entry `files` does not list, a listed file the archive lacks, or an entry whose size
   differs from `files`. R2 commits an object once it has its declared length, so the
@@ -104,6 +122,10 @@ anything.
   an upload that validates (201), so a forged archive cannot hold a hash against the
   real one; a claimed archive is never replaced. The declared length counts toward the
   hourly byte limit.
+- Scripts: a build may carry Lua source at `assets/mods/<salt>/scripts/**/*.lua` (its
+  own salt). The upload is refused when a `.lua` file lies anywhere else, starts with
+  the bytecode signature `ESC L u a`, holds a NUL byte or is not UTF-8, is over 256 KiB,
+  or when the build carries more than 64 scripts or more than 1 MiB of them.
 - `GET` and `HEAD /mods/build/:hash` return the archive with `Content-Type:
   application/zip`, its `Content-Length`, `Cache-Control: public, max-age=31536000,
   immutable`, `X-Content-Type-Options: nosniff`, a `default-src 'none'; sandbox` CSP,
@@ -116,6 +138,10 @@ anything.
   claim for that ref is 403. Unknown builds are 409 `{"error","missing","missingCount"}`.
 - `POST /mods/release` takes `{"claim","secret"}` and returns 204; a wrong secret is 403
   and an unknown claim 404.
+
+Every refusal on a `/mods` route is JSON `{"error"}` (with `missing` and `missingCount`
+on 409 and `blocked` on 451) whose `error` is one plain sentence of printable ASCII, at
+most 160 characters, which the product shows as it is.
 
 A build is served while a claim names it or for one hour after its upload (the time a
 publish needs between its `PUT`s and its claim); otherwise it answers 404. Deletion is

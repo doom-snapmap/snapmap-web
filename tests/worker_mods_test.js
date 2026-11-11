@@ -245,19 +245,29 @@ function defaultFiles(salt) {
   ];
 }
 
+/* A refusal is one plain sentence the product shows as it is (modnet.c mn_error_text keeps
+ * 160 printable ASCII characters). */
+function assertSentence(text, what) {
+  assert.match(text, /^[A-Z][\x20-\x7e]*\.$/, what + ': ' + text);
+  assert.ok(text.length <= 160, what + ' is ' + text.length + ' characters: ' + text);
+}
+
 function entriesFor(modjson, files) {
   return [{ name: 'mod.json', data: modjson }, ...files.map(f => ({ name: 'assets/' + f.request, data: f.data }))];
 }
 
-/* A build of a mod with the given carried files ({request, data}) and pointers, its
- * mod.json as the product writes it (author part, then the "snapmap-plus" block). The
- * Worker never recomputes the canonical hash (the client does), so any fresh hash names it. */
+/* A build of a mod with the given carried files ({request, data, path?}) and pointers, its
+ * mod.json as the product writes it (author part, then the "snapmap-plus" block). The block
+ * lists a file by its path in the folder (path, which keeps the folder's case) and the
+ * archive holds it at assets/<request>, lower case, as modsync.c writes it. There is no
+ * version anywhere (decision 8). The Worker never recomputes the canonical hash (the client
+ * does), so any fresh hash names it. */
 function build({ salt = SALT, files = defaultFiles(salt), stock = [], hash = sha(Buffer.from('build-' + (++counter))), block = {}, author = {}, pretty = true } = {}) {
-  const listed = files.map(f => ({ path: 'assets/' + f.request, sha256: sha(Buffer.from(f.data)), size: Buffer.from(f.data).length,
+  const listed = files.map(f => ({ path: 'assets/' + (f.path || f.request), sha256: sha(Buffer.from(f.data)), size: Buffer.from(f.data).length,
     provides: { type: 'entityDef', name: f.request }, needs: [] }));
-  const modBlock = { format: 2, salt, rules: 8, built: 1794000000, tree: 'a'.repeat(64), build: hash, classes: { adds: files.length },
+  const modBlock = { format: 2, salt, rules: 9, built: 1794000000, tree: 'a'.repeat(64), build: hash, classes: { adds: files.length },
     editor: [], registries: {}, files: listed, ...(stock.length ? { stock } : {}), ...block };
-  const doc = { name: 'Pink Imp', version: '1.0.0', description: 'A pinker imp.', ...author, 'snapmap-plus': modBlock };
+  const doc = { name: 'Pink Imp', description: 'A pinker imp.', ...author, 'snapmap-plus': modBlock };
   const modjson = Buffer.from(pretty ? JSON.stringify(doc, null, 2) + '\n' : JSON.stringify(doc), 'utf8');
   return { hash, modjson, doc, files, ...zip(entriesFor(modjson, files)) };
 }
@@ -328,7 +338,7 @@ test('a mod.json-only archive, pointers that never upload, a BOM and a compact m
   const carried = build({ stock: [pointer] });
   const refused = await put(env, rezip(carried, [...entriesFor(carried.modjson, carried.files), { name: pointer.path, data: 'imp' }]));
   assert.equal(refused.status, 422);
-  assert.equal((await refused.json()).error, 'the archive holds a file mod.json does not list: assets/generated/decls/entitydef/monster/imp.decl');
+  assert.equal((await refused.json()).error, 'The archive holds assets/generated/decls/entitydef/monster/imp.decl, which mod.json does not list.');
 });
 
 test('the walker accepts the archive split at any byte', async () => {
@@ -350,6 +360,7 @@ async function refusedWith(env, archive, pattern, status = 422) {
   const text = await response.text();
   assert.equal(response.status, status, pattern + ': ' + text);
   assert.match(JSON.parse(text).error, pattern);
+  assertSentence(JSON.parse(text).error, String(pattern));
   assert.ok(!env.MODS.objects.has('build/' + archive.hash), 'stored ' + pattern);
   assert.equal(row(env, archive.hash), undefined);
 }
@@ -362,32 +373,32 @@ function damaged(archive, edit) {
 
 test('archive PUT refuses every structural fault of the ZIP', async () => {
   const env = await modsEnv();
-  await refusedWith(env, { hash: sha(Buffer.from('x')), bytes: Buffer.from('this is not a zip archive at all') }, /^not a ZIP archive$/);
-  await refusedWith(env, damaged(build(), b => b.writeUInt32LE(0xffffffff, 18)), /^a ZIP64 archive$/);
+  await refusedWith(env, { hash: sha(Buffer.from('x')), bytes: Buffer.from('this is not a zip archive at all') }, /^The upload is not a ZIP archive\.$/);
+  await refusedWith(env, damaged(build(), b => b.writeUInt32LE(0xffffffff, 18)), /^The archive uses ZIP64, which Snapmap\+ never writes\.$/);
   const g64 = build();
-  await refusedWith(env, { hash: g64.hash, ...zip(entriesFor(g64.modjson, g64.files), { zip64End: true }) }, /^a ZIP64 archive$/);
+  await refusedWith(env, { hash: g64.hash, ...zip(entriesFor(g64.modjson, g64.files), { zip64End: true }) }, /^The archive uses ZIP64, which Snapmap\+ never writes\.$/);
   const gx = build({ files: [] });
   const zip64Extra = Buffer.alloc(20); zip64Extra.writeUInt16LE(0x0001, 0); zip64Extra.writeUInt16LE(16, 2);
-  await refusedWith(env, rezip(gx, [{ name: 'mod.json', data: gx.modjson, extra: zip64Extra }]), /^a ZIP64 archive$/);
+  await refusedWith(env, rezip(gx, [{ name: 'mod.json', data: gx.modjson, extra: zip64Extra }]), /^The archive uses ZIP64, which Snapmap\+ never writes\.$/);
   const gc = build({ files: [] });
-  await refusedWith(env, rezip(gc, [{ name: 'mod.json', data: gc.modjson, method: 8 }]), /^a compressed entry; the archive must be stored$/);
-  await refusedWith(env, damaged(build(), b => b.writeUInt16LE(0x0001, 6)), /^an encrypted entry$/);
-  await refusedWith(env, damaged(build(), b => b.writeUInt16LE(0x0008, 6)), /^an entry without its sizes in the local header$/);
-  await refusedWith(env, damaged(build(), (b, a) => b.writeUInt32LE(0, a.cd + 16)), /^the central directory disagrees with the entry mod\.json$/);
-  await refusedWith(env, damaged(build(), (b, a) => b.writeUInt16LE(1, a.end + 8)), /^the end record counts the entries wrongly$/);
-  await refusedWith(env, damaged(build(), (b, a) => b.writeUInt32LE(a.cd - 1, a.end + 16)), /^the end record places the central directory wrongly$/);
+  await refusedWith(env, rezip(gc, [{ name: 'mod.json', data: gc.modjson, method: 8 }]), /^The archive has a compressed entry; Snapmap\+ stores every file uncompressed\.$/);
+  await refusedWith(env, damaged(build(), b => b.writeUInt16LE(0x0001, 6)), /^The archive has an encrypted entry\.$/);
+  await refusedWith(env, damaged(build(), b => b.writeUInt16LE(0x0008, 6)), /^The archive has an entry without its sizes in its local header\.$/);
+  await refusedWith(env, damaged(build(), (b, a) => b.writeUInt32LE(0, a.cd + 16)), /^The archive's central directory disagrees with its entry mod\.json\.$/);
+  await refusedWith(env, damaged(build(), (b, a) => b.writeUInt16LE(1, a.end + 8)), /^The archive's end record counts its entries wrongly\.$/);
+  await refusedWith(env, damaged(build(), (b, a) => b.writeUInt32LE(a.cd - 1, a.end + 16)), /^The archive's end record places its central directory wrongly\.$/);
   const gt = build();
-  await refusedWith(env, { hash: gt.hash, ...zip(entriesFor(gt.modjson, gt.files), { after: Buffer.from('trailing') }) }, /^bytes after the end record$/);
+  await refusedWith(env, { hash: gt.hash, ...zip(entriesFor(gt.modjson, gt.files), { after: Buffer.from('trailing') }) }, /^The archive has bytes after its end record\.$/);
   const gb = build();
-  await refusedWith(env, { hash: gb.hash, ...zip(entriesFor(gb.modjson, gb.files), { before: Buffer.from('MZ') }) }, /^not a ZIP archive$/);
+  await refusedWith(env, { hash: gb.hash, ...zip(entriesFor(gb.modjson, gb.files), { before: Buffer.from('MZ') }) }, /^The upload is not a ZIP archive\.$/);
   const gw = build();
-  await refusedWith(env, { hash: gw.hash, ...zip(entriesFor(gw.modjson, gw.files), { between: Buffer.from('junk') }) }, /^unexpected bytes after an entry$/);
+  await refusedWith(env, { hash: gw.hash, ...zip(entriesFor(gw.modjson, gw.files), { between: Buffer.from('junk') }) }, /^The archive has unexpected bytes after an entry\.$/);
   const gd = build({ files: [] });
-  await refusedWith(env, rezip(gd, [{ name: 'mod.json', data: gd.modjson }, { name: 'mod.json', data: gd.modjson }]), /^two entries named mod\.json$/);
+  await refusedWith(env, rezip(gd, [{ name: 'mod.json', data: gd.modjson }, { name: 'mod.json', data: gd.modjson }]), /^The archive holds mod\.json twice\.$/);
   const big = build({ files: [] });
-  await refusedWith(env, rezip(big, [{ name: 'mod.json', data: Buffer.alloc(1024 * 1024 + 1, 32) }]), /^mod\.json is larger than 1 MiB$/);
+  await refusedWith(env, rezip(big, [{ name: 'mod.json', data: Buffer.alloc(1024 * 1024 + 1, 32) }]), /^The archive's mod\.json is larger than 1 MiB\.$/);
   const truncated = build();
-  await refusedWith(env, { hash: truncated.hash, bytes: truncated.bytes.subarray(0, truncated.cd) }, /^the archive ends before its central directory$/);
+  await refusedWith(env, { hash: truncated.hash, bytes: truncated.bytes.subarray(0, truncated.cd) }, /^The archive ends before its central directory\.$/);
   assert.equal(env.MODS.objects.size, 0);
 });
 
@@ -397,44 +408,220 @@ test('archive PUT refuses a mod.json or entries that do not describe the build',
 
   const extra = build();
   await refusedWith(env, rezip(extra, [...entriesFor(extra.modjson, files), { name: 'assets/generated/decls/entitydef/mods/' + SALT + '/stowaway.decl', data: 'x' }]),
-    /^the archive holds a file mod\.json does not list: assets\/generated\/decls\/entitydef\/mods\/k7pinkim\/stowaway\.decl$/);
+    /^The archive holds assets\/generated\/decls\/entitydef\/mods\/k7pinkim\/stowaway\.decl, which mod\.json does not list\.$/);
   const outside = build();
-  await refusedWith(env, rezip(outside, [...entriesFor(outside.modjson, files), { name: 'readme.txt', data: 'hi' }]), /^the archive holds an entry outside assets\/: readme\.txt$/);
+  await refusedWith(env, rezip(outside, [...entriesFor(outside.modjson, files), { name: 'readme.txt', data: 'hi' }]), /^The archive holds readme\.txt, which is outside assets\/\.$/);
   const dotdot = build();
   await refusedWith(env, rezip(dotdot, [...entriesFor(dotdot.modjson, files), { name: 'assets/generated/../../evil.decl', data: 'x' }]),
-    /^path traversal: assets\/generated\/\.\.\/\.\.\/evil\.decl$/);
-  await refusedWith(env, build({ files: [{ request: 'generated/decls/entitydef/mods/' + SALT + '/../x.decl', data: 'x' }] }), /^path traversal/);
+    /^The file assets\/generated\/\.\.\/\.\.\/evil\.decl climbs out of its folder with "\." or "\.\."\.$/);
+  await refusedWith(env, build({ files: [{ request: 'generated/decls/entitydef/mods/' + SALT + '/../x.decl', data: 'x' }] }), /climbs out of its folder/);
   await refusedWith(env, build({ files: [{ request: 'generated/decls/entitydef/mods/' + SALT + '/Pink.decl', data: 'x' }] }),
-    /^request path is not lowercase: assets\/generated\/decls\/entitydef\/mods\/k7pinkim\/Pink\.decl$/);
+    /^The archive holds assets\/generated\/decls\/entitydef\/mods\/k7pinkim\/Pink\.decl, whose path is not in lower case\.$/);
   const upper = build();
-  await refusedWith(env, rezip(upper, [...entriesFor(upper.modjson, files), { name: 'assets/Generated/x.decl', data: 'x' }]), /^request path is not lowercase/);
-  await refusedWith(env, build({ files: [{ request: 'generated/decls/entitydef/mods/' + SALT + '/run.exe', data: 'MZ' }] }), /^extension not allowed: /);
-  await refusedWith(env, build({ files: [{ request: 'virtualtextures/mods/othersal/pink_sq1.mega2', data: 'v' }] }), /^extension not allowed/);
-  await refusedWith(env, build({ files: [{ request: 'virtualtextures/mods/' + SALT + '/pink_vmtr_sq1.mega2', data: 'v' }] }), /^extension not allowed/);
-  await refusedWith(env, build({ files: [{ request: 'virtualtextures/mods/' + SALT + '/pink_sq17.mega2', data: 'v' }] }), /^extension not allowed/);
+  await refusedWith(env, rezip(upper, [...entriesFor(upper.modjson, files), { name: 'assets/Generated/x.decl', data: 'x' }]), /whose path is not in lower case/);
+  await refusedWith(env, build({ files: [{ request: 'generated/decls/entitydef/mods/' + SALT + '/run.exe', data: 'MZ' }] }), /run\.exe is a type of file a mod cannot carry\.$/);
+  await refusedWith(env, build({ files: [{ request: 'virtualtextures/mods/othersal/pink_sq1.mega2', data: 'v' }] }), /is not one of this mod's own virtual-texture members\.$/);
+  await refusedWith(env, build({ files: [{ request: 'virtualtextures/mods/' + SALT + '/pink_vmtr_sq1.mega2', data: 'v' }] }), /is not one of this mod's own virtual-texture members\.$/);
+  await refusedWith(env, build({ files: [{ request: 'virtualtextures/mods/' + SALT + '/pink_sq17.mega2', data: 'v' }] }), /is not one of this mod's own virtual-texture members\.$/);
   await stored(env, build({ files: [{ request: 'virtualtextures/mods/' + SALT + '/pink_sq16.mega2', data: 'v' }] }));
 
-  await refusedWith(env, build({ block: { build: 'e'.repeat(64) } }), /^mod\.json build does not match the path$/);
-  await refusedWith(env, build({ block: { build: undefined } }), /^mod\.json has no build hash$/);
-  await refusedWith(env, build({ salt: 'Bad-salt' }), /^mod\.json has no valid salt$/);
-  await refusedWith(env, build({ salt: '1abcdefg' }), /^mod\.json has no valid salt$/);
-  await refusedWith(env, build({ block: { format: 1 } }), /^mod\.json is not format 2$/);
-  await refusedWith(env, build({ block: { files: undefined } }), /^mod\.json has no file list$/);
-  await refusedWith(env, build({ author: { requirements: { cvars: { 'bad name': '1' } } } }), /^bad requirements$/);
-  await refusedWith(env, build({ author: { requirements: { commands: { activate: ['g_x 1; quit'] } } } }), /^bad requirements$/);
+  await refusedWith(env, build({ block: { build: 'e'.repeat(64) } }), /^The archive's mod\.json names another build than the one uploaded\.$/);
+  await refusedWith(env, build({ block: { build: undefined } }), /^The archive's mod\.json has no build hash\.$/);
+  await refusedWith(env, build({ salt: 'Bad-salt' }), /^The archive's mod\.json has no valid salt\.$/);
+  await refusedWith(env, build({ salt: '1abcdefg' }), /^The archive's mod\.json has no valid salt\.$/);
+  await refusedWith(env, build({ block: { format: 1 } }), /^The archive's mod\.json is not in format 2, the only one Snapmap\+ builds\.$/);
+  await refusedWith(env, build({ block: { files: undefined } }), /^The archive's mod\.json has no file list\.$/);
+  await refusedWith(env, build({ author: { requirements: { cvars: { 'bad name': '1' } } } }), /^The archive's mod\.json has requirements Snapmap\+ would not apply\.$/);
+  await refusedWith(env, build({ author: { requirements: { commands: { activate: ['g_x 1; quit'] } } } }), /^The archive's mod\.json has requirements Snapmap\+ would not apply\.$/);
   await stored(env, build({ author: { requirements: { cvars: { g_fov: '90' }, commands: { activate: ['g_fov 90'], deactivate: ['g_fov 80'] } } } }));
 
   const missing = build();
   await refusedWith(env, rezip(missing, entriesFor(missing.modjson, files).slice(0, 2)),
-    /^a file mod\.json lists is not in the archive: assets\/generated\/image\/mods\/k7pinkim\/pink\.bimage$/);
+    /^The archive lacks assets\/generated\/image\/mods\/k7pinkim\/pink\.bimage, which mod\.json lists\.$/);
   const resized = build();
   await refusedWith(env, rezip(resized, entriesFor(resized.modjson, [{ ...files[0], data: files[0].data + ' ' }, files[1]])),
-    /^the size of assets\/generated\/decls\/entitydef\/mods\/k7pinkim\/pink_imp\.decl does not match mod\.json$/);
+    /^The size of assets\/generated\/decls\/entitydef\/mods\/k7pinkim\/pink_imp\.decl does not match mod\.json\.$/);
   const noModjson = build();
-  await refusedWith(env, rezip(noModjson, entriesFor(noModjson.modjson, files).slice(1)), /^the archive has no mod\.json$/);
-  await refusedWith(env, rezip(build(), [{ name: 'mod.json', data: '{"snapmap-plus":' }]), /^mod\.json is not JSON$/);
-  await refusedWith(env, rezip(build(), [{ name: 'mod.json', data: '{"name":"x"}' }]), /^mod\.json has no "snapmap-plus" block$/);
-  await refusedWith(env, rezip(build(), [{ name: 'mod.json', data: Buffer.from([0x7b, 0xff, 0x7d]) }]), /^mod\.json is not UTF-8$/);
+  await refusedWith(env, rezip(noModjson, entriesFor(noModjson.modjson, files).slice(1)), /^The archive has no mod\.json\.$/);
+  await refusedWith(env, rezip(build(), [{ name: 'mod.json', data: '{"snapmap-plus":' }]), /^The archive's mod\.json is not valid JSON\.$/);
+  await refusedWith(env, rezip(build(), [{ name: 'mod.json', data: '{"name":"x"}' }]), /^The archive's mod\.json has no "snapmap-plus" block, so the mod was never built\.$/);
+  await refusedWith(env, rezip(build(), [{ name: 'mod.json', data: Buffer.from([0x7b, 0xff, 0x7d]) }]), /^The archive's mod\.json is not UTF-8 text\.$/);
+});
+
+/* ---------------- 1.0 rules: no versions, the product's archive, scripts ---------------- */
+
+test('no mod version anywhere: a build without one is stored, and one an author wrote is ignored', async () => {
+  const env = await modsEnv();
+  const plain = build();
+  assert.ok(!Object.hasOwn(plain.doc, 'version'));
+  const response = await put(env, plain);
+  assert.equal(response.status, 201);
+  const answer = await response.json();
+  assert.deepEqual(Object.keys(answer).sort(), ['build', 'size']);
+  const written = build({ author: { version: '2.0.0-beta' } });
+  assert.equal((await put(env, written)).status, 201, 'a hand-written version is an unknown author key');
+  assert.deepEqual(Object.keys(row(env, written.hash)).sort(), ['claims', 'created', 'salt', 'size']);
+  const columns = env.registryStorage.sql.exec("SELECT name FROM pragma_table_info('mod_build')").toArray().map(r => r.name);
+  assert.ok(!columns.includes('version'), 'the index keeps no version');
+});
+
+test('the Worker stores what the product writes after decisions 8, 9 and 10', async () => {
+  const env = await modsEnv();
+  /* The block keeps the folder's case; the archive holds the lower-cased request. */
+  await stored(env, build({ files: [{ path: 'generated/decls/entityDef/mods/' + SALT + '/Pink_Imp.decl',
+    request: 'generated/decls/entitydef/mods/' + SALT + '/pink_imp.decl', data: 'entityDef x {}\n' }] }));
+  /* Decision 10: an install keeps every file, unchanged game files at their game paths included. */
+  await stored(env, build({ files: [...defaultFiles(SALT), { request: 'generated/decls/entitydef/monster/imp.decl', data: 'entityDef monster/imp {}\n' }] }));
+  /* Decision 9: string edits stay unprefixed beside the mod's own prefixed keys. */
+  await stored(env, build({ author: { strings: { en: { box: 'Crate', [SALT + '_pink_name']: 'Pink Imp' } } } }));
+  /* Every type the builder carries, .baas_ classes with an underscore among them. */
+  await stored(env, build({ files: [{ request: 'generated/baas/mods/' + SALT + '/pink.baas_monster_48', data: 'b' },
+    { request: 'generated/swf/mods/' + SALT + '/menu.bswf', data: 's' }, { request: 'mods/' + SALT + '/odd name (2)~$@+.decl', data: 'd' }] }));
+  /* Requirements in every shape the builder takes: integers, booleans, padded lines. */
+  await stored(env, build({ author: { requirements: { cvars: { g_fov: 90, r_skipFog: true, g_name: 'x y', g_neg: -3 },
+    commands: { activate: ['  g_fov 90  '], deactivate: [] } } } }));
+  /* The block keys the builder writes, a pointer with closure, the largest file count. */
+  const pointer = { path: 'assets/generated/decls/entitydef/monster/imp.decl', sha256: 'c'.repeat(64), source: 'generated/decls/entitydef/monster/imp.decl',
+    provides: { type: 'entityDef', name: 'monster/imp' }, needs: [], closure: true };
+  await stored(env, build({ stock: [pointer], block: { cause: undefined, warnings: ['a warning'], shadows: [], edits: [], classes: { adds: 1 } } }));
+});
+
+test('the Worker refuses what the product would refuse when it reads the archive back', async () => {
+  const env = await modsEnv();
+  const file = defaultFiles(SALT)[0];
+  await refusedWith(env, build({ block: { cause: 'it did not build' } }), /^The archive's mod\.json records a build that failed; fix the mod and build it again\.$/);
+  await refusedWith(env, build({ block: { bundle: 'x' } }), /^The archive's mod\.json has a key Snapmap\+ does not write in its "snapmap-plus" block: bundle\.$/);
+  await refusedWith(env, build({ block: { tree: 'nothex' } }), /has a "snapmap-plus" block Snapmap\+ did not write\.$/);
+  await refusedWith(env, build({ author: { id: 'pink' } }), /^The archive's mod\.json uses "id", which Snapmap\+ no longer reads\.$/);
+  await refusedWith(env, build({ author: { hud: { schema: 1 } } }), /uses "hud\.schema", which Snapmap\+ no longer reads\.$/);
+  await refusedWith(env, build({ author: { files: [] } }), /^The archive's mod\.json has "files" outside its "snapmap-plus" block\.$/);
+  await refusedWith(env, build({ author: { name: '   ' } }), /^The archive's mod\.json has no name\.$/);
+  await refusedWith(env, build({ author: { name: 'x'.repeat(81) } }), /has a name longer than 80 characters\.$/);
+  await refusedWith(env, build({ author: { strings: [] } }), /has "strings" that is not an object\.$/);
+  await refusedWith(env, build({ author: { requirements: { cvars: { g_fov: 1.5 } } } }), /has requirements Snapmap\+ would not apply\.$/);
+  await refusedWith(env, build({ author: { requirements: { cvars: { g_fov: '1', G_FOV: '2' } } } }), /has requirements Snapmap\+ would not apply\.$/);
+  await refusedWith(env, build({ files: [{ request: 'generated/decls/entitydef/mods/' + SALT + '/empty.decl', data: '' }] }),
+    /^The archive's mod\.json gives assets\/generated\/decls\/entitydef\/mods\/k7pinkim\/empty\.decl a size outside 1 byte to 64 MiB\.$/);
+  await refusedWith(env, build({ files: [{ request: 'generated/decls/entitydef/mods/' + SALT + '/a#b.decl', data: 'x' }] }), /has a character a mod path may not use\.$/);
+  await refusedWith(env, build({ files: [{ request: 'decls/renderprogs/mods/' + SALT + '/x.decl', data: 'x' }] }), /is an engine file a mod may not ship\.$/);
+  await refusedWith(env, build({ files: [{ request: 'generated/mods/' + SALT + '/vulkan_pipelines.bin', data: 'x' }] }), /is an engine file a mod may not ship\.$/);
+  await refusedWith(env, build({ files: [{ request: 'generated/' + 'x/'.repeat(200) + 'a.decl', data: 'x' }] }), /has a path longer than 400 characters\.$/);
+  const twice = build({ files: [file, { ...file, path: file.request.toUpperCase() }] });
+  await refusedWith(env, rezip(twice, entriesFor(twice.modjson, [file])), /^The archive's mod\.json lists .* twice\.$/);
+  const extraKey = build();
+  extraKey.doc['snapmap-plus'].files[0].mtime = 1;
+  await refusedWith(env, rezip(extraKey, entriesFor(Buffer.from(JSON.stringify(extraKey.doc)), extraKey.files)), /^The archive's mod\.json lists a file entry Snapmap\+ did not write\.$/);
+  const badPointer = { path: 'assets/generated/decls/entitydef/monster/imp.decl', sha256: 'c'.repeat(64), source: 'Generated/Decls/x.decl',
+    provides: { type: 'entityDef', name: 'monster/imp' }, needs: [] };
+  await refusedWith(env, build({ stock: [badPointer] }), /^The archive's mod\.json lists a pointer entry Snapmap\+ did not write\.$/);
+  const tooMany = Array.from({ length: 4096 }, (_, i) => ({ ...badPointer, source: 'x.decl', path: 'assets/p/' + i + '.decl' }));
+  await refusedWith(env, build({ stock: tooMany, pretty: false }), /^The archive's mod\.json lists more than 4096 files\.$/);
+  /* A long path keeps the sentence within what the product shows. */
+  const deep = build({ files: [{ request: 'generated/decls/entitydef/mods/' + SALT + '/' + 'deep/'.repeat(70) + 'x.exe', data: 'x' }] });
+  await refusedWith(env, deep, /^The file \.\.\..* is a type of file a mod cannot carry\.$/);
+  assert.equal(env.MODS.objects.size, 0);
+});
+
+/* A mod's scripts: Lua source under assets/mods/<salt>/scripts/. */
+function scripted(scripts, extra = {}) {
+  return build({ files: [...defaultFiles(SALT), ...scripts.map(([name, data]) => ({ request: 'mods/' + SALT + '/scripts/' + name, data }))], ...extra });
+}
+
+test('a build may carry Lua source scripts under its own mods/<salt>/scripts/', async () => {
+  const env = await modsEnv();
+  const source = 'api = 1\nlocal lib = require("lib/util")\non.spawn("ai/tyrant", function (e) lib.roar(e) end)\n';
+  await stored(env, scripted([['main.lua', source], ['lib/util.lua', 'local M = {}\nfunction M.roar(e) end\nreturn M\n'],
+    ['bom.lua', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('-- ünïcödé comment\n')])]]));
+  const { MAX_SCRIPT, MAX_SCRIPTS, MAX_SCRIPT_BYTES } = await modsModule;
+  assert.deepEqual([MAX_SCRIPT, MAX_SCRIPTS, MAX_SCRIPT_BYTES], [256 * 1024, 64, MIB]);
+  await stored(env, scripted([['big.lua', Buffer.alloc(MAX_SCRIPT, 0x20)]]));
+  await stored(env, scripted(Array.from({ length: MAX_SCRIPTS }, (_, i) => ['s' + i + '.lua', 'return ' + i + '\n'])));
+  await stored(env, scripted(Array.from({ length: 4 }, (_, i) => ['f' + i + '.lua', Buffer.alloc(MAX_SCRIPT, 0x20)])));
+});
+
+test('the Worker refuses Lua bytecode, oversize scripts and scripts outside the salt folder', async () => {
+  const env = await modsEnv();
+  const where = 'assets\\/mods\\/k7pinkim\\/scripts\\/';
+  await refusedWith(env, scripted([['main.lua', Buffer.concat([Buffer.from([0x1b, 0x4c, 0x75, 0x61, 0x54, 0x00]), Buffer.alloc(40, 1)])]]),
+    new RegExp('^The script ' + where + 'main\\.lua is compiled Lua bytecode; a mod carries its scripts as source text\\.$'));
+  await refusedWith(env, scripted([['lib/x.lua', Buffer.from([0x1b, 0x4c, 0x75, 0x61])]]), /^The script .*lib\/x\.lua is compiled Lua bytecode/);
+  await refusedWith(env, scripted([['nul.lua', Buffer.from('return 1\0\n')]]), /^The script .*nul\.lua contains a NUL byte; a script must be plain text\.$/);
+  await refusedWith(env, scripted([['latin.lua', Buffer.from([0x2d, 0x2d, 0xe9, 0x0a])]]), /^The script .*latin\.lua is not UTF-8 text\.$/);
+  await refusedWith(env, scripted([['big.lua', Buffer.alloc(256 * 1024 + 1, 0x20)]]), new RegExp('^The script ' + where + 'big\\.lua is larger than 256 KiB\\.$'));
+  await refusedWith(env, scripted(Array.from({ length: 65 }, (_, i) => ['s' + i + '.lua', 'return 1\n'])), /^The mod carries more than 64 scripts\.$/);
+  await refusedWith(env, scripted(Array.from({ length: 5 }, (_, i) => ['f' + i + '.lua', Buffer.alloc(220 * 1024, 0x20)])), /^The mod's scripts come to more than 1 MiB\.$/);
+  const outside = /is a script outside this mod's mods\/k7pinkim\/scripts\/ folder\.$/;
+  for (const request of ['mods/othersal/scripts/main.lua', 'mods/' + SALT + '/main.lua', 'scripts/main.lua', 'generated/decls/mods/' + SALT + '/scripts/x.lua',
+    'mods/' + SALT + '/scripts/.lua']) {
+    await refusedWith(env, build({ files: [...defaultFiles(SALT), { request, data: 'return 1\n' }] }), outside);
+  }
+  /* A script entry the block does not list is still a stowaway. */
+  const plain = build();
+  await refusedWith(env, rezip(plain, [...entriesFor(plain.modjson, plain.files), { name: 'assets/mods/' + SALT + '/scripts/extra.lua', data: 'return 1\n' }]),
+    /^The archive holds assets\/mods\/k7pinkim\/scripts\/extra\.lua, which mod\.json does not list\.$/);
+  assert.equal(env.MODS.objects.size, 0);
+});
+
+test('every refusal on every mod route is one plain sentence', async () => {
+  const env = await modsEnv();
+  const archive = build();
+  await stored(env, archive);
+  const hash = archive.hash;
+  const requests = [
+    putRequest(hash, archive.bytes, { 'Content-Type': 'text/plain' }),
+    call('PUT', '/mods/build/' + hash, { body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(archive.bytes)); c.close(); } }), headers: { 'Content-Type': 'application/zip' } }),
+    call('PUT', '/mods/build/' + 'b'.repeat(64), { body: archive.bytes, headers: { 'Content-Type': 'application/zip', 'Content-Length': String(96 * MIB + 1) } }),
+    putRequest('c'.repeat(64), Buffer.from('tiny')),
+    putRequest(hash.toUpperCase(), archive.bytes),
+    call('GET', '/mods/build/' + 'f'.repeat(64)),
+    call('DELETE', '/mods/build/' + hash),
+    call('GET', '/mods/claim'),
+    call('GET', '/mods/elsewhere'),
+    call('POST', '/mods/admin/reset'),
+    postJson('/mods/claim', { ref: '', builds: [hash] }),
+    postJson('/mods/claim', { ref: 'a', builds: [] }),
+    postJson('/mods/claim', { ref: 'a', builds: 'nope' }),
+    postJson('/mods/claim', { ref: 'a', builds: ['xyz'] }),
+    postJson('/mods/claim', { ref: 'a', builds: Array.from({ length: 257 }, (_, i) => sha(Buffer.from('h' + i))) }),
+    postJson('/mods/claim', { ref: 'a', builds: [hash], secret: 'short' }),
+    postJson('/mods/claim', { ref: 'a', builds: ['d'.repeat(64)] }),
+    postJson('/mods/claim', { ref: 'a', builds: [hash], secret: 'e'.repeat(64) }),
+    call('POST', '/mods/claim', { body: '[1,2]', headers: { 'Content-Type': 'application/json' } }),
+    call('POST', '/mods/claim', { body: 'x'.repeat(70000), headers: { 'Content-Type': 'application/json' } }),
+    postJson('/mods/release', { claim: 'nothex', secret: 'a'.repeat(64) }),
+    postJson('/mods/release', { claim: 'a'.repeat(32), secret: 'short' }),
+    postJson('/mods/release', { claim: 'a'.repeat(32), secret: 'a'.repeat(64) }),
+  ];
+  const statuses = [];
+  for (const request of requests) {
+    const response = await fetchWorker(env, request);
+    statuses.push(response.status);
+    assert.ok(response.status >= 400, request.method + ' ' + request.url);
+    assertSentence((await response.json()).error, request.method + ' ' + request.url);
+  }
+  assert.deepEqual(statuses, [415, 411, 413, 422, 400, 404, 405, 405, 404, 404, 400, 400, 400, 400, 400, 400, 409, 403, 400, 413, 400, 400, 404]);
+  const { claim, secret } = await (await fetchWorker(env, postJson('/mods/claim', { ref: 'item-5', builds: [hash] }))).json();
+  const wrong = await fetchWorker(env, postJson('/mods/release', { claim, secret: 'f'.repeat(64) }));
+  assert.equal(wrong.status, 403);
+  assertSentence((await wrong.json()).error, 'wrong secret');
+  env.MODS_BLOCKED = JSON.stringify([hash]);
+  const blocked = await fetchWorker(env, call('GET', '/mods/build/' + hash));
+  assert.equal(blocked.status, 451);
+  assertSentence((await blocked.json()).error, 'takedown');
+  env.MODS_BLOCKED = 'not json';
+  const broken = await fetchWorker(env, call('GET', '/mods/build/' + hash));
+  assert.equal(broken.status, 503);
+  assertSentence((await broken.json()).error, 'unavailable');
+  env.MODS_BLOCKED = '[]';
+  env.MOD_REGISTRY = { idFromName: () => 'x', get: () => ({ buildServed: async () => { throw new Error('down'); } }) };
+  const down = await fetchWorker(env, call('GET', '/mods/build/' + hash));
+  assert.equal(down.status, 503);
+  assertSentence((await down.json()).error, 'index down');
+  const limitedEnv = await modsEnv();
+  for (let i = 0; i < 64; i++) await fetchWorker(limitedEnv, postJson('/mods/claim', { ref: 'a', builds: ['d'.repeat(64)] }));
+  const limited = await fetchWorker(limitedEnv, postJson('/mods/claim', { ref: 'a', builds: ['d'.repeat(64)] }));
+  assert.equal(limited.status, 429);
+  assertSentence((await limited.json()).error, 'rate limited');
 });
 
 test('archive PUT refuses wrong type, no length, oversize and malformed hashes before reading', async () => {
@@ -448,7 +635,7 @@ test('archive PUT refuses wrong type, no length, oversize and malformed hashes b
   const huge = await fetchWorker(env, call('PUT', '/mods/build/' + archive.hash, { body: archive.bytes, headers: {
     'Content-Type': 'application/zip', 'Content-Length': String(96 * MIB + 1) } }));
   assert.equal(huge.status, 413);
-  assert.deepEqual(await huge.json(), { error: 'the archive is over 96 MiB' });
+  assert.deepEqual(await huge.json(), { error: 'The archive is over 96 MiB, the largest build the mod store takes.' });
   assert.equal((await fetchWorker(env, putRequest(archive.hash.toUpperCase(), archive.bytes))).status, 400);
   assert.equal((await fetchWorker(env, putRequest('abc', archive.bytes))).status, 404);
   assert.equal((await fetchWorker(env, call('DELETE', '/mods/build/' + archive.hash))).status, 405);
@@ -617,7 +804,7 @@ test('claim, re-claim with the secret, and release with wrong and right secrets'
   assert.equal((await fetchWorker(env, postJson('/mods/claim', { ref: 'item-42', builds: [first.hash], secret }))).status, 403);
   const unknown = await fetchWorker(env, postJson('/mods/claim', { ref: 'item-43', builds: ['d'.repeat(64)] }));
   assert.equal(unknown.status, 409);
-  assert.deepEqual(await unknown.json(), { error: 'unknown builds', missing: ['d'.repeat(64)], missingCount: 1 });
+  assert.deepEqual(await unknown.json(), { error: 'The mod store does not hold every build the claim names; upload them again.', missing: ['d'.repeat(64)], missingCount: 1 });
   for (const body of [{ ref: '', builds: [first.hash] }, { ref: 'x'.repeat(65), builds: [first.hash] }, { ref: 'a', builds: [] },
     { ref: 'a', builds: [first.hash], secret: 'short' }, { ref: 'a', builds: Array(257).fill(first.hash) }, { ref: 'a', bundles: [first.hash] }]) {
     assert.equal((await fetchWorker(env, postJson('/mods/claim', body))).status, 400, JSON.stringify(body).slice(0, 80));

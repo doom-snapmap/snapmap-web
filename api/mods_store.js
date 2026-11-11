@@ -9,8 +9,18 @@ import { RequestError, readJsonObject } from './request_body.js';
 
 /* Under the 100 MB request body limit of the Free and Pro plans. */
 export const MAX_ARCHIVE = 96 * 1024 * 1024;
+/* The product's builder limits (snapmap-plus src/backend/modbundle.h): mod.json, files and
+ * pointers together, one carried file, one request path in bytes. */
 export const MAX_MODJSON = 1024 * 1024;
 export const MAX_FILES = 4096;
+export const MAX_FILE = 64 * 1024 * 1024;
+const MAX_REQUEST = 400;
+const MAX_NAME_POINTS = 80;
+/* Scripts: Lua source text under assets/mods/<salt>/scripts/ (the scripting design's
+ * section 6): each file at most 256 KiB, at most 64 files and 1 MiB per build. */
+export const MAX_SCRIPT = 256 * 1024;
+export const MAX_SCRIPTS = 64;
+export const MAX_SCRIPT_BYTES = 1024 * 1024;
 export const MAX_CLAIM_BUILDS = 256;
 export const CLAIM_WINDOW_MS = 3600000;   // upload-before-claim window (one hour), as in mods_registry_store.js
 const MAX_CLAIM_JSON = 64 * 1024;
@@ -22,13 +32,33 @@ const PURGE_ROUNDS = 20;
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
 const SALT_RE = /^[a-z][a-z0-9]{7}$/;
-const SEGMENT_RE = /^[a-z0-9_.~$#@+=,()&!' -]+$/;
+/* A path segment's characters as the builder allows them (modbundle.c mb_path_char),
+ * lower-cased as every request path is. */
+const SEGMENT_RE = /^[a-z0-9._$+@~() -]+$/;
 const CVAR_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-const COMMAND_LINE_RE = /^[\x21-\x7e](?:[\x20-\x7e]{0,254}[\x21-\x7e])?$/;
+const PRINTABLE_RE = /^[\x20-\x7e]*$/;
 const EXTENSIONS = new Set(['decl', 'bmd6model', 'bmd6skl', 'bmd6anim', 'bimage', 'bmodel', 'bcm', 'bnk', 'json', 'bin', 'vspv', 'fspv', 'cspv', 'mrpr', 'dmodel']);
 const BLOCK_KEY = 'snapmap-plus';
+/* The builder block's keys (modbundle.c mb_load_root) and the author keys a built mod.json
+ * may no longer use (mb_retired_key). A hand-written "version" is not among them: it is an
+ * unknown author key, kept and ignored like any other. */
+const BLOCK_KEYS = new Set(['build', 'built', 'cause', 'classes', 'edits', 'editor', 'files', 'format', 'registries',
+  'rules', 'salt', 'shadows', 'stock', 'tree', 'warnings']);
+const RETIRED_KEYS = ['id', 'key', 'shadows', 'stock', 'scope', 'player', 'extends', 'replaces', 'legacy', 'composes', 'schema'];
+const FILE_KEYS = ['needs', 'path', 'provides', 'sha256', 'size'];
+const POINTER_KEYS = new Set(['closure', 'needs', 'path', 'provides', 'sha256', 'source']);
+const LUA_SIGNATURE = [0x1b, 0x4c, 0x75, 0x61];   // "\x1bLua", the start of every precompiled chunk
+
+/* Every refusal is one plain sentence the product shows as it is: printable ASCII, at most
+ * 160 characters (modnet.c mn_error_text keeps no more). */
+export const MAX_REFUSAL = 160;
 
 /* ---------------- responses ---------------- */
+
+const UNAVAILABLE = 'The mod store is unavailable right now; try again later.';
+const NOT_FOUND = 'The mod store has nothing at this address.';
+const NOT_ZIP = 'The upload is not a ZIP archive.';
+const BAD_SECRET = 'The secret is not 64 lowercase hex characters.';
 
 function reply(obj, status, extra) {
   return new Response(JSON.stringify(obj), { status: status || 200, headers: { 'Content-Type': 'application/json', ...extra } });
@@ -83,14 +113,15 @@ function blockedSet(env) {
   try { list = JSON.parse(source); } catch { list = null; }
   if (!Array.isArray(list) || !list.every(hash => typeof hash === 'string' && HEX64.test(hash.toLowerCase()))) {
     console.log('mods: MODS_BLOCKED is not a JSON array of SHA-256 hex strings; refusing mod requests');
-    throw new RequestError('mod store unavailable', 503);
+    throw new RequestError(UNAVAILABLE, 503);
   }
   blockedCache = { source, set: new Set(list.map(hash => hash.toLowerCase())) };
   return blockedCache.set;
 }
 
 function blockedResponse(hashes) {
-  return refuse('blocked by takedown', 451, { blocked: hashes.slice(0, MISSING_SHOWN) });
+  return refuse(hashes.length === 1 ? 'This build was taken down from the mod store.' : 'Some of these builds were taken down from the mod store.',
+    451, { blocked: hashes.slice(0, MISSING_SHOWN) });
 }
 
 /* ---------------- per-address quotas ---------------- */
@@ -142,12 +173,12 @@ async function admit(req, env, entries, failOpen) {
     return result.allowed;
   } catch {
     if (failOpen) { console.log('mods: read quota unavailable; admitting'); return true; }
-    throw new RequestError('mod store quota unavailable; try again later', 503);
+    throw new RequestError(UNAVAILABLE, 503);
   }
 }
 
 function rateLimited() {
-  return refuse('rate limited', 429, {}, { 'Retry-After': retryAfterHour() });
+  return refuse('Too many mod store requests came from this address this hour; try again later.', 429, {}, { 'Retry-After': retryAfterHour() });
 }
 
 /* ---------------- registry ---------------- */
@@ -157,7 +188,7 @@ async function registry(env, method, ...args) {
     const stub = env.MOD_REGISTRY.get(env.MOD_REGISTRY.idFromName('registry'));
     return await stub[method](...args);
   } catch {
-    throw new RequestError('mod store index unavailable; try again later', 503);
+    throw new RequestError(UNAVAILABLE, 503);
   }
 }
 
@@ -175,38 +206,54 @@ export function validSalt(salt) {
   return typeof salt === 'string' && SALT_RE.test(salt);
 }
 
-/* Request paths are lowercase, relative and made of plain segments: no leading slash, no
- * backslash, no empty, "." or ".." segment, no segment ending in a dot or space, and (for
- * a carried file) a whitelisted extension. A virtual-texture family member is admitted
- * only under the mod's own virtualtextures/mods/<salt>/, member 1 to 16, never a stock
- * _vmtr family (the product's builder, modbundle.c sh_mb_vt_member). */
-export function requestPathError(path, options = {}) {
-  if (typeof path !== 'string' || path.length < 1 || path.length > 512) return 'bad request path';
-  if (path.startsWith('/')) return 'absolute request path';
-  if (path.includes('\\')) return 'backslash in request path';
-  if (path !== path.toLowerCase()) return 'request path is not lowercase';
-  const segments = path.split('/');
-  for (const segment of segments) {
-    if (segment === '..' || segment === '.') return 'path traversal';
-    if (!segment || !SEGMENT_RE.test(segment) || /[. ]$/.test(segment) || segment.startsWith(' ')) return 'bad request path segment';
-  }
-  if (options.extension === false) return null;
-  const last = segments[segments.length - 1];
-  const dot = last.lastIndexOf('.');
-  const ext = dot > 0 ? last.slice(dot + 1) : '';
-  if (ext === 'bswf') return path.startsWith('generated/swf/') ? null : 'extension not allowed';
-  if (ext === 'mega2') {
-    const prefix = 'virtualtextures/mods/' + (options.salt || '') + '/';
-    const ok = options.salt && path.startsWith(prefix) && /_sq(?:[1-9]|1[0-6])\.mega2$/.test(path) &&
-      path.length > prefix.length && !path.slice(prefix.length).includes('_vmtr');
-    return ok ? null : 'extension not allowed';
-  }
-  if (!EXTENSIONS.has(ext) && !/^baas_[a-z0-9]+$/.test(ext)) return 'extension not allowed';
-  return null;
+/* A path or key as a refusal names it: printable ASCII, the end kept when it is long, so
+ * that every sentence stays within MAX_REFUSAL. */
+function shown(text) {
+  const t = String(text).replace(/[^\x20-\x7e]/g, '?');
+  return t.length > 72 ? '...' + t.slice(-69) : t;
 }
 
-function clip(text) {
-  return String(text).slice(0, 200);
+/* What is wrong with a request path (the part below assets/), as the end of a sentence
+ * that starts with the path, or null. The rules are the builder's (modbundle.c
+ * sh_mb_check_request, mb_rp_forbidden, sh_mb_extension_allowed, sh_mb_vt_member):
+ * at most 400 bytes; relative; no backslash; no empty, "." or ".." segment; no segment
+ * starting with a space or ending in a dot or space; the builder's characters only. A
+ * carried file (options.carried) also needs a type the builder carries and must not be one
+ * of the engine's own caches: a cooked movie only under generated/swf/, a virtual-texture
+ * member only as the mod's own virtualtextures/mods/<salt>/..._sq1 to _sq16 outside any
+ * stock _vmtr family, and a script (.lua) only under the mod's mods/<salt>/scripts/. */
+export function pathFault(request, options = {}) {
+  if (typeof request !== 'string' || request.length < 1) return 'has an empty path';
+  if (request.length > MAX_REQUEST) return 'has a path longer than ' + MAX_REQUEST + ' characters';
+  if (request.startsWith('/')) return 'is an absolute path';
+  if (request.includes('\\')) return 'contains a backslash';
+  const segments = request.split('/');
+  for (const segment of segments) {
+    if (segment === '..' || segment === '.') return 'climbs out of its folder with "." or ".."';
+    if (!segment) return 'has an empty folder name';
+    if (segment.startsWith(' ') || /[. ]$/.test(segment)) return 'has a name that starts with a space or ends in a dot or a space';
+    if (!SEGMENT_RE.test(segment)) return 'has a character a mod path may not use';
+  }
+  if (!options.carried) return null;
+  const leaf = segments[segments.length - 1];
+  if (request.startsWith('decls/renderprogs/') || request.startsWith('generated/glslbinaries/') ||
+      request.startsWith('generated/glsl/') || leaf === 'vulkan_pipelines.bin') return 'is an engine file a mod may not ship';
+  const dot = leaf.lastIndexOf('.');
+  const ext = dot >= 0 ? leaf.slice(dot + 1) : null;
+  if (ext === 'lua') {
+    const folder = 'mods/' + (options.salt || '') + '/scripts/';
+    return options.salt && request.startsWith(folder) && dot > 0 ? null
+      : 'is a script outside this mod\'s mods/' + (options.salt || '<salt>') + '/scripts/ folder';
+  }
+  if (ext === 'bswf') return request.startsWith('generated/swf/') ? null : 'is a movie outside generated/swf/';
+  if (ext === 'mega2') {
+    const prefix = 'virtualtextures/mods/' + (options.salt || '') + '/';
+    const ok = options.salt && request.startsWith(prefix) && /_sq(?:[1-9]|1[0-6])\.mega2$/.test(request) &&
+      request.length > prefix.length && !request.slice(prefix.length).includes('_vmtr');
+    return ok ? null : 'is not one of this mod\'s own virtual-texture members';
+  }
+  if (ext === null || (!EXTENSIONS.has(ext) && !/^baas_[a-z0-9_]+$/.test(ext))) return 'is a type of file a mod cannot carry';
+  return null;
 }
 
 /* ---------------- the archive ---------------- */
@@ -223,28 +270,34 @@ const MAX_ENTRIES = MAX_FILES + 1;
  * an extra field and a comment each, plus the end record and its comment. */
 const MAX_TAIL = 8 * 1024 * 1024;
 const NAME_DECODER = new TextDecoder('utf-8', { fatal: true });
+const ZIP64 = 'The archive uses ZIP64, which Snapmap+ never writes.';
+const MALFORMED_EXTRA = 'The archive has a malformed extra field.';
 
 const u16 = (b, at) => b[at] | (b[at + 1] << 8);
 const u32 = (b, at) => (b[at] | (b[at + 1] << 8) | (b[at + 2] << 16)) + b[at + 3] * 0x1000000;
 
-/* null when an extra field is well formed and holds no ZIP64 record, else the cause. */
+/* null when an extra field is well formed and holds no ZIP64 record, else the refusal. */
 function extraError(bytes) {
   let at = 0;
   while (at < bytes.length) {
-    if (bytes.length - at < 4) return 'a malformed extra field';
+    if (bytes.length - at < 4) return MALFORMED_EXTRA;
     const id = u16(bytes, at), len = u16(bytes, at + 2);
-    if (id === 0x0001) return 'a ZIP64 archive';
+    if (id === 0x0001) return ZIP64;
     at += 4 + len;
-    if (at > bytes.length) return 'a malformed extra field';
+    if (at > bytes.length) return MALFORMED_EXTRA;
   }
   return null;
 }
 
+function isScript(name) {
+  return name.toLowerCase().endsWith('.lua');
+}
+
 /* Reads an archive as it streams past, one chunk at a time, holding only headers, the
- * central directory and mod.json. The form is the product's (modzip.c): stored entries
- * with their sizes in the local header, then the central directory, then the end record;
- * nothing before, between or after. error is the first cause; once set, later bytes are
- * ignored. */
+ * central directory, mod.json and the scripts (which their caps keep small). The form is
+ * the product's (modzip.c): stored entries with their sizes in the local header, then the
+ * central directory, then the end record; nothing before, between or after. error is the
+ * first refusal; once set, later bytes are ignored. */
 export class ArchiveWalker {
   constructor(length) {
     this.length = length;
@@ -259,7 +312,8 @@ export class ArchiveWalker {
     this.entries = [];
     this.names = new Set();
     this.modjson = null;
-    this.captured = 0;
+    this.scripts = 0;
+    this.scriptBytes = 0;
     this.tail = null;
     this.tailLength = 0;
     this.tailStart = 0;
@@ -277,14 +331,15 @@ export class ArchiveWalker {
     while (i < chunk.byteLength && !this.error) {
       if (this.state === 'data') {
         const n = Math.min(this.remaining, chunk.byteLength - i);
-        if (this.current.capture) { this.modjson.set(chunk.subarray(i, i + n), this.captured); this.captured += n; }
+        const entry = this.current;
+        if (entry.data) { entry.data.set(chunk.subarray(i, i + n), entry.captured); entry.captured += n; }
         this.remaining -= n; i += n; this.at += n;
         if (this.remaining === 0) this.nextHeader();
         continue;
       }
       if (this.state === 'tail') {
         const n = chunk.byteLength - i;
-        if (this.tailLength + n > this.tail.length) { this.fail('the central directory is too large'); break; }
+        if (this.tailLength + n > this.tail.length) { this.fail('The archive\'s central directory is too large.'); break; }
         this.tail.set(chunk.subarray(i, i + n), this.tailLength);
         this.tailLength += n; i += n; this.at += n;
         continue;
@@ -318,18 +373,18 @@ export class ArchiveWalker {
         this.tailLength = 4;
         return;
       }
-      this.fail(this.headStart === 0 ? 'not a ZIP archive' : 'unexpected bytes after an entry');
+      this.fail(this.headStart === 0 ? NOT_ZIP : 'The archive has unexpected bytes after an entry.');
       return;
     }
     if (this.need === 30) {
       const flags = u16(b, 6), method = u16(b, 8), csize = u32(b, 18), usize = u32(b, 22), nameLength = u16(b, 26);
-      if (flags & 0x0001) return this.fail('an encrypted entry');
-      if (flags & 0x0008) return this.fail('an entry without its sizes in the local header');
-      if (flags & ~FLAG_UTF8) return this.fail('an entry with unsupported flags');
-      if (csize === 0xffffffff || usize === 0xffffffff) return this.fail('a ZIP64 archive');
-      if (method !== 0) return this.fail('a compressed entry; the archive must be stored');
-      if (csize !== usize) return this.fail('a stored entry whose sizes disagree');
-      if (nameLength < 1 || nameLength > MAX_NAME) return this.fail('an entry name of bad length');
+      if (flags & 0x0001) return this.fail('The archive has an encrypted entry.');
+      if (flags & 0x0008) return this.fail('The archive has an entry without its sizes in its local header.');
+      if (flags & ~FLAG_UTF8) return this.fail('The archive has an entry with flags Snapmap+ never writes.');
+      if (csize === 0xffffffff || usize === 0xffffffff) return this.fail(ZIP64);
+      if (method !== 0) return this.fail('The archive has a compressed entry; Snapmap+ stores every file uncompressed.');
+      if (csize !== usize) return this.fail('The archive has a stored entry whose two sizes disagree.');
+      if (nameLength < 1 || nameLength > MAX_NAME) return this.fail('The archive has an entry name of a bad length.');
       this.current = { flags, crc: u32(b, 14), size: usize, nameLength, extraLength: u16(b, 28), offset: this.headStart };
       this.need = 30 + nameLength + this.current.extraLength;
       return;
@@ -337,18 +392,25 @@ export class ArchiveWalker {
     const entry = this.current;
     let name;
     try { name = NAME_DECODER.decode(b.subarray(30, 30 + entry.nameLength)); }
-    catch { return this.fail('an entry name that is not UTF-8'); }
+    catch { return this.fail('The archive has an entry name that is not UTF-8.'); }
     const extra = extraError(b.subarray(30 + entry.nameLength, this.need));
     if (extra) return this.fail(extra);
-    if (this.names.has(name)) return this.fail('two entries named ' + clip(name));
-    if (this.entries.length >= MAX_ENTRIES) return this.fail('more than ' + MAX_ENTRIES + ' entries');
+    if (this.names.has(name)) return this.fail('The archive holds ' + shown(name) + ' twice.');
+    if (this.entries.length >= MAX_ENTRIES) return this.fail('The archive holds more than ' + MAX_FILES + ' files besides mod.json.');
     entry.name = name;
     this.names.add(name);
     this.entries.push(entry);
     if (name === 'mod.json') {
-      if (entry.size > MAX_MODJSON) return this.fail('mod.json is larger than 1 MiB');
-      this.modjson = new Uint8Array(entry.size);
-      entry.capture = true;
+      if (entry.size > MAX_MODJSON) return this.fail('The archive\'s mod.json is larger than 1 MiB.');
+      entry.data = this.modjson = new Uint8Array(entry.size);
+      entry.captured = 0;
+    } else if (isScript(name)) {
+      if (entry.size > MAX_SCRIPT) return this.fail('The script ' + shown(name) + ' is larger than 256 KiB.');
+      if (++this.scripts > MAX_SCRIPTS) return this.fail('The mod carries more than ' + MAX_SCRIPTS + ' scripts.');
+      this.scriptBytes += entry.size;
+      if (this.scriptBytes > MAX_SCRIPT_BYTES) return this.fail('The mod\'s scripts come to more than 1 MiB.');
+      entry.data = new Uint8Array(entry.size);
+      entry.captured = 0;
     }
     if (entry.size === 0) { this.nextHeader(); return; }
     this.state = 'data';
@@ -359,121 +421,221 @@ export class ArchiveWalker {
    * entries read. Sets error, or done. */
   finish() {
     if (this.error) return;
-    if (this.at !== this.length) return this.fail('the archive is shorter than its Content-Length');
-    if (this.state !== 'tail') return this.fail('the archive ends before its central directory');
+    if (this.at !== this.length) return this.fail('The archive is shorter than its Content-Length.');
+    if (this.state !== 'tail') return this.fail('The archive ends before its central directory.');
     const t = this.tail, n = this.tailLength;
     let at = 0;
     for (const entry of this.entries) {
-      if (n - at < 46 || u32(t, at) !== SIG_CENTRAL) return this.fail('the central directory does not list every entry');
+      if (n - at < 46 || u32(t, at) !== SIG_CENTRAL) return this.fail('The archive\'s central directory does not list every entry.');
       const flags = u16(t, at + 8), method = u16(t, at + 10), crc = u32(t, at + 16), csize = u32(t, at + 20), usize = u32(t, at + 24);
       const nameLength = u16(t, at + 28), extraLength = u16(t, at + 30), commentLength = u16(t, at + 32);
       const disk = u16(t, at + 34), offset = u32(t, at + 42);
       const end = at + 46 + nameLength + extraLength + commentLength;
-      if (end > n) return this.fail('a truncated central directory');
-      if (csize === 0xffffffff || usize === 0xffffffff || offset === 0xffffffff || disk === 0xffff) return this.fail('a ZIP64 archive');
+      if (end > n) return this.fail('The archive\'s central directory is cut short.');
+      if (csize === 0xffffffff || usize === 0xffffffff || offset === 0xffffffff || disk === 0xffff) return this.fail(ZIP64);
       const extra = extraError(t.subarray(at + 46 + nameLength, at + 46 + nameLength + extraLength));
       if (extra) return this.fail(extra);
       let name;
       try { name = NAME_DECODER.decode(t.subarray(at + 46, at + 46 + nameLength)); }
-      catch { return this.fail('an entry name that is not UTF-8'); }
+      catch { return this.fail('The archive has an entry name that is not UTF-8.'); }
       if (name !== entry.name || flags !== entry.flags || method !== 0 || crc !== entry.crc || csize !== entry.size ||
           usize !== entry.size || disk !== 0 || offset !== entry.offset) {
-        return this.fail('the central directory disagrees with the entry ' + clip(entry.name));
+        return this.fail('The archive\'s central directory disagrees with its entry ' + shown(entry.name) + '.');
       }
       at = end;
     }
     if (n - at >= 4) {
       const sig = u32(t, at);
-      if (sig === SIG_ZIP64_END || sig === SIG_ZIP64_LOCATOR) return this.fail('a ZIP64 archive');
-      if (sig === SIG_CENTRAL) return this.fail('the central directory lists an entry the archive does not hold');
+      if (sig === SIG_ZIP64_END || sig === SIG_ZIP64_LOCATOR) return this.fail(ZIP64);
+      if (sig === SIG_CENTRAL) return this.fail('The archive\'s central directory lists an entry the archive does not hold.');
     }
-    if (n - at < 22 || u32(t, at) !== SIG_END) return this.fail('no end of central directory record');
+    if (n - at < 22 || u32(t, at) !== SIG_END) return this.fail('The archive has no end of central directory record.');
     const disk = u16(t, at + 4), cdDisk = u16(t, at + 6), onDisk = u16(t, at + 8), total = u16(t, at + 10);
     const cdSize = u32(t, at + 12), cdOffset = u32(t, at + 16), commentLength = u16(t, at + 20);
-    if (onDisk === 0xffff || total === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) return this.fail('a ZIP64 archive');
-    if (disk !== 0 || cdDisk !== 0) return this.fail('a split archive');
-    if (onDisk !== this.entries.length || total !== this.entries.length) return this.fail('the end record counts the entries wrongly');
-    if (cdSize !== at || cdOffset !== this.tailStart) return this.fail('the end record places the central directory wrongly');
-    if (at + 22 + commentLength !== n) return this.fail('bytes after the end record');
+    if (onDisk === 0xffff || total === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) return this.fail(ZIP64);
+    if (disk !== 0 || cdDisk !== 0) return this.fail('The archive is split across several files.');
+    if (onDisk !== this.entries.length || total !== this.entries.length) return this.fail('The archive\'s end record counts its entries wrongly.');
+    if (cdSize !== at || cdOffset !== this.tailStart) return this.fail('The archive\'s end record places its central directory wrongly.');
+    if (at + 22 + commentLength !== n) return this.fail('The archive has bytes after its end record.');
     this.done = true;
   }
 }
 
-/* The archive's mod.json against its entries. Returns { salt } or { error }. */
+const MODJSON = 'The archive\'s mod.json ';
+const UNWRITTEN_FILE = MODJSON + 'lists a file entry Snapmap+ did not write.';
+const UNWRITTEN_POINTER = MODJSON + 'lists a pointer entry Snapmap+ did not write.';
+const POINTER_REQUIRED = ['path', 'sha256', 'source', 'provides', 'needs'];
+
+/* The archive's mod.json against its entries, by the rules the product's own reader applies
+ * to a built mod.json (modbundle.c mb_load_root, mb_descriptor_root, mb_common_fields,
+ * mb_requirements, mb_load_block_file) and to a downloaded archive (modsync.c
+ * msy_archive_matches): every carried file the block lists is in the archive at
+ * assets/<its request path, in lower case>, and nothing else is. The Worker does not
+ * recompute the build hash or check what each file provides; the product does both before
+ * it installs. There is no mod version anywhere in this: a "version" key an author wrote is
+ * an unknown author key and is ignored. Returns { salt } or { error }. */
 export function buildVerdict(hash, entries, modjson) {
-  if (!modjson) return { error: 'the archive has no mod.json' };
+  if (!modjson) return { error: 'The archive has no mod.json.' };
   let text, doc;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(modjson); }
-  catch { return { error: 'mod.json is not UTF-8' }; }
+  catch { return { error: MODJSON + 'is not UTF-8 text.' }; }
   try { doc = JSON.parse(text); }
-  catch { return { error: 'mod.json is not JSON' }; }
-  if (!plainObject(doc)) return { error: 'mod.json is not a JSON object' };
+  catch { return { error: MODJSON + 'is not valid JSON.' }; }
+  if (!plainObject(doc)) return { error: MODJSON + 'is not a JSON object.' };
   const block = doc[BLOCK_KEY];
-  if (!plainObject(block)) return { error: 'mod.json has no "snapmap-plus" block' };
-  if (block.format !== 2) return { error: 'mod.json is not format 2' };
-  if (!validSalt(block.salt)) return { error: 'mod.json has no valid salt' };
+  if (!plainObject(block)) return { error: MODJSON + 'has no "snapmap-plus" block, so the mod was never built.' };
+  if (block.format !== 2) return { error: MODJSON + 'is not in format 2, the only one Snapmap+ builds.' };
+  for (const key of Object.keys(block)) {
+    if (!BLOCK_KEYS.has(key)) return { error: MODJSON + 'has a key Snapmap+ does not write in its "snapmap-plus" block: ' + shown(key) + '.' };
+  }
+  if (!validSalt(block.salt)) return { error: MODJSON + 'has no valid salt.' };
   const salt = block.salt;
-  if (typeof block.build !== 'string' || !HEX64.test(block.build)) return { error: 'mod.json has no build hash' };
-  if (block.build !== hash) return { error: 'mod.json build does not match the path' };
-  const requirements = requirementsError(doc.requirements);
-  if (requirements) return { error: requirements };
-  if (!Array.isArray(block.files)) return { error: 'mod.json has no file list' };
-  if (block.files.length > MAX_FILES) return { error: 'too many files' };
-  const carried = new Map();
+  if (block.cause !== undefined) return { error: MODJSON + 'records a build that failed; fix the mod and build it again.' };
+  if (typeof block.build !== 'string' || !HEX64.test(block.build)) return { error: MODJSON + 'has no build hash.' };
+  if (block.build !== hash) return { error: MODJSON + 'names another build than the one uploaded.' };
+  if ((block.built !== undefined && !(Number.isSafeInteger(block.built) && block.built >= 0)) ||
+      (block.rules !== undefined && !(Number.isSafeInteger(block.rules) && block.rules >= 0)) ||
+      (block.tree !== undefined && !(typeof block.tree === 'string' && HEX64.test(block.tree)))) {
+    return { error: MODJSON + 'has a "snapmap-plus" block Snapmap+ did not write.' };
+  }
+  const author = authorError(doc);
+  if (author) return { error: author };
+
+  if (!Array.isArray(block.files)) return { error: MODJSON + 'has no file list.' };
+  const pointers = block.stock === undefined ? [] : block.stock;
+  if (!Array.isArray(pointers)) return { error: UNWRITTEN_POINTER };
+  if (block.files.length + pointers.length > MAX_FILES) return { error: MODJSON + 'lists more than ' + MAX_FILES + ' files.' };
+  const carried = new Map(), requests = new Set();
   for (const file of block.files) {
-    if (!plainObject(file) || typeof file.path !== 'string' || !file.path.startsWith('assets/')) return { error: 'mod.json lists a bad file entry' };
-    const request = file.path.slice(7);
-    const error = requestPathError(request, { salt });
-    if (error) return { error: error + ': ' + clip(file.path) };
-    if (carried.has(file.path)) return { error: 'mod.json lists a file twice: ' + clip(file.path) };
-    if (typeof file.sha256 !== 'string' || !HEX64.test(file.sha256)) return { error: 'bad file hash: ' + clip(file.path) };
-    if (!Number.isSafeInteger(file.size) || file.size < 0) return { error: 'bad file size: ' + clip(file.path) };
-    carried.set(file.path, file.size);
+    const keys = plainObject(file) ? Object.keys(file) : [];
+    if (keys.length !== FILE_KEYS.length || !FILE_KEYS.every(key => keys.includes(key)) || typeof file.path !== 'string' ||
+        !file.path.startsWith('assets/')) {
+      return { error: UNWRITTEN_FILE };
+    }
+    const request = file.path.slice(7).toLowerCase();
+    const fault = pathFault(request, { salt, carried: true });
+    if (fault) return { error: 'The file ' + shown(file.path) + ' ' + fault + '.' };
+    if (requests.has(request)) return { error: MODJSON + 'lists ' + shown(file.path) + ' twice.' };
+    if (typeof file.sha256 !== 'string' || !HEX64.test(file.sha256)) return { error: MODJSON + 'gives ' + shown(file.path) + ' no valid hash.' };
+    if (!Number.isSafeInteger(file.size) || file.size < 1 || file.size > MAX_FILE) {
+      return { error: MODJSON + 'gives ' + shown(file.path) + ' a size outside 1 byte to 64 MiB.' };
+    }
+    if (!providesOk(file.provides) || !needsOk(file.needs)) return { error: UNWRITTEN_FILE };
+    requests.add(request);
+    carried.set(request, file.size);
   }
   /* A pointer names the player's own installed content and never uploads. */
-  if (block.stock !== undefined) {
-    if (!Array.isArray(block.stock) || block.stock.length > MAX_FILES) return { error: 'mod.json has a bad pointer list' };
-    for (const pointer of block.stock) {
-      if (!plainObject(pointer) || typeof pointer.path !== 'string' || !pointer.path.startsWith('assets/')) return { error: 'mod.json lists a bad pointer' };
-      const error = requestPathError(pointer.path.slice(7), { extension: false });
-      if (error) return { error: error + ': ' + clip(pointer.path) };
-      if (carried.has(pointer.path)) return { error: 'mod.json lists a file and a pointer at ' + clip(pointer.path) };
+  for (const pointer of pointers) {
+    const keys = plainObject(pointer) ? Object.keys(pointer) : [];
+    if (!keys.every(key => POINTER_KEYS.has(key)) || POINTER_REQUIRED.some(key => !keys.includes(key)) ||
+        typeof pointer.path !== 'string' || !pointer.path.startsWith('assets/') || typeof pointer.sha256 !== 'string' ||
+        !HEX64.test(pointer.sha256) || typeof pointer.source !== 'string' || !pointer.source ||
+        pointer.source !== pointer.source.toLowerCase() || pointer.source.includes('\\') ||
+        (pointer.closure !== undefined && typeof pointer.closure !== 'boolean') || !providesOk(pointer.provides) || !needsOk(pointer.needs)) {
+      return { error: UNWRITTEN_POINTER };
     }
+    const request = pointer.path.slice(7).toLowerCase();
+    const fault = pathFault(request);
+    if (fault) return { error: 'The pointer ' + shown(pointer.path) + ' ' + fault + '.' };
+    if (requests.has(request)) return { error: MODJSON + 'lists ' + shown(pointer.path) + ' twice.' };
+    requests.add(request);
   }
+
   for (const entry of entries) {
     if (entry.name === 'mod.json') continue;
-    if (!entry.name.startsWith('assets/')) return { error: 'the archive holds an entry outside assets/: ' + clip(entry.name) };
-    const error = requestPathError(entry.name.slice(7), { salt });
-    if (error) return { error: error + ': ' + clip(entry.name) };
-    if (!carried.has(entry.name)) return { error: 'the archive holds a file mod.json does not list: ' + clip(entry.name) };
-    if (carried.get(entry.name) !== entry.size) return { error: 'the size of ' + clip(entry.name) + ' does not match mod.json' };
+    if (!entry.name.startsWith('assets/')) return { error: 'The archive holds ' + shown(entry.name) + ', which is outside assets/.' };
+    const request = entry.name.slice(7);
+    if (request !== request.toLowerCase()) return { error: 'The archive holds ' + shown(entry.name) + ', whose path is not in lower case.' };
+    const fault = pathFault(request, { salt, carried: true });
+    if (fault) return { error: 'The file ' + shown(entry.name) + ' ' + fault + '.' };
+    if (!carried.has(request)) return { error: 'The archive holds ' + shown(entry.name) + ', which mod.json does not list.' };
+    if (carried.get(request) !== entry.size) return { error: 'The size of ' + shown(entry.name) + ' does not match mod.json.' };
+    if (entry.data) {
+      const script = scriptError(entry.data);
+      if (script) return { error: 'The script ' + shown(entry.name) + ' ' + script + '.' };
+    }
   }
   const present = new Set(entries.map(entry => entry.name));
-  for (const path of carried.keys()) if (!present.has(path)) return { error: 'a file mod.json lists is not in the archive: ' + clip(path) };
+  for (const request of carried.keys()) {
+    if (!present.has('assets/' + request)) return { error: 'The archive lacks ' + shown('assets/' + request) + ', which mod.json lists.' };
+  }
   return { salt };
 }
 
-/* Console lines and cvars the product applies while a mod's requirements are live: the
- * builder's shape and limits. */
-function requirementsError(req) {
-  if (req === undefined) return null;
-  if (!plainObject(req) || Object.keys(req).some(key => key !== 'cvars' && key !== 'commands')) return 'bad requirements';
+function providesOk(value) {
+  return plainObject(value) && Object.keys(value).length === 2 && typeof value.type === 'string' && typeof value.name === 'string';
+}
+
+function needsOk(value) {
+  return Array.isArray(value) && value.every(need => plainObject(need) && Object.keys(need).length === 2 &&
+    typeof need.type === 'string' && need.type.length > 0 && typeof need.name === 'string' && need.name.length > 0);
+}
+
+/* A script is Lua source: not a precompiled chunk, no NUL, UTF-8 throughout. */
+function scriptError(bytes) {
+  if (LUA_SIGNATURE.every((byte, i) => bytes[i] === byte)) return 'is compiled Lua bytecode; a mod carries its scripts as source text';
+  if (bytes.includes(0)) return 'contains a NUL byte; a script must be plain text';
+  try { new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch { return 'is not UTF-8 text'; }
+  return null;
+}
+
+/* The author part of a built mod.json as the product reads it back: no retired key, no
+ * builder member at the top level, a name, short display text, and requirements in the
+ * builder's shape. Every other key is the author's own and is ignored, "version" included. */
+function authorError(doc) {
+  for (const key of RETIRED_KEYS) {
+    if (Object.hasOwn(doc, key)) return MODJSON + 'uses "' + key + '", which Snapmap+ no longer reads.';
+  }
+  if (plainObject(doc.hud) && Object.hasOwn(doc.hud, 'schema')) return MODJSON + 'uses "hud.schema", which Snapmap+ no longer reads.';
+  for (const key of ['files', 'bundle', 'build']) {
+    if (Object.hasOwn(doc, key)) return MODJSON + 'has "' + key + '" outside its "snapmap-plus" block.';
+  }
+  const name = typeof doc.name === 'string' ? doc.name.trim() : '';
+  if (!name || name.includes('\u0000')) return MODJSON + 'has no name.';
+  if ([...name].length > MAX_NAME_POINTS) return MODJSON + 'has a name longer than ' + MAX_NAME_POINTS + ' characters.';
+  if (doc.author !== undefined && (typeof doc.author !== 'string' || doc.author.includes('\u0000') ||
+      [...doc.author.trim()].length > MAX_NAME_POINTS)) {
+    return MODJSON + 'has an author that is not text of at most ' + MAX_NAME_POINTS + ' characters.';
+  }
+  if (doc.homepage !== undefined && typeof doc.homepage !== 'string') return MODJSON + 'has a homepage that is not text.';
+  for (const key of ['strings', 'hud']) {
+    if (doc[key] !== undefined && !plainObject(doc[key])) return MODJSON + 'has "' + key + '" that is not an object.';
+  }
+  if (doc.requirements !== undefined && !requirementsOk(doc.requirements)) return MODJSON + 'has requirements Snapmap+ would not apply.';
+  return null;
+}
+
+/* Console settings and lines the product applies while a mod's requirements are live, in
+ * the builder's shape (modbundle.c mb_requirements): at most 32 cvars named like cvars,
+ * each a string of printable ASCII up to 64 characters, an integer or a boolean, no name
+ * twice in any case; activate and deactivate lists of up to 16 lines, each 1 to 256
+ * printable ASCII characters without ';' once its spaces are trimmed. */
+function requirementsOk(req) {
+  if (!plainObject(req) || Object.keys(req).some(key => key !== 'cvars' && key !== 'commands')) return false;
   if (req.cvars !== undefined) {
-    if (!plainObject(req.cvars) || Object.keys(req.cvars).length > 32) return 'bad requirements';
+    if (!plainObject(req.cvars) || Object.keys(req.cvars).length > 32) return false;
+    const seen = new Set();
     for (const [name, value] of Object.entries(req.cvars)) {
-      if (!CVAR_RE.test(name) || !displayText(value, 64)) return 'bad requirements';
+      if (!CVAR_RE.test(name) || seen.has(name.toLowerCase())) return false;
+      seen.add(name.toLowerCase());
+      const ok = typeof value === 'boolean' || (Number.isSafeInteger(value) && Math.abs(value) < 1e15) ||
+        (typeof value === 'string' && value.length <= 64 && PRINTABLE_RE.test(value));
+      if (!ok) return false;
     }
   }
   if (req.commands !== undefined) {
-    if (!plainObject(req.commands) || Object.keys(req.commands).some(key => key !== 'activate' && key !== 'deactivate')) return 'bad requirements';
+    if (!plainObject(req.commands) || Object.keys(req.commands).some(key => key !== 'activate' && key !== 'deactivate')) return false;
     for (const list of Object.values(req.commands)) {
-      if (!Array.isArray(list) || list.length > 16) return 'bad requirements';
+      if (!Array.isArray(list) || list.length > 16) return false;
       for (const line of list) {
-        if (typeof line !== 'string' || !COMMAND_LINE_RE.test(line) || line.includes(';')) return 'bad requirements';
+        if (typeof line !== 'string') return false;
+        const trimmed = line.replace(/^ +| +$/g, '');
+        if (!trimmed || trimmed.length > 256 || !PRINTABLE_RE.test(trimmed) || trimmed.includes(';')) return false;
       }
     }
   }
-  return null;
+  return true;
 }
 
 class ArchiveRefusal extends Error {}
@@ -521,8 +683,8 @@ async function storeArchive(env, hash, body, length) {
   }
   if (failure) {
     if (walker.at !== length || !walker.done) return { interrupted: true };
-    console.log('mods: archive store failed:', clip(failure && failure.message));
-    throw new RequestError('mod store unavailable; try again later', 503);
+    console.log('mods: archive store failed:', String(failure && failure.message).slice(0, 200));
+    throw new RequestError(UNAVAILABLE, 503);
   }
   return { salt: verdict.salt };
 }
@@ -545,23 +707,23 @@ function objectHeaders(obj, hash) {
 async function serveBuild(req, env, hash) {
   if (blockedSet(env).has(hash)) return blockedResponse([hash]);
   if (!(await admit(req, env, [['mod_get', 1]], true))) return rateLimited();
-  if (!(await registry(env, 'buildServed', hash))) return refuse('not found', 404);
+  if (!(await registry(env, 'buildServed', hash))) return refuse('The mod store does not have this build.', 404);
   const key = 'build/' + hash;
   const obj = req.method === 'HEAD' ? await env.MODS.head(key) : await env.MODS.get(key);
-  if (!obj) return refuse('not found', 404);
+  if (!obj) return refuse('The mod store does not have this build.', 404);
   return new Response(req.method === 'HEAD' ? null : obj.body, { status: 200, headers: objectHeaders(obj, hash) });
 }
 
 async function putBuild(req, env, hash) {
   if (blockedSet(env).has(hash)) { await discard(req); return blockedResponse([hash]); }
   const type = (req.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
-  if (type !== 'application/zip') { await discard(req); return refuse('content-type must be application/zip', 415); }
+  if (type !== 'application/zip') { await discard(req); return refuse('A build archive must be sent as application/zip.', 415); }
   const declared = req.headers.get('Content-Length');
-  if (declared === null) { await discard(req); return refuse('content-length required', 411); }
-  if (!/^\d+$/.test(declared)) { await discard(req); return refuse('bad content length', 400); }
+  if (declared === null) { await discard(req); return refuse('A build archive must be sent with its Content-Length.', 411); }
+  if (!/^\d+$/.test(declared)) { await discard(req); return refuse('The Content-Length of the upload is not a number.', 400); }
   const length = Number(declared);
-  if (length > MAX_ARCHIVE) { await discard(req); return refuse('the archive is over 96 MiB', 413); }
-  if (length < 22) { await discard(req); return refuse('not a ZIP archive', 422); }
+  if (length > MAX_ARCHIVE) { await discard(req); return refuse('The archive is over 96 MiB, the largest build the mod store takes.', 413); }
+  if (length < 22) { await discard(req); return refuse(NOT_ZIP, 422); }
   if (!(await admit(req, env, [['mod_build_put', 1], ['mod_bytes', length]], false))) { await discard(req); return rateLimited(); }
   const row = await registry(env, 'buildRow', hash);
   const existing = row ? await env.MODS.head('build/' + hash) : null;
@@ -576,27 +738,37 @@ async function putBuild(req, env, hash) {
    * (a forged archive cannot hold a hash against the real one for its hour). */
   const outcome = await storeArchive(env, hash, req.body, length);
   if (outcome.refusal) return refuse(outcome.refusal, 422);
-  if (outcome.interrupted) return refuse('upload interrupted', 400);
+  if (outcome.interrupted) return refuse('The upload ended before the whole archive arrived; try again.', 400);
   await registry(env, 'registerBuild', hash, length, outcome.salt);
   return reply({ build: hash, size: length }, 201);
 }
 
 /* ---------------- claims ---------------- */
 
+/* The claim and release bodies, with the shared reader's refusals in plain words. */
+async function readRequestJson(req) {
+  try { return await readJsonObject(req, MAX_CLAIM_JSON); }
+  catch (error) {
+    if (error instanceof RequestError && error.status === 413) throw new RequestError('The request body is larger than 64 KiB.', 413);
+    if (error instanceof RequestError && error.status === 400) throw new RequestError('The request body is not a JSON object.', 400);
+    throw error;
+  }
+}
+
 function hashArray(value, max) {
-  if (!Array.isArray(value)) throw new RequestError('expected an array of SHA-256 hex strings', 400);
-  if (value.length > max) throw new RequestError('too many hashes (max ' + max + ')', 400);
-  if (!value.every(hash => typeof hash === 'string' && HEX64.test(hash))) throw new RequestError('bad hash', 400);
+  if (!Array.isArray(value)) throw new RequestError('The claim does not list its builds by hash.', 400);
+  if (value.length > max) throw new RequestError('A claim names at most ' + max + ' builds.', 400);
+  if (!value.every(hash => typeof hash === 'string' && HEX64.test(hash))) throw new RequestError('The claim names a build by something other than its hash.', 400);
   return [...new Set(value)];
 }
 
 async function postClaim(req, env) {
   if (!(await admit(req, env, [['mod_claim', 1]], false))) { await discard(req); return rateLimited(); }
-  const body = await readJsonObject(req, MAX_CLAIM_JSON);
-  if (!displayText(body.ref, 64) || !body.ref.length || body.ref.length > 64) return refuse('bad ref', 400);
+  const body = await readRequestJson(req);
+  if (!displayText(body.ref, 64) || !body.ref.length || body.ref.length > 64) return refuse('The claim names no published item.', 400);
   const builds = hashArray(body.builds, MAX_CLAIM_BUILDS);
-  if (!builds.length) return refuse('no builds', 400);
-  if (body.secret !== undefined && !(typeof body.secret === 'string' && HEX64.test(body.secret))) return refuse('bad secret', 400);
+  if (!builds.length) return refuse('The claim names no builds.', 400);
+  if (body.secret !== undefined && !(typeof body.secret === 'string' && HEX64.test(body.secret))) return refuse(BAD_SECRET, 400);
   const blocked = builds.filter(hash => blockedSet(env).has(hash));
   if (blocked.length) return blockedResponse(blocked);
   const secret = body.secret === undefined ? randomHex(32) : body.secret;
@@ -604,20 +776,20 @@ async function postClaim(req, env) {
     ref: body.ref, builds, id: randomHex(16), secretHash: await sha256Hex(secret),
     presentedHash: body.secret === undefined ? null : await sha256Hex(body.secret),
   });
-  if (result.forbidden) return refuse('no claim matches this ref and secret', 403);
-  if (result.missing) return refuse('unknown builds', 409, { missing: result.missing.slice(0, MISSING_SHOWN), missingCount: result.missing.length });
+  if (result.forbidden) return refuse('No claim on the mod store matches this item and secret.', 403);
+  if (result.missing) return refuse('The mod store does not hold every build the claim names; upload them again.', 409, { missing: result.missing.slice(0, MISSING_SHOWN), missingCount: result.missing.length });
   await deleteBuilds(env, result.deleted);
   return reply({ claim: result.claim, secret }, result.created ? 201 : 200);
 }
 
 async function postRelease(req, env) {
   if (!(await admit(req, env, [['mod_claim', 1]], false))) { await discard(req); return rateLimited(); }
-  const body = await readJsonObject(req, MAX_CLAIM_JSON);
-  if (typeof body.claim !== 'string' || !HEX32.test(body.claim)) return refuse('bad claim', 400);
-  if (typeof body.secret !== 'string' || !HEX64.test(body.secret)) return refuse('bad secret', 400);
+  const body = await readRequestJson(req);
+  if (typeof body.claim !== 'string' || !HEX32.test(body.claim)) return refuse('The release names no claim.', 400);
+  if (typeof body.secret !== 'string' || !HEX64.test(body.secret)) return refuse(BAD_SECRET, 400);
   const result = await registry(env, 'release', body.claim, await sha256Hex(body.secret));
-  if (result.notFound) return refuse('no such claim', 404);
-  if (result.forbidden) return refuse('wrong secret', 403);
+  if (result.notFound) return refuse('The mod store has no such claim.', 404);
+  if (result.forbidden) return refuse('The secret does not match this claim.', 403);
   await deleteBuilds(env, result.deleted);
   return new Response(null, { status: 204 });
 }
@@ -636,9 +808,9 @@ async function deleteBuilds(env, hashes) {
  * is set, and refused without exactly that bearer token. */
 async function postReset(req, env) {
   const expected = env.MODS_ADMIN_TOKEN === undefined ? '' : String(env.MODS_ADMIN_TOKEN).trim();   // a secret piped in keeps its newline
-  if (!expected) { await discard(req); return refuse('not found', 404); }
+  if (!expected) { await discard(req); return refuse(NOT_FOUND, 404); }
   const given = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
-  if (!given || !(await sameToken(given, expected))) { await discard(req); return refuse('forbidden', 403); }
+  if (!given || !(await sameToken(given, expected))) { await discard(req); return refuse('This request needs the maintainer token.', 403); }
   await discard(req);
   const deleted = { builds: 0, other: 0 };
   let cursor;
@@ -664,16 +836,26 @@ async function sameToken(given, expected) {
 /* ---------------- routing ---------------- */
 
 function notAllowed(req, allow) {
-  return discard(req).then(() => refuse('method not allowed', 405, {}, { Allow: allow }));
+  return discard(req).then(() => refuse('This address of the mod store does not take that request.', 405, {}, { Allow: allow }));
 }
 
-/* Handles every path under /mods; anonymous, no session, no Turnstile. */
+/* Handles every path under /mods; anonymous, no session, no Turnstile. Every answer that
+ * is not a success carries one plain sentence in "error". */
 export async function handleMods(req, env, path) {
-  if (!env.MODS || !env.MOD_REGISTRY || !env.WRITE_QUOTAS) { await discard(req); return refuse('mod store not configured', 503); }
+  try { return await routeMods(req, env, path); }
+  catch (error) {
+    if (error instanceof RequestError) return refuse(error.message, error.status);
+    console.log('mods: unexpected failure:', String(error && error.message).slice(0, 200));
+    return refuse(UNAVAILABLE, 503);
+  }
+}
+
+async function routeMods(req, env, path) {
+  if (!env.MODS || !env.MOD_REGISTRY || !env.WRITE_QUOTAS) { await discard(req); return refuse(UNAVAILABLE, 503); }
   const build = path.match(/^\/mods\/build\/([0-9a-fA-F]{64})$/);
   if (build) {
     const raw = build[1];
-    if (raw !== raw.toLowerCase()) { await discard(req); return refuse('hash must be lowercase hex', 400); }
+    if (raw !== raw.toLowerCase()) { await discard(req); return refuse('A build hash must be written in lowercase hex.', 400); }
     if (req.method === 'GET' || req.method === 'HEAD') return serveBuild(req, env, raw);
     if (req.method === 'PUT') return putBuild(req, env, raw);
     return notAllowed(req, 'GET, HEAD, PUT');
@@ -681,7 +863,7 @@ export async function handleMods(req, env, path) {
   const action = { '/mods/claim': postClaim, '/mods/release': postRelease, '/mods/admin/reset': postReset }[path];
   if (action) return req.method === 'POST' ? action(req, env) : notAllowed(req, 'POST');
   await discard(req);
-  return refuse('not found', 404);
+  return refuse(NOT_FOUND, 404);
 }
 
 /* ---------------- scheduled purge ---------------- */
