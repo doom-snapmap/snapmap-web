@@ -718,8 +718,8 @@ map and cannot read or change your files." (see [Mod scripts](#mod-scripts)).
 
 The Mods tab's setting **Play maps whose mods include scripts** is on by default. Turned off, a
 map whose mods include scripts is neither downloaded nor played: "This map's mods include scripts,
-which you turned off in the Mods tab; turn on "Play maps whose mods include scripts" there to play
-it." That holds for a map you downloaded while the setting was on, and for a rawmap or prefab ZIP
+which you turned off. To play it, open any map in the editor and turn on "Play maps whose mods
+include scripts" in the Mods tab of the Snapmap+ window." That holds for a map you downloaded while the setting was on, and for a rawmap or prefab ZIP
 you import or open. Your own maps always play.
 
 A downloaded map's mods stay in `mods\maps\` until you remove them in the Mods tab.
