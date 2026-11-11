@@ -16,16 +16,7 @@
     var links = document.querySelectorAll("[data-dl]");
     if (!links.length) return;
     fetchReleases().then(function (rels) {
-      if (!rels || !rels.length) return;
-      var pick = null;
-      for (var i = 0; i < rels.length; i++) {
-        if (!rels[i].draft && !rels[i].prerelease) { pick = rels[i]; break; }
-      }
-      if (!pick) {
-        for (var j = 0; j < rels.length; j++) {
-          if (!rels[j].draft) { pick = rels[j]; break; }
-        }
-      }
+      var pick = newestStable(rels || []);
       if (!pick) return;
       var asset = null;
       for (var k = 0; k < pick.assets.length; k++) {
@@ -40,11 +31,49 @@
     });
   }
 
+  /* A release tag's version parts, or null for a tag of another shape:
+   * v1.2.3 ranks above its v1.2.3-beta.N prereleases. */
+  function versionKey(tag) {
+    var m = /^v(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(String(tag || ""));
+    if (!m) return null;
+    return [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : 0, m[4] === undefined ? 0 : +m[4]];
+  }
+  function compareTags(a, b) {
+    var ka = versionKey(a), kb = versionKey(b);
+    if (!ka || !kb) return ka ? 1 : (kb ? -1 : 0);
+    for (var i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return ka[i] - kb[i];
+    return 0;
+  }
+  /* The newest stable release by version, or the newest beta while none is
+   * stable: what the installer installs by default. */
+  function newestStable(rels) {
+    var pick = null;
+    rels.forEach(function (r) { if (!r.prerelease && versionKey(r.tag_name) && (!pick || compareTags(r.tag_name, pick.tag_name) > 0)) pick = r; });
+    if (!pick) rels.forEach(function (r) { if (versionKey(r.tag_name) && (!pick || compareTags(r.tag_name, pick.tag_name) > 0)) pick = r; });
+    return pick;
+  }
+
+  /* Every published release, newest version first. The API lists 100 a page;
+   * up to ten pages are read. Null when the first page cannot be loaded. */
   var releasesPromise = null;
   function fetchReleases() {
     if (!releasesPromise) {
-      releasesPromise = fetch(API)
-        .then(function (r) { return r.ok ? r.json() : null; })
+      var all = [];
+      var page = function (n) {
+        return fetch(API + "?per_page=100&page=" + n)
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (batch) {
+            if (!Array.isArray(batch)) return n === 1 ? null : all;
+            all = all.concat(batch);
+            return batch.length === 100 && n < 10 ? page(n + 1) : all;
+          });
+      };
+      releasesPromise = page(1)
+        .then(function (rels) {
+          if (!rels) return null;
+          return rels.filter(function (r) { return !r.draft; })
+            .sort(function (a, b) { return compareTags(b.tag_name, a.tag_name); });
+        })
         .catch(function () { return null; });
     }
     return releasesPromise;
@@ -301,16 +330,14 @@
           '<a href="' + releasesUrl + '">GitHub releases</a>.</div>';
         return;
       }
-      var shown = rels.filter(function (r) { return !r.draft; });
+      var shown = rels;
       if (!shown.length) {
         host.innerHTML = '<div class="changelog-fallback">No releases yet. Watch ' +
           '<a href="' + releasesUrl + '">GitHub releases</a> for the first one.</div>';
         return;
       }
-      var latest = null;
-      for (var i = 0; i < shown.length; i++) {
-        if (!shown[i].prerelease) { latest = shown[i].tag_name; break; }
-      }
+      var newest = newestStable(shown);
+      var latest = newest && !newest.prerelease ? newest.tag_name : null;
       host.innerHTML = shown.map(function (r) { return releaseHtml(r, r.tag_name === latest); }).join("");
       initChangelogCopy();
     });
