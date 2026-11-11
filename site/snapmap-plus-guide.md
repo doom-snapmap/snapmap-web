@@ -1894,14 +1894,21 @@ Click **Send** and it's filed as a public issue on the project's tracker under t
 If someone's already reported the same thing, Snapmap+ recognizes the duplicate and adds your report as
 a note on the existing issue instead of creating a new one.
 
-The same reporting pipeline also backs Snapmap+'s **crash report** dialog: if the game hits a serious
-fault, a crash dialog opens (right away if Snapmap+ recovered in place, or on your next launch otherwise)
-with the error, an optional description of what you were doing, and a checkbox to attach recent log text
-(anonymized — your Windows account and machine name are stripped before anything is sent). Sending it
-files a `crash`-labeled issue the same way, and repeat crashes at the same spot get grouped onto one
-issue rather than filing duplicates.
+**When the game hits a problem.** When Snapmap+ catches a serious fault and can recover, it returns
+you to the menu and says so: "Snapmap+ caught a problem in the game and returned you to the menu.
+Unsaved changes to this map were lost." A message then offers a crash report. If the game could not be
+saved from the fault, the crash report is offered on your next launch. When a saved map is damaged,
+the game's own message says the file was kept as it was.
 
-Nothing is sent unless you click Send — Snapmap+ makes no other network requests on its own.
+The **crash report** dialog shows the error, takes an optional description of what you were doing,
+and has a checkbox to attach recent log text (anonymized — your Windows account, profile folder and
+machine name are stripped before anything is sent, and a long log is cut to its newest lines).
+Sending it files a `crash`-labeled issue the same way, and repeat crashes at the same spot get grouped
+onto one issue rather than filing duplicates.
+
+Nothing is sent unless you click Send. The only other network requests Snapmap+ makes are to the mod
+store, and only for what you ask for: uploading the mods of a map you publish (after you agree once)
+and downloading the mods of a map you chose to play.
 
 **Reporting without the app.** If you open an issue on GitHub yourself, say which DOOM build you are
 on: run `snapmap-plus status` in a terminal and paste its `Game:` line (for example
