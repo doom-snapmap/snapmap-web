@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
-  initializeRegistry, missingBlobs, noteBlob, registerBundle, bundleServed, blobClaimed,
-  claimBundles, releaseClaim, purgeBundles, purgeBlobs, finishBlobs, resetRegistry,
+  initializeRegistry, buildRow, registerBuild, touchBuild, buildServed,
+  claimBuilds, releaseClaim, purgeBuilds, resetRegistry,
 } from './mods_registry_store.js';
 
 // The single mod store index (named "registry"); see mods_registry_store.js.
@@ -11,15 +11,12 @@ export class ModRegistry extends DurableObject {
     initializeRegistry(this.ctx.storage);
   }
 
-  missing(hashes) { return missingBlobs(this.ctx.storage, hashes); }
-  noteBlob(hash, size) { return noteBlob(this.ctx.storage, hash, size, Date.now()); }
-  registerBundle(hash, files) { return registerBundle(this.ctx.storage, hash, files, Date.now()); }
-  bundleServed(hash) { return bundleServed(this.ctx.storage, hash, Date.now()); }
-  blobClaimed(hash) { return blobClaimed(this.ctx.storage, hash); }
-  claim(request) { return claimBundles(this.ctx.storage, request, Date.now()); }
+  buildRow(hash) { return buildRow(this.ctx.storage, hash); }
+  registerBuild(hash, size, salt) { return registerBuild(this.ctx.storage, hash, size, salt, Date.now()); }
+  touchBuild(hash) { return touchBuild(this.ctx.storage, hash, Date.now()); }
+  buildServed(hash) { return buildServed(this.ctx.storage, hash, Date.now()); }
+  claim(request) { return claimBuilds(this.ctx.storage, request, Date.now()); }
   release(id, presentedHash) { return releaseClaim(this.ctx.storage, id, presentedHash); }
-  purgeBundles(limit) { return purgeBundles(this.ctx.storage, Date.now(), limit); }
-  purgeBlobs(limit) { return purgeBlobs(this.ctx.storage, Date.now(), limit); }
-  finishBlobs(hashes) { return finishBlobs(this.ctx.storage, hashes); }
+  purgeBuilds(limit) { return purgeBuilds(this.ctx.storage, Date.now(), limit); }
   reset() { return resetRegistry(this.ctx.storage); }
 }

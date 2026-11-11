@@ -23,13 +23,13 @@ class_name = "CommunityQuota"
 tag = "v1-write-quotas"
 new_sqlite_classes = ["CommunityQuota"]
 
-# Anonymous mod asset store: blob/<sha256> and bundle/<hash>, served through /mods/*.
+# Anonymous mod store: one archive per build at build/<hash>, served through /mods/*.
 # Provisioned by the maintainer (npx wrangler r2 bucket create snapmap-plus-mods).
 [[r2_buckets]]
 bucket_name = "snapmap-plus-mods"
 binding = "MODS"
 
-# Single index of stored blobs and bundles plus their anonymous claims.
+# Single index of stored builds plus their anonymous claims.
 [[durable_objects.bindings]]
 name = "MOD_REGISTRY"
 class_name = "ModRegistry"
@@ -38,11 +38,11 @@ class_name = "ModRegistry"
 tag = "v2-mod-registry"
 new_sqlite_classes = ["ModRegistry"]
 
-# Takedown list: JSON array of blocked blob and bundle hashes; edit and redeploy to block.
+# Takedown list: JSON array of blocked build hashes; edit and redeploy to block.
 [vars]
 MODS_BLOCKED = "[]"
 
-# Daily purge of mod objects nothing ever claimed, older than one hour (scheduled handler in worker.js);
-# a released bundle is deleted at its release, not here.
+# Daily purge of builds nothing ever claimed, older than one hour (scheduled handler in worker.js);
+# a released build is deleted at its release, not here.
 [triggers]
 crons = ["23 4 * * *"]

@@ -1,7 +1,7 @@
 export const LIMITS = Object.freeze({ post: 10, comment: 60, reaction: 120, upload: 30, preview: 120, edit: 60 });
 /* Anonymous mod store limits, per hashed client address per UTC hour. Byte limits count declared upload lengths. */
 export const MOD_LIMITS = Object.freeze({
-  mod_blob_put: 2048, mod_bytes: 4 * 1024 * 1024 * 1024, mod_bundle_put: 64, mod_get: 20000, mod_claim: 64,
+  mod_build_put: 64, mod_bytes: 4 * 1024 * 1024 * 1024, mod_get: 20000, mod_claim: 64,
 });
 const HOUR_MS = 3600000;
 
