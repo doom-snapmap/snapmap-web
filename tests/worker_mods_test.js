@@ -183,7 +183,8 @@ async function modsEnv(extra = {}) {
       get() {
         return {
           buildRow: async hash => registry.buildRow(storage, hash),
-          registerBuild: async (hash, size, salt, object, scripts) => registry.registerBuild(storage, hash, size, salt, object, scripts, clock.now()),
+          registerBuild: async (hash, size, salt, object, scripts, sliceOf) =>
+            registry.registerBuild(storage, hash, size, salt, object, scripts, clock.now(), sliceOf ?? null),
           touchBuild: async hash => registry.touchBuild(storage, hash, clock.now()),
           buildServed: async hash => registry.buildServed(storage, hash, clock.now()),
           claim: async request => registry.claimBuilds(storage, request, clock.now()),
@@ -194,6 +195,8 @@ async function modsEnv(extra = {}) {
           recordPart: async (hash, size, upload, part, etag) => registry.recordPart(storage, hash, size, upload, part, etag, clock.now()),
           closeUpload: async (hash, size, upload) => registry.closeUpload(storage, hash, size, upload),
           abandonUploads: async (limit, all) => registry.abandonUploads(storage, clock.now(), limit, all),
+          reportAsked: async (hash, request, asker) => registry.reportAsked(storage, hash, request, asker, clock.now()),
+          listAsked: async (id, hash) => registry.listAsked(storage, id, hash),
           reset: async () => registry.resetRegistry(storage),
         };
       },
@@ -1077,7 +1080,7 @@ test('the registry drops the retired blob and bundle tables', async () => {
     "INSERT INTO mod_claim VALUES ('x', 'r', 's', 1, 1)"]) storage.sql.exec(statement);
   registry.initializeRegistry(storage);
   const tables = storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").toArray().map(r => r.name);
-  assert.deepEqual(tables, ['mod_build', 'mod_claim', 'mod_claim_build', 'mod_upload']);
+  assert.deepEqual(tables, ['mod_asked', 'mod_build', 'mod_claim', 'mod_claim_build', 'mod_upload']);
   assert.equal(storage.sql.exec('SELECT count(*) AS n FROM mod_claim').toArray()[0].n, 0, 'claims of bundles go with them');
   registry.initializeRegistry(storage);
   assert.throws(() => registry.registerBuild(storage, 'a'.repeat(64), 10, 'Bad', 'build/' + 'a'.repeat(64), 0, 1));
@@ -1086,7 +1089,7 @@ test('the registry drops the retired blob and bundle tables', async () => {
   old.sql.exec('CREATE TABLE mod_build (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, salt TEXT NOT NULL, created INTEGER NOT NULL, claims INTEGER NOT NULL DEFAULT 0)');
   old.sql.exec("INSERT INTO mod_build VALUES (?, 10, 'k7pinkim', 1, 1)", 'a'.repeat(64));
   registry.initializeRegistry(old);
-  assert.deepEqual({ ...registry.buildRow(old, 'a'.repeat(64)) }, { size: 10, salt: 'k7pinkim', created: 1, claims: 1, object: 'build/' + 'a'.repeat(64), scripts: 0 });
+  assert.deepEqual({ ...registry.buildRow(old, 'a'.repeat(64)) }, { size: 10, salt: 'k7pinkim', created: 1, claims: 1, object: 'build/' + 'a'.repeat(64), scripts: 0, slice_of: null });
 });
 
 /* ---------------- uploads in parts, no limits, the release race ---------------- */
@@ -1397,10 +1400,108 @@ test('the maintainer reset route is hidden without the secret and empties the st
   assert.equal(env.MODS.objects.size, 4);
   const response = await fetchWorker(env, call('POST', '/mods/admin/reset', { headers: { Authorization: 'Bearer correct horse battery staple' } }));
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { deleted: { builds: 2, other: 2 }, index: { mod_claim_build: 1, mod_claim: 1, mod_build: 2, mod_upload: 0 } });
+  assert.deepEqual(await response.json(), { deleted: { builds: 2, other: 2 }, index: { mod_claim_build: 1, mod_claim: 1, mod_build: 2, mod_upload: 0, mod_asked: 0 } });
   assert.equal(env.MODS.objects.size, 0);
-  for (const table of ['mod_build', 'mod_claim', 'mod_claim_build', 'mod_upload']) {
+  for (const table of ['mod_build', 'mod_claim', 'mod_claim_build', 'mod_upload', 'mod_asked']) {
     assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM ' + table).toArray()[0].n, 0, table);
   }
   assert.equal((await fetchWorker(env, call('GET', '/mods/build/' + first.hash))).status, 404);
+});
+
+/* ---------------- part of a build: a published map's cut of a mod ---------------- */
+
+/* The canonical manifest of a whole build (modbundle.h): its id is the salt, and every
+ * carried file has blob, needs, path, provides, request and size. */
+function canonicalOf(files, salt = SALT) {
+  const listed = files.map(f => ({ blob: sha(Buffer.from(f.data)), needs: [], path: 'assets/' + f.request,
+    provides: { name: f.request, type: 'entityDef' }, request: f.request, size: Buffer.from(f.data).length }));
+  return Buffer.from(JSON.stringify({ files: listed, format: 2, id: salt, name: 'Pink Imp' }), 'utf8');
+}
+
+/* A cut of the whole build `files` keeping `kept`, its archive with source.json. */
+function cutOf(files, kept, { salt = SALT, source = canonicalOf(files, salt), sliceOf = sha(source) } = {}) {
+  const part = build({ salt, files: kept, author: { 'slice-of': sliceOf } });
+  return { ...rezip(part, [...entriesFor(part.modjson, kept), { name: 'source.json', data: source }]), sliceOf, source };
+}
+
+function packFiles(salt = SALT) {
+  return [
+    ...defaultFiles(salt),
+    { request: 'generated/decls/entitydef/mods/' + salt + '/blue_imp.decl', data: 'entityDef mods/' + salt + '/blue_imp { inherit = "monster/imp"; }\n' },
+    { request: 'generated/image/mods/' + salt + '/blue.bimage', data: Buffer.alloc(300, 9) },
+  ];
+}
+
+test('part of a build is stored when every file it carries is a file of the build it was cut from', async () => {
+  const env = await modsEnv();
+  const whole = packFiles();
+  const part = cutOf(whole, whole.slice(0, 2));
+  const created = await put(env, part);
+  assert.equal(created.status, 201, await created.clone().text());
+  assert.equal(env.registryStorage.sql.exec('SELECT slice_of FROM mod_build WHERE hash = ?', part.hash).toArray()[0].slice_of, part.sliceOf);
+  /* A second map that needs the same files names the same build: one archive serves both. */
+  assert.equal((await put(env, part)).status, 200);
+  const served = await fetchWorker(env, call('GET', '/mods/build/' + part.hash));
+  assert.equal(served.status, 200);
+  assert.deepEqual(Buffer.from(await served.arrayBuffer()), part.bytes);
+});
+
+test('part of a build is refused when its source does not prove it', async () => {
+  const env = await modsEnv();
+  const whole = packFiles();
+  const cases = [
+    ['no source.json', (() => { const p = cutOf(whole, whole.slice(0, 2)); return rezip(p, entriesFor(p.modjson, whole.slice(0, 2))); })(), /has no source\.json/],
+    ['source of another build', cutOf(whole, whole.slice(0, 2), { sliceOf: 'b'.repeat(64) }), /is not the build its mod\.json was cut from/],
+    ['a file the source does not have', cutOf(whole, [{ ...whole[0], data: 'entityDef changed {}\n' }]), /is not a file of the build it was cut from/],
+    ['the source of another mod', cutOf(packFiles(), whole.slice(0, 2), { source: canonicalOf(packFiles(), 'q2otherm') }), /is another mod/],
+    ['slice-of that is not a hash', cutOf(whole, whole.slice(0, 2), { sliceOf: 'nope' }), /by something other than its hash/],
+  ];
+  for (const [what, archive, cause] of cases) {
+    const response = await put(env, archive);
+    assert.equal(response.status, 422, what);
+    const { error } = await response.json();
+    assert.match(error, cause, what);
+    assertSentence(error, what);
+    assert.equal(objectsFor(env, archive.hash).length, 0, what + ': nothing is kept');
+  }
+  /* source.json belongs to part of a build only. */
+  const plain = build();
+  const response = await put(env, rezip(plain, [...entriesFor(plain.modjson, plain.files), { name: 'source.json', data: canonicalOf(plain.files) }]));
+  assert.equal(response.status, 422);
+  assert.match((await response.json()).error, /only part of a build carries/);
+});
+
+test('what players asked for of a part is kept for the claim holder and goes with the build', async () => {
+  const env = await modsEnv();
+  const whole = packFiles();
+  const part = cutOf(whole, whole.slice(0, 2));
+  const full = build({ files: whole });
+  await stored(env, part, full);
+  const missing = 'generated/image/mods/' + SALT + '/blue.bimage';
+  const ask = (hash, body) => fetchWorker(env, postJson('/mods/build/' + hash + '/asked', body));
+  assert.equal((await ask(part.hash, { request: missing, by: 'mods/' + SALT + '/blue_imp' })).status, 204);
+  assert.equal((await ask(part.hash, { request: missing, by: 'someone else' })).status, 204, 'a second report of one file is kept once');
+  let r = await ask(full.hash, { request: missing });
+  assert.equal(r.status, 404, 'a whole build lacks nothing');
+  assertSentence((await r.json()).error, 'whole');
+  assert.equal((await ask(part.hash, { request: 'generated/image/mods/q2otherm/x.bimage' })).status, 400, 'another mod');
+  assert.equal((await ask(part.hash, { request: 'Generated/Image/X.bimage' })).status, 400, 'not a request path');
+  assert.equal((await ask('c'.repeat(64), { request: missing })).status, 404, 'unknown build');
+  const claimed = await fetchWorker(env, postJson('/mods/claim', { ref: 'item-1', builds: [part.hash] }));
+  const { claim, secret } = await claimed.json();
+  r = await fetchWorker(env, postJson('/mods/asked', { claim, secret }));
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), { asked: [{ build: part.hash, salt: SALT, request: missing, by: 'mods/' + SALT + '/blue_imp' }] });
+  assert.equal((await fetchWorker(env, postJson('/mods/asked', { claim, secret: 'd'.repeat(64) }))).status, 403);
+  assert.equal((await fetchWorker(env, postJson('/mods/asked', { claim: 'e'.repeat(32), secret }))).status, 404);
+  /* A republish that carries the file replaces the claim's build set; the old part and what
+   * was asked of it go. */
+  const again = cutOf(whole, whole.slice(0, 3));
+  await stored(env, again);
+  const replaced = await fetchWorker(env, postJson('/mods/claim', { ref: 'item-1', builds: [again.hash], secret }));
+  assert.equal(replaced.status, 200);
+  assert.equal((await fetchWorker(env, call('HEAD', '/mods/build/' + part.hash))).status, 404, 'the earlier part is deleted');
+  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM mod_asked').toArray()[0].n, 0);
+  r = await fetchWorker(env, postJson('/mods/asked', { claim, secret }));
+  assert.deepEqual(await r.json(), { asked: [] });
 });

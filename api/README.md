@@ -57,6 +57,7 @@ read back a generated build of that size in parts through the runtime.
 | `PUT`, `GET` or `HEAD /mods/build/:hash` | Store or fetch one mod build's archive by its build hash. |
 | `POST /mods/build/:hash/parts`, `PUT /mods/build/:hash/parts/:n`, `POST /mods/build/:hash/complete` | Upload an archive larger than one request in parts. |
 | `POST /mods/claim`, `/mods/release` | Hold or drop an anonymous claim that keeps builds served. |
+| `POST /mods/build/:hash/asked`, `POST /mods/asked` | Report a file a published map's part of a mod lacked, or list those reports for a claim's holder. |
 | `POST /mods/admin/reset` | Empty the mod store (maintainer only, hidden without its secret). |
 
 Community write routes require a session; `/mods/*` routes are anonymous. Read `worker.js` for payloads, limits and the
@@ -100,7 +101,8 @@ R2 bucket `snapmap-plus-mods` (binding `MODS`) holds each archive as its own obj
 `build/<hash>/<32 hex>`, named when it is written. The single `ModRegistry` Durable Object
 (binding `MOD_REGISTRY`, object name `registry`) indexes the builds (`mod_build`: hash,
 size, salt, upload time, claim count, the object that serves it, and the number of
-script files the build carries), holds the claims (`mod_claim`, `mod_claim_build`) and
+script files the build carries, and for part of a build the build it was cut from), holds the claims
+(`mod_claim`, `mod_claim_build`), what players asked of a part of a build (`mod_asked`) and
 the uploads in parts in progress (`mod_upload`), so claim counts, releases and purges
 are decided in one transaction. A row names its object, and only that object is ever
 deleted for it: a release or purge that races an upload of the same build deletes the
@@ -110,8 +112,9 @@ when the object starts; rows from before per-upload objects name `build/<hash>`.
 
 An archive is the mod's folder as the product's `modsync.c` and `modzip.c` write it: a
 ZIP of stored entries (method 0) holding `mod.json`, the whole file, and
-`assets/<request>` for every carried file its builder block lists, nothing else, where
-the request is the block's `path` below `assets/` in lower case. Stock pointers never
+`assets/<request>` for every carried file its builder block lists, nothing else (part of a
+build also carries `source.json`, below), where the request is the block's `path` below
+`assets/` in lower case. Stock pointers never
 upload: the player's own game holds them. There is no mod version anywhere: an author's
 `version` key is an unknown author key and is ignored, and no response or index row
 carries one. The Worker does not recompute the build hash or check what a file
@@ -192,6 +195,26 @@ mods include scripts before anything arrives.
   nosniff`, a `default-src 'none'; sandbox` CSP, `Content-Disposition: attachment` and
   the hash as the ETag. The body streams from R2, so a download of any size never sits
   in the Worker.
+- Part of a build. A published map that uses only some files of a mod uploads just those, as a
+  build of its own (the product's `modslice.c`): its `mod.json` author part names the build it was
+  cut from in `"slice-of"` (64 lowercase hex), and its archive carries, beside `mod.json`, that
+  build's canonical manifest as `source.json`. The check refuses such an archive, with 422 and one
+  sentence, when it has no `source.json`, when the SHA-256 of `source.json` is not `slice-of`, when
+  `source.json` is not UTF-8 JSON listing files, or is another mod (its `id` is not the salt), or when
+  a carried file is not a file of `source.json` with the same `path`, SHA-256 (`blob`) and size. A
+  `source.json` in a whole build is refused. The index records `slice_of`; otherwise part of a build is
+  stored, served, claimed, released and purged like any build, and two maps that need the same files
+  of one build name one hash and share one archive.
+- `POST /mods/build/:hash/asked` takes `{"request","by"}`: a player's game asked a stored part of a
+  build for `request` (a lower-case request path, `pathFault` clean, inside the build's own
+  `mods/<salt>/`), which the part lacks; `by` is the name of what asked, or empty. Kept once per build
+  and request (the first `by`), deleted with the build. 204; 404 for a build the store does not hold
+  or a whole one; 400 for a request of another mod or not a request path. Nothing about the player is
+  sent or kept. It counts as a claim call.
+- `POST /mods/asked` takes `{"claim","secret"}` and returns 200 `{"asked":[{"build","salt","request",
+  "by"}]}` for every build that claim names, so the published map's author sees what players lacked
+  and publishes again to carry it; 403 for a wrong secret, 404 for an unknown claim. It counts as a
+  read.
 - `POST /mods/claim` takes `{"ref","builds":[hash...]}` (any non-empty ref of text, any
   number of stored builds; the body is bounded only by the platform's request size) and
   returns 201 `{"claim","secret"}`. The registry stores only the SHA-256 of the secret.
@@ -240,7 +263,7 @@ object starts. Deploy the bindings and code together.
 bucket (build archives and anything the earlier blob and bundle store left) and empties
 the index. It exists only while the `MODS_ADMIN_TOKEN` secret is set and needs
 `Authorization: Bearer <token>`; otherwise it answers 404 or 403. It returns
-`{"deleted":{"builds","other"},"index":{"mod_claim_build","mod_claim","mod_build","mod_upload"}}`,
+`{"deleted":{"builds","other"},"index":{"mod_claim_build","mod_claim","mod_build","mod_upload","mod_asked"}}`,
 the counts removed. Every published map's claim goes with it, so it is for the wipe
 before a release, not for routine use. After the Worker with this store is deployed,
 from this directory:

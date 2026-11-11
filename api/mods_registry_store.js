@@ -24,6 +24,9 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS mod_claim_build (claim TEXT NOT NULL, build TEXT NOT NULL, PRIMARY KEY (claim, build))',
   'CREATE TABLE IF NOT EXISTS mod_upload (hash TEXT NOT NULL, size INTEGER NOT NULL, object TEXT NOT NULL, upload TEXT NOT NULL, part_size INTEGER NOT NULL, parts INTEGER NOT NULL, etags TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY (hash, size))',
   'CREATE INDEX IF NOT EXISTS mod_upload_idle ON mod_upload (updated)',
+  /* A file a published map's part of a mod lacked, which a player's game asked for: kept
+   * for the map's author (the claim's holder) while the build is stored. */
+  'CREATE TABLE IF NOT EXISTS mod_asked (build TEXT NOT NULL, request TEXT NOT NULL, asker TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY (build, request))',
 ];
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -57,12 +60,13 @@ export function initializeRegistry(storage) {
     storage.sql.exec("UPDATE mod_build SET object = 'build/' || hash WHERE object IS NULL");
   }
   if (!columns.has('scripts')) storage.sql.exec('ALTER TABLE mod_build ADD COLUMN scripts INTEGER NOT NULL DEFAULT 0');
+  if (!columns.has('slice_of')) storage.sql.exec('ALTER TABLE mod_build ADD COLUMN slice_of TEXT');
 }
 
-/* The row of one build, or null: { size, salt, created, claims, object, scripts }. */
+/* The row of one build, or null: { size, salt, created, claims, object, scripts, slice_of }. */
 export function buildRow(storage, hash) {
   if (!HEX64.test(hash)) throw new Error('bad build');
-  const found = rows(storage, 'SELECT size, salt, created, claims, object, scripts FROM mod_build WHERE hash = ?', hash);
+  const found = rows(storage, 'SELECT size, salt, created, claims, object, scripts, slice_of FROM mod_build WHERE hash = ?', hash);
   return found.length ? found[0] : null;
 }
 
@@ -73,23 +77,23 @@ export function buildRow(storage, hash) {
  * now has the new archive (new or replaced); discard is the object no
  * row names any more (the replaced one, or the new one when the build kept its own), which
  * the caller deletes. */
-export function registerBuild(storage, hash, size, salt, object, scripts, now) {
+export function registerBuild(storage, hash, size, salt, object, scripts, now, sliceOf = null) {
   if (!HEX64.test(hash) || !Number.isSafeInteger(size) || size < 1 || typeof salt !== 'string' || !SALT.test(salt) ||
-      !Number.isSafeInteger(scripts) || scripts < 0) {
+      !Number.isSafeInteger(scripts) || scripts < 0 || (sliceOf !== null && !HEX64.test(sliceOf))) {
     throw new Error('bad build');
   }
   checkObject(object);
   return storage.transactionSync(() => {
     const found = rows(storage, 'SELECT size, claims, object FROM mod_build WHERE hash = ?', hash);
     if (!found.length) {
-      storage.sql.exec('INSERT INTO mod_build (hash, size, salt, created, object, scripts) VALUES (?, ?, ?, ?, ?, ?)',
-        hash, size, salt, now, object, scripts);
+      storage.sql.exec('INSERT INTO mod_build (hash, size, salt, created, object, scripts, slice_of) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        hash, size, salt, now, object, scripts, sliceOf);
       return { created: true, discard: null };
     }
     const kept = found[0];
     if (kept.claims <= 0 && kept.size !== size) {
-      storage.sql.exec('UPDATE mod_build SET size = ?, salt = ?, object = ?, scripts = ?, created = max(created, ?) WHERE hash = ?',
-        size, salt, object, scripts, now, hash);
+      storage.sql.exec('UPDATE mod_build SET size = ?, salt = ?, object = ?, scripts = ?, slice_of = ?, created = max(created, ?) WHERE hash = ?',
+        size, salt, object, scripts, sliceOf, now, hash);
       return { created: true, discard: kept.object === object ? null : kept.object };
     }
     if (kept.claims <= 0) storage.sql.exec('UPDATE mod_build SET created = max(created, ?) WHERE hash = ?', now, hash);
@@ -124,6 +128,7 @@ function dropUnclaimed(storage, hashes) {
     const found = rows(storage, 'SELECT claims, object FROM mod_build WHERE hash = ?', hash);
     if (!found.length || found[0].claims > 0) continue;
     storage.sql.exec('DELETE FROM mod_build WHERE hash = ?', hash);
+    storage.sql.exec('DELETE FROM mod_asked WHERE build = ?', hash);
     dropped.push(found[0].object);
   }
   return dropped;
@@ -186,9 +191,44 @@ export function purgeBuilds(storage, now, limit) {
   return storage.transactionSync(() => {
     const doomed = rows(storage, 'SELECT hash, object FROM mod_build WHERE claims <= 0 AND created < ? ORDER BY created LIMIT ?',
       now - CLAIM_WINDOW_MS, limit);
-    for (const { hash } of doomed) storage.sql.exec('DELETE FROM mod_build WHERE hash = ?', hash);
+    for (const { hash } of doomed) {
+      storage.sql.exec('DELETE FROM mod_build WHERE hash = ?', hash);
+      storage.sql.exec('DELETE FROM mod_asked WHERE build = ?', hash);
+    }
     return doomed.map(row => row.object);
   });
+}
+
+/* ---------------- what players asked for ---------------- */
+
+/* A player's game asked a stored part of a build for `request`, which it lacks. Kept once
+ * per build and request (the first asker named). Returns { notFound } for a build the store
+ * does not hold, { whole } for a whole build (nothing was left out of it), { foreign } for a
+ * request outside the build's own mod, else { added } (false when it was known). */
+export function reportAsked(storage, hash, request, asker, now) {
+  if (!HEX64.test(hash) || typeof request !== 'string' || !request || typeof asker !== 'string') throw new Error('bad report');
+  return storage.transactionSync(() => {
+    const found = rows(storage, 'SELECT salt, slice_of FROM mod_build WHERE hash = ?', hash);
+    if (!found.length) return { notFound: true };
+    if (!found[0].slice_of) return { whole: true };
+    const own = 'mods/' + found[0].salt + '/';
+    if (!request.startsWith(own) && !request.includes('/' + own)) return { foreign: true };
+    const known = rows(storage, 'SELECT 1 AS hit FROM mod_asked WHERE build = ? AND request = ?', hash, request).length;
+    if (!known) storage.sql.exec('INSERT INTO mod_asked (build, request, asker, created) VALUES (?, ?, ?, ?)', hash, request, asker, now);
+    return { added: !known };
+  });
+}
+
+/* What players asked for of the builds a claim names, for the claim's holder: { forbidden },
+ * { notFound }, or { asked: [{ build, salt, request, by }] }. */
+export function listAsked(storage, id, presentedHash) {
+  if (!HEX32.test(id) || !HEX64.test(presentedHash)) throw new Error('bad claim');
+  const found = rows(storage, 'SELECT secret FROM mod_claim WHERE id = ?', id);
+  if (!found.length) return { notFound: true };
+  if (found[0].secret !== presentedHash) return { forbidden: true };
+  const asked = rows(storage, 'SELECT a.build AS build, b.salt AS salt, a.request AS request, a.asker AS asker FROM mod_asked a ' +
+    'JOIN mod_claim_build c ON c.build = a.build JOIN mod_build b ON b.hash = a.build WHERE c.claim = ? ORDER BY a.created, a.request', id);
+  return { asked: asked.map(row => ({ build: row.build, salt: row.salt, request: row.request, by: row.asker })) };
 }
 
 /* ---------------- uploads in parts ---------------- */
@@ -258,7 +298,7 @@ export function abandonUploads(storage, now, limit, all = false) {
 export function resetRegistry(storage) {
   return storage.transactionSync(() => {
     const counts = {};
-    for (const table of ['mod_claim_build', 'mod_claim', 'mod_build', 'mod_upload']) {
+    for (const table of ['mod_claim_build', 'mod_claim', 'mod_build', 'mod_upload', 'mod_asked']) {
       counts[table] = rows(storage, 'SELECT count(*) AS n FROM ' + table)[0].n;
       storage.sql.exec('DELETE FROM ' + table);
     }
