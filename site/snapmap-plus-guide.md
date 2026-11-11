@@ -1779,8 +1779,7 @@ DOOM's own console (press **~** to open it) — some are shortcuts for things th
 others are console-only tools with no window equivalent. Run **`sh_help`** at any time to print the
 full, current list with descriptions directly from the running build; the tables below are the same
 list, organized by what each command is for. (Not repeated here: `sh` and its bulk-edit subcommands,
-`sh_target_any`, and `sh_mods` — those are covered in their own
-sections above.)
+`sh_target_any`, `sh_mods` and `sh_scripts` — those are covered in their own sections above.)
 
 ### Inspecting entities and resources
 
@@ -1793,22 +1792,33 @@ sections above.)
 | `sh_listres <resource class> [filter]` | List every resource of a given class (e.g. `idMaterial`), optionally filtered by name. |
 | `sh_type <type or enum> [-v]` | Print the fields of an idTech class, or the values of an enum. Add `-v` to also see each field's byte offset and size. |
 | `sh_validclasses <inherit>` | List the engine-valid classnames for a given inherit — the same list that fills the Classname dropdown in the [Entity State Panel](#the-entity-state-panel). |
+| `sh_event info <name>` / `sh_event list [filter]` | Print an engine event's number and arguments, or list every event (optionally those matching the filter). |
 | `sh_dumpmap <name>` | Dump the currently generated `.map` (including SnapMap's own auto-generated version) to a file, for debugging. Works in the SnapMap menu as well as in the editor. The name is **game-relative**, not a Windows path: a bare name lands in `<game dir>\base\mapdumps\<name>.map`, and the `.map` extension is always forced. Dumping the same name twice never overwrites — repeats become `<name>_2.map`, `<name>_3.map`, and so on. Pass a name containing a `/` (e.g. `arena/pass1`) to choose your own subfolder under `base\`; it is created for you. The command prints the full path it wrote. |
 
-### Rawmaps
+### Rawmaps and prefabs
 
 | Command | What it does |
 |---|---|
-| `sh_rawmaps` or `sh_rawmaps status` | Show the rawmap state, the Load Path and the Save Path, and what the last save wrote. See [Rawmaps](#rawmaps). |
+| `sh_rawmaps` or `sh_rawmaps status` | Show the Load Path and the Save Path, and what the last save wrote (and the `.zip` beside it for a map with mods). See [Rawmaps](#rawmaps). |
 | `sh_rawmaps help` | List every `sh_rawmaps` verb. |
 | `sh_rawmaps list [folder]` | List rawmap files in the default folder, the Load Path's folder, or a folder you name. |
-| `sh_rawmaps on` / `sh_rawmaps off` | Turn **Use Rawmaps for Every Save/Load** on or off. `sh_rawmaps_on` and `sh_rawmaps_off` do the same. |
-| `sh_rawmaps load <path>` | Point the Load Path at a `.json` or `.zip` and stage it. |
-| `sh_rawmaps load` | Open the Load Path as a new map, or stage it for the next map you open if the editor is not up yet. |
+| `sh_rawmaps load <path>` | Open a `.json` or `.zip` in the editor now, as a new map. A map must be open in the editor. |
+| `sh_rawmaps load` | Open the Load Path again. |
 | `sh_rawmaps save [path]` | Write the open map to the Save Path, or to the path you give, and keep saving there. |
 | `sh_rawmaps savepath [default\|rawmap\|<path>]` | Choose where saves go: the default file, the rawmap you opened, or a file you name. |
 | `sh_rawmaps default` | Put both paths back to the default files. |
 | `sh_rawmaps overwrite [on\|off]` | Off by default. On lets DOOM's Save replace the saved map a rawmap opened over, until you close DOOM. |
+| `sh_prefab mods "<name>"` | List the mods a prefab needs and whether each is installed. |
+| `sh_prefab export "<name>" "<path.zip>"` | Write a prefab with its mods to one ZIP. |
+| `sh_prefab import "<path.zip or path.json>"` | Install a prefab ZIP's mods and add the prefab to your list. |
+
+### Editor
+
+| Command | What it does |
+|---|---|
+| `sh_gridsize [x y z]` | Print the selected Grid Room's size, or resize it. See [Resizing Grid Rooms](#resizing-grid-rooms). |
+| `sh_navmesh` | Show the baked AI navigation the current map uses, room by room, and why anything was left out. `sh_navmesh reads` counts what reading the map has cost; `sh_navmesh detail` adds the bake's internal state. See [AI navigation on Blocking Boxes](#ai-navigation-on-blocking-boxes). |
+| `sh_perf` | Show where Snapmap+ spends frame time, such as reading the map and building navigation previews. `sh_perf reset` sets the counters to zero. `sh_perf read` times reading the open map whole and entity by entity. |
 
 ### Compiling assets
 
@@ -1817,7 +1827,7 @@ sections above.)
 | `sh_genbmodel <input> <output>` | Generate a bmodel from a `.obj`, `.ase`, or `.lwo` file. |
 | `sh_genmd6model <input> <output>` | Compile a `.md6model` into a `bmd6model`. |
 
-### Player cheats
+### Playtesting
 
 Five toggles for your own player, mainly useful while testing a map solo:
 
@@ -1829,36 +1839,32 @@ Five toggles for your own player, mainly useful while testing a map solo:
 | `noPlayerKill` | You can't be killed outright. |
 | `noTarget` | Enemies ignore you. |
 
+**String Set commands.** A map can carry a behaviour as plain map data: a **Set (String)** logic node
+whose value starts with `smp:`. When a signal reaches the node, Snapmap+ runs the command on the player
+who caused it, on the host of the game; without Snapmap+ the node only stores the string, so the map
+plays everywhere.
+
+| Command | What it does |
+|---|---|
+| `smp:event <eventName> [args...]` | Fires any engine event on the activating player, for example `smp:event forcePraetorHandsAndBody 1`. `sh_event info <name>` shows what arguments it takes. A command the game refuses prints one line and does nothing. |
+| `smp:doomhands <0\|1>` | Switches the player's Doom hands on or off and rebuilds the hands and body. |
+| `sh_smp "smp:<command> ..."` | Runs a String Set command on the first player while you playtest. `sh_smp on`, `off` and `status` switch String Set commands for the session (on by default). |
+
 ### Cvars
 
 Settings you read or change with `<name>` or `<name> <value>` in the console:
 
 | Cvar | Default | What it does |
 |---|---|---|
-| `sh_pretty_on` | `0` | Type `sh_pretty_on 1` to turn on, `sh_pretty_on 0` to turn off. On, it pretty-prints every rawmap Snapmap+ saves: **Save Rawmap**, **Save Rawmap As...**, `sh_rawmaps save`, and DOOM's own Save while **Use Rawmaps for Every Save/Load** is on. At `0`, rawmaps are compact JSON. |
+| `sh_pretty_on` | `0` | `1` pretty-prints every rawmap Snapmap+ saves (**Save Rawmap**, **Save Rawmap As...**, `sh_rawmaps save`); `0` saves compact JSON. |
 | `sh_copy_reslist_to_clipboard` | `0` | Copy `sh_listres` output to the clipboard automatically. |
 
-### Developer and diagnostic tools
-
-The rest exist mainly for Snapmap+'s own developers to debug the engine hooks — you're unlikely to need
-them, but they're listed here for completeness since `sh_help` shows them too:
+### Other commands
 
 | Command | What it does |
 |---|---|
-| `sh_navmesh` | Show the baked AI navigation the current map uses: which modules and nav classes, or why a bake was refused. See [AI navigation on Blocking Boxes](#ai-navigation-on-blocking-boxes). |
-| `sh_navmesh marks [count]` | Mark navigation boxes red in the preview, the same way a refused bake marks them. It marks up to `count` boxes in each module (default `4`, maximum `24`). `sh_navmesh marks 0` clears the marks. |
-| `sh_perf` | Show where Snapmap+ spends frame time, such as reading the map and building navigation previews. `sh_perf reset` sets the counters to zero. `sh_perf read` times two ways to read the open map: the whole map at once, and each entity one at a time. It also estimates the cost to read only the navigation boxes. Run it with a map open in the editor. |
-| `sh_alginfo` | Report the status of Snapmap+'s optional math-acceleration layer. |
-| `sh_debugrender` | Renderer debug toggle; `sh_debugrender dumprenderinfo` prints how many rendermodels are active, then names them. |
-| `cs_dontuse` | Toggle higher-precision engine-math overrides — a performance tradeoff, off by default; the name is the warning. |
-| `sh_superscriptop` | Dump SuperScript / eventDef data. |
-| `cs_dumpeventdefs` | Dump every eventDef to a file. |
-| `cs_fieldinfo` | Print field info for a type. |
-| `cs_start_render_logging` | Set up the render-logging hook. |
 | `sh_disable_devmode` / `sh_reenable_devmode` | Turn DOOM's developer features off, or back on, without losing your Bethesda.net connection. |
-| `sh_dialogtest [id] [buttons] [text]` | Raise DOOM's own modal dialog carrying the given text. |
-| `sh_dialogpoll` | Read the answer to the dialog `sh_dialogtest` raised. |
-| `sh_dialogdump` | Print the engine's dialog queue: id, button set, and flag bytes. |
+| `sh_help` | List every Snapmap+ console command and cvar with its description. |
 
 ---
 
