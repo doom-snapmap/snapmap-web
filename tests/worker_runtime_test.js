@@ -65,8 +65,16 @@ async function run() {
   mf = community();
   try { await mods(mf); } finally { await mf.dispose(); }
 
+  /* A build of any size in parts, through the real runtime: node tests/worker_runtime_test.js
+   * <miniflare> <GiB>. Off by default: it writes the archive twice to the local R2 store. */
+  const gib = Number(process.argv[3] || 0);
+  if (gib > 0) {
+    mf = community();
+    try { await largeBuild(mf, gib); } finally { await mf.dispose(); }
+  }
+
   console.log('worker runtime: concurrent per-account quotas, restart persistence and R2 passed');
-  console.log('worker runtime: mod store archive streaming, refusal before commit, claims and release passed');
+  console.log('worker runtime: mod store archive streaming, refusal, uploads in parts, the release race, claims and release passed');
 }
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -108,9 +116,9 @@ function zip(entries) {
   return Buffer.concat(parts);
 }
 
-function archive(salt, files, method = 0) {
+function archive(salt, files, method = 0, block = {}) {
   const hash = sha(randomBytes(32));
-  const doc = { name: 'Pink Imp', 'snapmap-plus': { format: 2, salt, build: hash,
+  const doc = { name: 'Pink Imp', 'snapmap-plus': { format: 2, salt, build: hash, ...block,
     files: files.map(f => ({ path: 'assets/' + f.request, sha256: sha(f.data), size: f.data.length, provides: { type: 'image', name: f.request }, needs: [] })) } };
   const modjson = Buffer.from(JSON.stringify(doc, null, 2) + '\n');
   return { hash, bytes: zip([{ name: 'mod.json', data: modjson, method }, ...files.map(f => ({ name: 'assets/' + f.request, data: f.data }))]) };
@@ -120,6 +128,7 @@ async function mods(mf) {
   const send = (method, route, body, headers = {}) => mf.dispatchFetch('http://local.test' + route, { method, body, headers });
   const zipType = bytes => ({ 'Content-Type': 'application/zip', 'Content-Length': String(bytes.length) });
   const bucket = await mf.getR2Bucket('MODS');
+  const stored = async hash => (await bucket.list({ prefix: 'build/' + hash })).objects.map(o => o.key);
   const salt = 'k7pinkim';
   const big = archive(salt, [{ request: 'generated/image/mods/' + salt + '/pink.bimage', data: randomBytes(5 * 1024 * 1024 + 17) },
     { request: 'generated/decls/entitydef/mods/' + salt + '/pink_imp.decl', data: Buffer.from('entityDef mods/' + salt + '/pink_imp {}\n') }]);
@@ -128,17 +137,18 @@ async function mods(mf) {
   const refused = await send('PUT', '/mods/build/' + compressed.hash, compressed.bytes, zipType(compressed.bytes));
   assert.equal(refused.status, 422);
   assert.deepEqual(await refused.json(), { error: 'The archive has a compressed entry; Snapmap+ stores every file uncompressed.' });
-  assert.equal(await bucket.head('build/' + compressed.hash), null, 'a refused archive was committed');
+  assert.deepEqual(await stored(compressed.hash), [], 'a refused archive was kept');
   const damaged = Buffer.from(big.bytes);
   damaged.writeUInt32LE(0, damaged.length - 6);   // the end record's central directory offset
   const late = await send('PUT', '/mods/build/' + big.hash, damaged, zipType(damaged));
   assert.equal(late.status, 422, 'a fault found only at the end of a streamed upload');
   assert.equal((await late.json()).error, "The archive's end record places its central directory wrongly.");
-  assert.equal(await bucket.head('build/' + big.hash), null, 'an archive refused at its last byte was committed');
+  assert.deepEqual(await stored(big.hash), [], 'an archive refused at its last byte was kept');
 
   const created = await send('PUT', '/mods/build/' + big.hash, big.bytes, zipType(big.bytes));
   assert.equal(created.status, 201, await created.clone().text());
-  assert.deepEqual(await created.json(), { build: big.hash, size: big.bytes.length });
+  assert.deepEqual(await created.json(), { build: big.hash, size: big.bytes.length, scripts: 0 });
+  assert.equal((await stored(big.hash)).length, 1);
   const again = await send('PUT', '/mods/build/' + big.hash, big.bytes, zipType(big.bytes));
   assert.equal(again.status, 200);
   await again.arrayBuffer();
@@ -148,7 +158,9 @@ async function mods(mf) {
   const replacement = await send('PUT', '/mods/build/' + big.hash, other, zipType(other));
   assert.equal(replacement.status, 422, await replacement.clone().text());
   await replacement.arrayBuffer();
-  assert.equal((await bucket.head('build/' + big.hash)).size, big.bytes.length, 'a refused replacement left the stored archive');
+  const kept = await stored(big.hash);
+  assert.equal(kept.length, 1, 'a refused replacement left only the stored archive');
+  assert.equal((await bucket.head(kept[0])).size, big.bytes.length);
   const got = await send('GET', '/mods/build/' + big.hash);
   assert.equal(got.status, 200);
   assert.equal(got.headers.get('content-type'), 'application/zip');
@@ -158,7 +170,17 @@ async function mods(mf) {
   const head = await send('HEAD', '/mods/build/' + big.hash);
   assert.equal(head.status, 200);
   assert.equal(head.headers.get('content-length'), String(big.bytes.length), 'HEAD carries the archive size');
+  assert.equal(head.headers.get('x-mod-scripts'), '0');
   await head.arrayBuffer();
+
+  /* A scripted build: the index records how many scripts it carries and every answer says so. */
+  const scripted = archive(salt, [{ request: 'mods/' + salt + '/scripts/main.lua', data: Buffer.from('api = 1\n') },
+    { request: 'mods/' + salt + '/scripts/lib/fsm.lua', data: Buffer.from('return {}\n') }], 0, { scripts: { files: 2 } });
+  const withScripts = await send('PUT', '/mods/build/' + scripted.hash, scripted.bytes, zipType(scripted.bytes));
+  assert.deepEqual(await withScripts.json(), { build: scripted.hash, size: scripted.bytes.length, scripts: 2 });
+  const scriptHead = await send('HEAD', '/mods/build/' + scripted.hash);
+  assert.equal(scriptHead.headers.get('x-mod-scripts'), '2');
+  await scriptHead.arrayBuffer();
 
   const claim = await send('POST', '/mods/claim', JSON.stringify({ ref: 'runtime-item', builds: [big.hash] }));
   assert.equal(claim.status, 201);
@@ -172,12 +194,177 @@ async function mods(mf) {
   const gone = await send('HEAD', '/mods/build/' + big.hash);
   assert.equal(gone.status, 404, 'a release deletes the build at once');
   await gone.arrayBuffer();
-  assert.equal(await bucket.head('build/' + big.hash), null);
+  assert.deepEqual(await stored(big.hash), []);
+
+  /* The release race (a release and an upload of one build at once): whichever order the
+   * two land in, a claim never names a build whose archive is missing. */
+  for (let round = 0; round < 8; round++) {
+    const raced = archive(salt, [{ request: 'generated/image/mods/' + salt + '/r.bimage', data: randomBytes(64 * 1024) }]);
+    await (await send('PUT', '/mods/build/' + raced.hash, raced.bytes, zipType(raced.bytes))).arrayBuffer();
+    const made = await (await send('POST', '/mods/claim', JSON.stringify({ ref: 'race-' + round, builds: [raced.hash] }))).json();
+    const [rel, up] = await Promise.all([
+      send('POST', '/mods/release', JSON.stringify(made)),
+      send('PUT', '/mods/build/' + raced.hash, raced.bytes, zipType(raced.bytes)),
+    ]);
+    await rel.arrayBuffer(); await up.arrayBuffer();
+    const reclaim = await send('POST', '/mods/claim', JSON.stringify({ ref: 'race-again-' + round, builds: [raced.hash] }));
+    if (reclaim.status === 201) {
+      const served = await send('GET', '/mods/build/' + raced.hash);
+      assert.equal(served.status, 200, 'a claimed build is served (round ' + round + ')');
+      assert.equal(sha(Buffer.from(await served.arrayBuffer())), sha(raced.bytes));
+    } else {
+      assert.equal(reclaim.status, 409, 'the build is gone and the claim says to upload it again');
+    }
+    await reclaim.arrayBuffer();
+  }
+
+  await parts(send, bucket, stored);
   for (const route of ['/mods/blob/' + big.hash, '/mods/bundle/' + big.hash]) {
     const retired = await send('GET', route);
     assert.equal(retired.status, 404);
     await retired.arrayBuffer();
   }
+}
+
+/* An archive streamed from a generator in parts of the store's part size: `files` carried
+ * files of `size` bytes each, contents made a block at a time. */
+function* generated(hash, salt, files, size) {
+  const names = Array.from({ length: files }, (_, i) => 'assets/generated/image/mods/' + salt + '/big' + i + '.bimage');
+  /* The same bytes for the same hash, so a resumed upload sends what the first attempt did. */
+  const block = Buffer.alloc(4 * 1024 * 1024);
+  for (let at = 0, seed = Buffer.from(hash, 'hex'); at < block.length; at += 32) {
+    seed = createHash('sha256').update(seed).digest();
+    seed.copy(block, at);
+  }
+  const sums = names.map(() => {
+    const h = createHash('sha256');
+    for (let left = size; left > 0; left -= block.length) h.update(block.subarray(0, Math.min(left, block.length)));
+    return h.digest('hex');
+  });
+  const crc = (() => {
+    let c = 0xffffffff;
+    for (let left = size; left > 0; left -= block.length) {
+      for (const b of block.subarray(0, Math.min(left, block.length))) { c ^= b; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; }
+    }
+    return (c ^ 0xffffffff) >>> 0;
+  })();
+  const doc = { name: 'Large', 'snapmap-plus': { format: 2, salt, build: hash,
+    files: names.map((n, i) => ({ path: n, sha256: sums[i], size, provides: { type: 'image', name: n.slice(7) }, needs: [] })) } };
+  const modjson = Buffer.from(JSON.stringify(doc));
+  const entries = [{ name: 'mod.json', size: modjson.length, data: modjson, crc: crc32(modjson) }, ...names.map(name => ({ name, size, crc }))];
+  let offset = 0;
+  const records = [];
+  for (const e of entries) {
+    const n = Buffer.from(e.name), local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x21, 12); local.writeUInt32LE(e.crc, 14);
+    local.writeUInt32LE(e.size, 18); local.writeUInt32LE(e.size, 22); local.writeUInt16LE(n.length, 26);
+    records.push({ n, size: e.size, offset, crc: e.crc });
+    yield Buffer.concat([local, n]);
+    offset += 30 + n.length;
+    if (e.data) { yield e.data; offset += e.size; continue; }
+    for (let left = e.size; left > 0; left -= block.length) yield block.subarray(0, Math.min(left, block.length));
+    offset += e.size;
+  }
+  const cd = offset;
+  for (const r of records) {
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(0x21, 14);
+    central.writeUInt32LE(r.crc, 16); central.writeUInt32LE(r.size, 20); central.writeUInt32LE(r.size, 24); central.writeUInt16LE(r.n.length, 28);
+    central.writeUInt32LE(r.offset, 42);
+    yield Buffer.concat([central, r.n]);
+    offset += 46 + r.n.length;
+  }
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(records.length, 8); end.writeUInt16LE(records.length, 10);
+  end.writeUInt32LE(offset - cd, 12); end.writeUInt32LE(cd, 16);
+  yield end;
+}
+
+/* Sends a generated archive in parts and returns its size and SHA-256. */
+async function sendInParts(send, hash, chunks, size, partSize, skip = new Set()) {
+  let part = 1, pending = [], have = 0;
+  const whole = createHash('sha256');
+  const flush = async () => {
+    const body = Buffer.concat(pending);
+    pending = []; have = 0;
+    if (!skip.has(part)) {
+      const r = await send('PUT', '/mods/build/' + hash + '/parts/' + part, body,
+        { 'Content-Type': 'application/octet-stream', 'Content-Length': String(body.length), 'X-Build-Size': String(size) });
+      assert.equal(r.status, 200, 'part ' + part + ': ' + await r.clone().text());
+      await r.arrayBuffer();
+    }
+    part++;
+  };
+  for (const chunk of chunks) {
+    whole.update(chunk);
+    let at = 0;
+    while (at < chunk.length) {
+      const n = Math.min(partSize - have, chunk.length - at);
+      pending.push(Buffer.from(chunk.subarray(at, at + n)));
+      have += n; at += n;
+      if (have === partSize) await flush();
+    }
+  }
+  if (have) await flush();
+  return whole.digest('hex');
+}
+
+function sizeOf(chunks) {
+  let n = 0;
+  for (const chunk of chunks) n += chunk.length;
+  return n;
+}
+
+/* Two parts through the runtime: start, one part, resume, the other, complete, read back. */
+async function parts(send, bucket, stored) {
+  const salt = 'k7pinkim', hash = sha(randomBytes(32));
+  const size = sizeOf(generated(hash, salt, 2, 50 * 1024 * 1024));
+  const start = await send('POST', '/mods/build/' + hash + '/parts', JSON.stringify({ size }));
+  assert.equal(start.status, 201, await start.clone().text());
+  const { partSize, parts: count } = await start.json();
+  assert.equal(count, 2);
+  /* The same generator, so the bytes are the same: send only part 1, then resume. */
+  const gen = () => generated(hash, salt, 2, 50 * 1024 * 1024);
+  await sendInParts(send, hash, gen(), size, partSize, new Set([2]));
+  const resumed = await send('POST', '/mods/build/' + hash + '/parts', JSON.stringify({ size }));
+  assert.deepEqual((await resumed.json()).have, [1]);
+  const digest = await sendInParts(send, hash, gen(), size, partSize, new Set([1]));
+  const done = await send('POST', '/mods/build/' + hash + '/complete', JSON.stringify({ size }));
+  assert.equal(done.status, 201, await done.clone().text());
+  await done.arrayBuffer();
+  const got = await send('GET', '/mods/build/' + hash);
+  assert.equal(got.status, 200);
+  assert.equal(sha(Buffer.from(await got.arrayBuffer())), digest, 'the joined archive is the bytes sent');
+  assert.equal((await stored(hash)).length, 1);
+}
+
+/* A build of `gib` GiB in parts: generated, uploaded, joined, checked and read back. */
+async function largeBuild(mf, gib) {
+  const send = (method, route, body, headers = {}) => mf.dispatchFetch('http://local.test' + route, { method, body, headers });
+  const salt = 'k7pinkim', hash = sha(randomBytes(32));
+  const fileSize = 95 * 1024 * 1024;
+  const files = Math.ceil(gib * 1024 / 95);
+  const size = sizeOf(generated(hash, salt, files, fileSize));
+  const t0 = Date.now();
+  const start = await send('POST', '/mods/build/' + hash + '/parts', JSON.stringify({ size }));
+  assert.equal(start.status, 201, await start.clone().text());
+  const { partSize, parts: count } = await start.json();
+  const digest = await sendInParts(send, hash, generated(hash, salt, files, fileSize), size, partSize);
+  const t1 = Date.now();
+  const done = await send('POST', '/mods/build/' + hash + '/complete', JSON.stringify({ size }));
+  assert.equal(done.status, 201, await done.clone().text());
+  await done.arrayBuffer();
+  const t2 = Date.now();
+  const got = await send('GET', '/mods/build/' + hash);
+  assert.equal(got.status, 200);
+  const h = createHash('sha256');
+  let received = 0;
+  for await (const chunk of got.body) { h.update(chunk); received += chunk.length; }
+  assert.equal(received, size);
+  assert.equal(h.digest('hex'), digest, 'byte for byte');
+  console.log('worker runtime: a ' + (size / 1024 ** 3).toFixed(2) + ' GiB build in ' + count + ' parts: sent in ' +
+    ((t1 - t0) / 1000).toFixed(1) + ' s, joined and checked in ' + ((t2 - t1) / 1000).toFixed(1) + ' s, read back in ' +
+    ((Date.now() - t2) / 1000).toFixed(1) + ' s');
 }
 
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
