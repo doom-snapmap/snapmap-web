@@ -1006,6 +1006,359 @@ folder is a name in `mods\` or a full path.
 
 ---
 
+## Mod scripts
+
+A mod can carry **scripts**: small files of Lua code that make its objects do things during Play. A
+script can move and turn the mod's own objects, heal players, drive the mod's own demons (walk, turn,
+aim, fire, attack), deal damage with the mod's own damage decls, play its effects and sounds, and
+talk to SnapMap logic through **Script nodes** and the map's variables.
+
+Scripts run only during Play, only on the host of a game, and only for the mods the map uses. They
+never run in the editor.
+
+### Where a script goes
+
+A script is a text file ending in `.lua` in the mod's `scripts` folder:
+
+```
+door-logic\
+  mod.json
+  assets\
+    mods\door-logic\scripts\door.lua        an entry file: it runs when the map starts
+    mods\door-logic\scripts\lib\count.lua   a library: it runs only when a script asks for it
+```
+
+Write it under your folder's name, as every other new file; Refresh files it under the mod. Every
+entry file starts with the line
+
+```lua
+api = 1
+```
+
+which says the file is written for version 1 of the scripting calls. Comments may come before it.
+Entry files run once when the map starts, in name order; then the `on.map_start` handlers run. A
+library is loaded with `local count = require("count")` for `scripts\lib\count.lua`, once, and only
+from the same mod. `mod.json` says nothing about scripts.
+
+Press **Refresh** after every change. Refresh checks each script without running it: a mistake shows
+on the mod's row at once, with the file and line. A script changed during Play runs from the next
+Play.
+
+### Three examples
+
+These three mods come with the Snapmap+ sources (`tests\fixtures\scripts\`). Each walk-through says
+what the author writes and what happens.
+
+**A door that opens when three switches are on (map logic).** The mod is one file:
+
+```lua
+api = 1
+
+local on_count = 0
+
+on.input("switch_used", function(switch_node, activator)
+  on_count = on_count + 1
+  if on_count == 3 then
+    node("open_door"):fire(activator)
+  end
+end)
+```
+
+`on.input("switch_used", ...)` gives the mod a **Script** row in the Toybox, under the mod's own
+category. In the map, place two Script nodes and name them (their **Displayname**) `switch_used` and
+`open_door`. Wire each switch's **On Used** to `switch_used`, and wire `open_door`'s **On Fired** to the
+door's **Open**. In Play, each switch runs the function; `on_count` keeps its value for the whole
+map. At the third switch, `node("open_door"):fire(activator)` fires every Script node of this mod
+named `open_door`, and the wire opens the door. Name the handler's first value anything but `node`,
+or it hides the `node` call.
+
+**A pickup that spins and heals (an object that thinks).** The mod has an entityDef
+`generated\decls\entitydef\mods\spin-heal\pickups\spin_heal.decl` (a prop) with a Toybox row for it, as the example crate has,
+and this script:
+
+```lua
+api = 1
+
+on.think("pickups/spin_heal", function(self, dt)
+  self:set_yaw(self:yaw() + 90 * dt)
+  for _, p in ipairs(players()) do
+    if p:distance(self) < 40 and p:health() < 100 then
+      p:set_health(math.min(100, p:health() + 25))
+      self:remove()
+      return
+    end
+  end
+end)
+```
+
+Names in a script are the mod's own, without the folder: `"pickups/spin_heal"` is the entityDef above.
+`on.think` runs the function every frame for every placed or spawned `spin_heal`, with `self` the
+object and `dt` the seconds since the last frame, so it turns 90 degrees a second. When a player comes
+within 40 units with less than 100 health, it gives back 25 and removes itself.
+
+**A two-attack enemy (a demon).** The mod has a demon entityDef `ai/brute` with its own animWeb that
+has `melee` and `throw` nodes; the throw clip's release frame has the md6 row `ae_notify "throw"`, and
+both clips end with `ae_notify "attack_done"`. It also has a projectile decl `brute/rock`. The script:
+
+```lua
+api = 1
+
+on.think("ai/brute", function(self)
+  local p = self:enemy() or players()[1]
+  if not p or self.state.busy then return end
+  self:set_enemy(p)
+  self:face(p)
+  local d = self:distance(p)
+  if d < 120 then
+    self.state.busy = true
+    self:anim_state("melee")
+  elseif self:can_see(p) and now() > (self.state.next_throw or 0) then
+    self.state.busy = true
+    self.state.next_throw = now() + 3
+    self:anim_state("throw")
+  else
+    self:move_to_entity(p)
+  end
+end)
+
+on.anim("ai/brute", "throw", function(self)
+  self:fire("brute/rock", "hand_r", self:enemy())
+end)
+
+on.anim("ai/brute", "attack_done", function(self)
+  self.state.busy = false
+end)
+```
+
+Each frame the brute picks the player it fights and turns to them. Up close it plays `melee`; further
+away, when it can see the player and three seconds have passed since the last throw, it plays
+`throw`; otherwise it walks to the player. `self.state` is a table of the script's own for each
+object. The `ae_notify "throw"` row runs the second function on the release frame, which fires a rock
+from the `hand_r` joint at the enemy; `ae_notify "attack_done"` frees the brute for its next choice.
+The first command a script gives a demon takes it over for the rest of the map; the game still plays
+its pain, damage and death.
+
+### Handlers
+
+A handler is a function the game calls when something happens to one of the mod's objects. `name` is
+an entityDef of the mod (it also covers entityDefs that inherit it); names compare without case.
+
+| Handler | Called |
+|---|---|
+| `on.spawn(name, fn(self))` | when such an object appears, placed or spawned |
+| `on.think(name, fn(self, dt))` | every frame, `dt` the seconds since the last |
+| `on.remove(name, fn(self))` | once, when it is gone |
+| `on.damage(name, fn(self, hit))` | when it takes damage: `hit.amount`, `hit.attacker`, `hit.inflictor`, `hit.damage` (the damage decl), `hit.location` (the body zone), `hit.direction` |
+| `on.death(name, fn(self, hit))` | once, when it dies |
+| `on.pain(name, fn(self, reaction, damage, attacker))` | when a demon starts a pain reaction, such as `PAIN_FALTER` |
+| `on.anim(name, notify, fn(self))` | on an md6 row `ae_notify "<notify>"` of its animations |
+| `on.frame_event(name, command, fn(self, args))` | on an md6 row `ae_notify "<command>:<a>:<b>"`; `args` is `{a, b}` |
+| `on.projectile(name, fn(self, p, decl, origin, dir))` | for every projectile the object launches |
+| `on.input(node name, fn(node, activator))` | when a wire reaches a Script node with that name |
+| `on.map_start(fn)` | once, after the entry files ran |
+| `on.map_end(fn)` | once, when the map ends |
+
+### Calls
+
+Positions are tables `{x = ..., y = ..., z = ...}`; wherever a position is asked for, an object stands
+for its own position. Names are the mod's own, without the folder. A call that changes an object
+works only on the mod's own objects (placed from its entityDefs or spawned by its scripts), except
+that any script may heal a player. Reading works on any object. An object that is gone answers `nil`.
+
+**Time and the log**
+
+| Call | What it does |
+|---|---|
+| `now()` | The game time in seconds. Paused time does not count. |
+| `after(seconds, fn)` | Runs `fn` once, later. Returns a handle; `handle:cancel()` stops it. |
+| `every(seconds, fn)` | Runs `fn` again and again. Returns a handle with `cancel()`. |
+| `run(fn)` | Runs `fn` as a sequence that may `wait`. Returns a handle with `cancel()`. |
+| `wait(seconds)` | Inside `run(...)` only: carries on after that time. |
+| `print(...)`, `warn(...)` | Write a line to the mod's script log. |
+| `require(name)` | Loads `scripts\lib\<name>.lua` of the same mod. |
+
+**Objects**
+
+| Call | What it does |
+|---|---|
+| `spawn(def, pos, [yaw])` | Spawns one of the mod's entityDefs and returns it. |
+| `players()` | The players in the game, as a list. |
+| `entities_near(pos, radius)` | The objects within `radius`, nearest first. |
+| `trace(from, to, [radius], [ignore])` | The first thing on the line: `{pos, normal, fraction, entity}`, or `nil`. A radius makes the line thick. |
+| `nav_ground(pos)` | The floor under a point. |
+| `difficulty()` | The game's difficulty, 0 (easiest) to 4 (Nightmare). |
+| `e:pos()`, `e:set_pos(pos)` | Its position. |
+| `e:yaw()`, `e:set_yaw(degrees)` | Its heading. |
+| `e:axis()` | Its forward, left and up directions. |
+| `e:velocity()`, `e:set_velocity(v)` | Its speed and direction of movement. |
+| `e:health()`, `e:set_health(n)` | Its health. `set_health` heals a player; on the mod's own objects it can also lower health, but not to 0 (use `damage`, so the death plays). |
+| `e:alive()` | Whether it is alive. |
+| `e:def()` | Its entityDef's name. |
+| `e:distance(other)` | The distance to another object or a position. |
+| `e:is_player()` | Whether it is a player. |
+| `e:remove()` | Removes it. |
+| `e:view_angle_to(other, [use_view_pos])` | The angle between where it looks and the other. |
+| `e.state` | A table of your own for this object, kept while it exists. |
+
+**Animation**
+
+| Call | What it does |
+|---|---|
+| `e:anim_state(node, [via])` | Moves its animWeb to that node, through `via` if given. |
+| `e:anim_force(node, [blend])` | Jumps to that node, blending over `blend` seconds. |
+| `e:anim_current()` | The node it is in now. |
+| `e:anim_finished()` | Whether the node asked for has finished. |
+| `e:anim_event(name)` | Whether a step of the last request happened: `DEST_BLEND_START`, `DEST_REACHED`, `VIA_BLEND_IN_START`, `VIA_BLEND_OUT_START` or `FINISHED`. |
+
+**Demons** (only on the mod's own demons; the first command takes the demon over for the map)
+
+| Call | What it does |
+|---|---|
+| `ai:move_to(pos, [tolerance], [{run, strafe, aim_while_moving}])` | Walks or runs to a point. |
+| `ai:move_to_entity(e)` | Goes to an object, following it as it moves. |
+| `ai:stop()` | Stands still. |
+| `ai:move_done()` | Whether the last move ended, and whether it failed. |
+| `ai:face(e or pos)`, `ai:turn_done()` | Turns to face something; whether it has. |
+| `ai:aim_at(e or nil)`, `ai:aim_point(pos or nil)` | Aims at an object or a point; `nil` stops. |
+| `ai:focus_tag(tag or nil)` | Aims from a named joint of its model. |
+| `ai:set_enemy([e])`, `ai:enemy()` | Chooses its enemy (no value: the nearest player); reads it. |
+| `ai:can_see(e)`, `ai:can_see_from(e, joint)` | Whether it sees the object, from its eyes or from a joint. |
+| `ai:aware()`, `ai:awareness([e])` | Whether it knows of its enemy; how well: `unaware`, `lost`, `suspected` or `confirmed`. |
+| `ai:angle_to(target)` | The angle from its facing to the target. |
+| `ai:path_length(pos)`, `ai:can_reach(pos)`, `ai:path_points(pos)` | The walking route to a point. The game works it out in the background, so a call may answer "searching": ask again next frame. |
+| `ai:find_position({...})`, `ai:firing_position({...})` | A good place to go near a target (the settings table names the target, the distances and the kind of place). |
+| `ai:spline_clear(target, spline, seconds, [flags])` | Whether a curved path ahead is free. |
+| `ai:anim_valid(node, tests, [side])` | Whether an animation would end in a good place. |
+| `ai:anim_force_via(dest, via, [blend])` | Plays `via`, then goes to `dest`. |
+| `ai:trigger(on)`, `ai:trigger_pulled()`, `ai:weapon_ready()` | Holds or releases its weapon's trigger; whether it is held; whether the weapon can fire again. |
+| `ai:equip(index)` | Equips an item of its inventory. |
+| `ai:laser(tag, on)`, `ai:laser_state(tag, on)`, `ai:laser_sweep(name)` | Its aiming lasers. |
+| `ai:recoil(weight)` | How much its weapon's recoil animation shows, 0 to 1. |
+| `ai:fire(projectile, joint, target)` | Fires one of the mod's projectiles from a joint at an object or a point; returns the projectile. |
+| `ai:monster_type()` | The game's name for its kind of demon. |
+| `ai:pain_string(text or nil)` | Picks which of its pain animations play. |
+| `ai:block_pain(reaction, seconds)` | Holds back one pain reaction for a time. |
+
+**Combat, effects and sound** (with the mod's own decls; an attacker is one of the mod's own objects,
+and without one the damage comes from the world)
+
+| Call | What it does |
+|---|---|
+| `damage(e, damage, [attacker], [from])`, `e:damage(...)` | Applies a damage decl to an object. |
+| `hitscan(from, dir, damage, [range], [attacker])` | A shot along a line; returns `{pos, normal, entity}` or `nil`. |
+| `radius_damage(pos, damage, [attacker])` | Damage around a point, with the decl's own radius. |
+| `explode(pos, damage, [effect], [attacker])` | An explosion with an effect. |
+| `fx(e, condition)`, `fx_stop(e, condition)` | Starts or stops an effect of the object's own fx decl. |
+| `fx(effect, pos, [dir])`, `fx_move(e, pos, [dir])`, `fx_stop(e)` | Places, moves and removes an effect of the mod. |
+| `sound(e, sound, [channel])` | Plays a sound on an object; `channel` is `any`, `voice`, `body`, `weapon` or `item`. |
+| `e:tag(joint)` | A joint's position and forward direction. |
+| `e:pain()` | The pain reaction a demon is in, or `nil`. |
+| `p:steer(target, [speed])`, `p:explode()` | Steers or explodes a projectile the mod's objects launched. |
+
+**Script nodes and map variables**
+
+| Call | What it does |
+|---|---|
+| `node(name):fire([activator])` | Fires every Script node of this mod with that name; returns how many. |
+| `vars.get(name)` | Reads a map variable (Integer, Number, Boolean or String) by its editor name. |
+| `vars.set(name, value)` | Writes it, kept within the variable's bounds; wired logic that watches it reacts. Returns the value stored. |
+
+The rest of Lua's own `string`, `table`, `math`, `utf8` and `coroutine` libraries is there too;
+`math.random` is seeded for each map.
+
+### Script nodes and map variables
+
+A mod whose scripts call `on.input` gets one **Script** row in its Toybox category. A Script node is
+SnapMap logic: wire anything into it, and wire its **On Fired** out. Its **Displayname** is its role:
+`on.input("name", ...)` answers every Script node of the mod with that name, and `node("name"):fire()`
+fires them. In the Entities tab, the Displayname field offers the names the mod's scripts use, and the
+line under it says what the node does. A node whose name no script uses says so there; firing a name
+no node carries writes one warning to the script log.
+
+`vars.get` and `vars.set` read and write the map's own variables, the ones you make in the editor,
+so a script can drive logic the map's author wired, and the other way round. A name the map does not
+have, a name two variables share, or a value of the wrong type stops the script with a sentence that
+says which.
+
+A placed Script node is an object of the mod: a map, a prefab or a rawmap ZIP that holds one carries
+the mod like any other.
+
+### The script log and the console
+
+Each mod with scripts has a **Script log** in the Mods tab: the lines its `print` and `warn` wrote in
+the current or last Play, and the line that says why its scripts stopped. The row turns red while a
+script is stopped, until the next Play. The Snapmap+ window steps aside during Play, so read the log
+there in the console:
+
+| Command | What it does |
+|---|---|
+| `sh_scripts` | What each mod's scripts are doing in this map, or why they stopped. |
+| `sh_scripts log [mod]` | Print a mod's script log. |
+| `sh_scripts reload` | During Play, run the map's scripts again from the start. Outside Play, check every script of the open map's mods and print each mistake with its file and line. |
+
+### When a script goes wrong
+
+**At Refresh.** A mistake in a script fails the mod's build, like any other mistake in a mod, and the
+row and the Files view show it with the file and line:
+
+- `scripts\door.lua line 4: "end" expected to close "function" on line 2. Correct it, then press Refresh.`
+  (and the same for every other mistake of Lua's own grammar);
+- the file does not start with "api = 1": add `api = 1` as its first line;
+- the file asks for a version of the scripting calls this Snapmap+ does not have: update Snapmap+,
+  or write `api = 1`;
+- the file is compiled Lua, not script text: put the `.lua` source text in the file;
+- the file is not UTF-8 text: save it as UTF-8 text;
+- a `.lua` file outside `scripts\` and `scripts\lib\`: move it there;
+- `"require" found no scripts\lib\<name>.lua in this mod`, or `require` was given a name with
+  folders or `.lua`: add the file or correct the name (`require("fsm")` loads `scripts\lib\fsm.lua`);
+- a name under another mod's folder: name only this mod's own content;
+- a file at the path of the mod's own Script node: give it another name.
+
+A warning does not fail the build: "this mod has no entityDef "ai/dor" for on.spawn; check the name".
+
+**During Play.** Any error stops that mod's scripts for the rest of the map; other mods' scripts, and
+the game, carry on. The log gets one line:
+
+```
+Script stopped: Door Logic, scripts\door.lua line 9: "on_cout" is nothing here, so it cannot be used in arithmetic. Check that it is set before it is used.
+```
+
+The sentence names the mod, the file and line, what went wrong and what to do. The ones you meet most:
+
+- `"x" is nothing here` — a name with no value; check that it is set, and its spelling;
+- `"x" is not a function here` — a call misspelled; check the name of the call;
+- `"move_to" needs a position (a table with x, y and z), got nothing` — each call says what it needs,
+  which value it was given, and what it accepts;
+- `"spawn" can only use this mod's own content; "x" belongs to another mod`, or `... not the game's
+  "x"` — scripts name only their own mod's content;
+- `"set_health" can only heal a player; hurt players with damage(...)`, and `... cannot take health
+  to 0; kill with damage(...) so the death plays`;
+- `"wait" can only be used inside run(function() ... end)`;
+- `"x" works only on this mod's own demons`, or `... can only <do this to> this mod's own entities;
+  this one is not`;
+- `took too long ..., so this mod's scripts stopped for this map. Look for a loop that does not end.`;
+- `the file could not be read, so this mod's scripts did not run. Press Refresh in the Mods tab and
+  play the map again.` — a script was edited after the last Refresh;
+- your own `error("...")` text, as you wrote it.
+
+### What scripts cannot do
+
+Scripts are sandboxed text. A script cannot read or write files, start programs, reach the network,
+the clipboard or the registry, or see your settings, saves or other maps. It cannot run compiled
+code. It can name and change only its own mod's content and objects (players: healing, and damage
+through the mod's damage decls). It sees no other mod's scripts and cannot share values with them.
+Nothing it does outlives the map or reaches the editor. A script that runs on and on without
+returning is stopped after a few seconds, with the line above, so a mistake can never hang the game.
+
+### Co-op
+
+Scripts run on the host only. Players who join need the map's mods, as for any mod map, and run no
+scripts themselves: what the scripts do reaches them as the game's own movement, animation, damage
+and death do. Effects started with `fx` on an object show on every player's screen; put other
+visuals and sounds in the clips' md6 rows, which play on every machine.
+
+---
+
 ## Inside DOOM's Editor
 
 Some of Snapmap+'s features live inside DOOM's own editor rather than in the
