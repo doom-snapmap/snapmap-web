@@ -706,10 +706,21 @@ Download and install now?". **Yes** downloads only what you approved, checks eve
 the map. **No** leaves the map unloaded. Joining a lobby asks the same way. A map whose mods you
 have starts at once.
 
+While the mods download, the game's progress line shows which mod, how many megabytes and the
+percent, for example "Downloading Tyrant (1 of 1): 40.0 of 98.4 MB, 40%.", and the console shows
+the same. A download still running after two seconds asks once "Keep downloading?": **No** cancels
+it and installs nothing more, and the map is not loaded. A mod may be of any size.
+
 The mods a map downloads are that map's own: they go into `mods\maps\<map title>\` and are used only
 by that map, so they never change your own maps or another map's mods. When the map's mods include
-scripts, the question says so: scripts run only inside that map and cannot read or change your
-files (see [Mod scripts](#mod-scripts)).
+scripts, the question says so: "These mods include scripts (15 files). Scripts run only inside this
+map and cannot read or change your files." (see [Mod scripts](#mod-scripts)).
+
+The Mods tab's setting **Play maps whose mods include scripts** is on by default. Turned off, a
+map whose mods include scripts is neither downloaded nor played: "This map's mods include scripts,
+which you turned off in the Mods tab; turn on "Play maps whose mods include scripts" there to play
+it." That holds for a map you downloaded while the setting was on, and for a rawmap or prefab ZIP
+you import or open. Your own maps always play.
 
 `mods\maps\` is a cache. When DOOM starts, Snapmap+ removes the mods of a downloaded map that none of
 your saved maps uses and that you have not played for 30 days. Playing that map again downloads
@@ -753,7 +764,8 @@ The buttons at the top of the list, by their hover text:
 
 Below them, **Filter by name or folder...** narrows the list. At the bottom, the setting **Play maps
 whose mods include scripts** (on by default) decides whether Snapmap+ plays such maps at all: when
-it is off, a map whose mods include scripts is refused before anything downloads.
+it is off, a map, a rawmap or a prefab ZIP whose mods include scripts is refused before anything
+downloads or opens (see [Playing maps that use mods](#playing-maps-that-use-mods)).
 
 **Refresh is the one action that reads your mods again.** Snapmap+ does not watch the folder: after
 you change a mod's files, press Refresh. It builds every mod whose files changed and brings the
@@ -892,8 +904,14 @@ and keeps every file that names it in step. A changed bank is heard after you re
 in the Toybox: a map or a module prefab that names it loads it, and it then moves, saves and plays
 like a stock module. A prefab of rooms built from mod modules carries the mod like any prefab.
 
-**Virtual textures.** A mod's own virtual-texture pages are not drawn on lit models such as demons
-and props in this version: give a mod's models ordinary textures.
+**Virtual textures.** A mod can carry its own virtual-texture board: the pages its lit materials
+(a demon's body, its weapon, a prop) stream their detail from, under
+`assets\virtualtextures\mods\<your folder's name>\`. Its materials read that board with the game's
+own demon render programs, as the game's demons read the game's board, on Vulkan and on OpenGL;
+nothing of it goes into the game's own board. DOOM has room for a limited number of boards on one
+map (about 26 to 28 at once). A map whose mods need more draws the rest with plain textures and
+says so: "DOOM has no room for another mod texture board on this map, so <mod> draws with plain
+textures; a map with fewer mods that carry their own textures avoids this."
 
 ### Editor tweaks
 
@@ -934,9 +952,11 @@ after a Play round. A published copy of the map changes only when you publish ag
 
 Publish from DOOM's editor as usual. Before the map goes up, Snapmap+ uploads the mods it uses to
 the mod store, so other players can download them. Files identical to the game's own are never
-uploaded, and a large mod goes up in parts by itself. The first time, the game asks once whether you
-agree to upload; **No** leaves the map unpublished. A map over SnapMap's own 10 MB map limit is
-refused before anything is sent.
+uploaded. A mod may be of any size and hold any number of files: a large one goes up in parts by
+itself, and a publish that was cut off sends only the parts the store does not have yet. The first
+time, the game asks once whether you agree to upload; **No** leaves the map unpublished. A map over
+SnapMap's own 10 MB map limit (the map service's, not Snapmap+'s) is refused before anything is
+sent.
 
 Plain saves never upload anything. Publishing the map again sends your mod as it is now; players
 of the map get the files it was published with. Unpublishing a map releases its mods on the mod
