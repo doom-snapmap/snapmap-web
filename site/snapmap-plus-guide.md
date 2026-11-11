@@ -41,12 +41,18 @@ console, Snapmap+'s commands and cvars all carry the short `sh_` prefix — `sh_
 
 A few practical notes:
 
+- **"Windows protected your PC"?** Snapmap+'s files are not code-signed yet, so Windows SmartScreen
+  may stop `snapmap-plus.exe` the first time. Choose **More info**, check that the file came from the
+  Snapmap+ site or the project's GitHub Releases page, then choose **Run anyway**. Every release is
+  built from source on GitHub; anyone with the GitHub CLI can confirm a download with
+  `gh attestation verify snapmap-plus.exe --repo doom-snapmap/snapmap-plus`.
 - **Close DOOM first.** A running game locks the files — the installer detects this and asks you to
   close it rather than failing cryptically.
 - If auto-detection can't find DOOM (a non-Steam copy, say), run it from a terminal instead and point
   it at the folder: `snapmap-plus install --doom "C:\path\to\DOOM"`.
-- While Snapmap+ is in **beta**, the installer says "No stable release has been published yet" and
-  installs the newest beta automatically — nothing extra to do.
+- The installer takes the newest **stable** release. To try betas as well, use
+  `snapmap-plus update --beta`, which takes the newest release of either kind. Snapmap+ never moves you
+  to an older version by itself; `snapmap-plus update --release <version>` installs a specific one.
 - **Already installed?** Double-clicking `snapmap-plus.exe` again shows your installed version, tells you
   when a newer one is available (press Enter to update), and takes any command — `update`, `changelog`,
   `uninstall`, `status` — right there, no terminal needed.
@@ -60,6 +66,8 @@ A few practical notes:
   `overrides` and `strings` folders of SnapHak and early Snapmap+) become one mod named **My
   overrides** in your mods list, and those two folders go to the Recycle Bin. Nothing to redo.
 - **Uninstalling:** `snapmap-plus uninstall` restores your DOOM folder to exactly what it was before.
+  If its record is gone, `snapmap-plus uninstall --doom "C:\path\to\DOOM"` still finds and removes
+  Snapmap+'s files there.
   Your own Snapmap+ data (`config.json`, prefabs, mods, rawmaps under `%LOCALAPPDATA%\snapmap-plus`) is
   left untouched.
 - `snapmap-plus help` in a terminal lists everything else: `status`, `changelog`, `version`.

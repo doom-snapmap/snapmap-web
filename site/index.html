@@ -391,9 +391,11 @@
     </div>
     <div id="release-provenance">
       <strong>Release provenance.</strong> Snapmap+'s Windows binaries &mdash; the <code>snapmap-plus.exe</code> installer
-      and the two overlay DLLs &mdash; are currently unsigned. Every release is built from source in GitHub Actions,
-      with provenance verifiable via
-      <code>gh attestation verify --repo doom-snapmap/snapmap-plus</code>.
+      and the two overlay DLLs &mdash; are currently unsigned, so Windows SmartScreen may show
+      &ldquo;Windows protected your PC&rdquo; the first time you run the installer: choose <strong>More info</strong>,
+      then <strong>Run anyway</strong>. Every release is built from source in GitHub Actions; check a download with
+      <code>gh attestation verify snapmap-plus.exe --repo doom-snapmap/snapmap-plus</code>
+      (or the same command with <code>snapmap-plus-bundle.zip</code>).
     </div>
     <div>
       Snapmap+ is an open-source recreation, built from our own research, of the original
