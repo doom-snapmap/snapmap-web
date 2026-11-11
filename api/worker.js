@@ -366,13 +366,69 @@ function cachePut(key, value, ttlSec) {
 
 /* ---------------- sessions (KV) ---------------- */
 
+/* A session lives at most SESSION_TTL, and never past the GitHub refresh token
+ * behind it. An expiring GitHub user token (8 hours for a GitHub App) is renewed
+ * with its refresh token shortly before it lapses; a session whose token can no
+ * longer be renewed is removed, so the page shows the visitor signed out. */
+async function saveSession(env, sid, user) {
+  await env.SESSIONS.put('session:' + sid, JSON.stringify(user), { expiration: user.session_exp });
+}
+
+/* GitHub's token response -> the session's token fields. */
+function tokenFields(tok, now) {
+  const out = { token: tok.access_token, token_exp: 0, refresh: '', refresh_exp: 0 };
+  if (Number(tok.expires_in) > 0) out.token_exp = now + Number(tok.expires_in);
+  if (tok.refresh_token) {
+    out.refresh = tok.refresh_token;
+    if (Number(tok.refresh_token_expires_in) > 0) out.refresh_exp = now + Number(tok.refresh_token_expires_in);
+  }
+  return out;
+}
+
+/* The session's end: SESSION_TTL from sign-in, capped by an expiring token's renewal limit. */
+function sessionEnd(fields, signedInAt) {
+  let end = signedInAt + SESSION_TTL;
+  if (fields.token_exp && !fields.refresh) end = Math.min(end, fields.token_exp);
+  if (fields.refresh_exp) end = Math.min(end, fields.refresh_exp);
+  return end;
+}
+
+async function exchangeToken(env, params) {
+  const res = await fetch('https://github.com/login/oauth/access_token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': 'snapmap-plus-community' },
+    body: JSON.stringify({ client_id: CLIENT_ID, client_secret: env.CLIENT_SECRET, ...params }),
+  });
+  if (!res.ok) return null;
+  const tok = await res.json();
+  return tok.access_token ? tok : null;
+}
+
 async function getSession(env, req) {
   const auth = req.headers.get('Authorization') || '';
   const m = auth.match(/^Bearer\s+([0-9a-f]{64})$/i);
   if (!m) return null;
   const raw = await env.SESSIONS.get('session:' + m[1]);
   if (!raw) return null;
-  try { return { sid: m[1], user: JSON.parse(raw) }; } catch { return null; }
+  let user;
+  try { user = JSON.parse(raw); } catch { return null; }
+  const now = Math.floor(Date.now() / 1000);
+  if (!user.session_exp) user.session_exp = now + SESSION_TTL;   // a session stored before expiry tracking
+  if (user.token_exp && now > user.token_exp - 300) {
+    const tok = user.refresh ? await exchangeToken(env, { grant_type: 'refresh_token', refresh_token: user.refresh }) : null;
+    if (!tok) {
+      await env.SESSIONS.delete('session:' + m[1]);
+      return null;
+    }
+    Object.assign(user, tokenFields(tok, now));
+    user.session_exp = Math.min(user.session_exp, sessionEnd(user, now));
+    if (user.session_exp <= now + 60) {
+      await env.SESSIONS.delete('session:' + m[1]);
+      return null;
+    }
+    await saveSession(env, m[1], user);
+  }
+  return { sid: m[1], user };
 }
 
 async function rateOk(env, session, kind) {
@@ -389,7 +445,7 @@ async function rateOk(env, session, kind) {
       id = String(user.id || '');
       if (!/^[1-9]\d{0,19}$/.test(id)) throw new Error('account id missing');
       session.user.id = id;
-      await env.SESSIONS.put('session:' + session.sid, JSON.stringify(session.user), { expirationTtl: SESSION_TTL });
+      await saveSession(env, session.sid, session.user);
     }
     const objectId = env.WRITE_QUOTAS.idFromName('github:' + id);
     const result = await env.WRITE_QUOTAS.get(objectId).consume(kind);
@@ -424,6 +480,30 @@ function workerOrigin(req) {
   return new URL(req.url).origin;
 }
 
+/* The OAuth state is tied to the browser that started the sign-in: a cookie
+ * scoped to the callback carries it, and the callback accepts only a state that
+ * matches its own cookie and is still recorded. Another browser's callback link
+ * cannot sign this one in. */
+const STATE_COOKIE = 'smp_oauth_state';
+
+function stateCookie(value, maxAge) {
+  return STATE_COOKIE + '=' + value + '; Path=/auth/callback; Max-Age=' + maxAge + '; HttpOnly; Secure; SameSite=Lax';
+}
+
+function cookieValue(req, name) {
+  for (const part of (req.headers.get('Cookie') || '').split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k === name) return v.join('=');
+  }
+  return '';
+}
+
+function redirect(location, cookie) {
+  const headers = { Location: location };
+  if (cookie) headers['Set-Cookie'] = cookie;
+  return new Response(null, { status: 302, headers });
+}
+
 async function authLogin(env, req) {
   if (!env.CLIENT_SECRET) return json({ error: 'sign-in not configured yet' }, 503);
   const state = randomHex(16);
@@ -432,26 +512,22 @@ async function authLogin(env, req) {
   u.searchParams.set('client_id', CLIENT_ID);
   u.searchParams.set('redirect_uri', workerOrigin(req) + '/auth/callback');
   u.searchParams.set('state', state);
-  return Response.redirect(u.toString(), 302);
+  return redirect(u.toString(), stateCookie(state, STATE_TTL));
 }
 
 async function authCallback(env, req, url) {
   const back = SITE_BASE + '/community.html';
+  const clear = stateCookie('', 0);
+  const fail = () => redirect(back + '#login_error', clear);
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
-  if (!code || !state) return Response.redirect(back + '#login_error', 302);
+  if (!code || !state || !/^[0-9a-f]{32}$/.test(state) || cookieValue(req, STATE_COOKIE) !== state) return fail();
   const seen = await env.SESSIONS.get('state:' + state);
-  if (!seen) return Response.redirect(back + '#login_error', 302);
+  if (!seen) return fail();
   await env.SESSIONS.delete('state:' + state);
 
-  const tokRes = await fetch('https://github.com/login/oauth/access_token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': 'snapmap-plus-community' },
-    body: JSON.stringify({ client_id: CLIENT_ID, client_secret: env.CLIENT_SECRET, code }),
-  });
-  if (!tokRes.ok) return Response.redirect(back + '#login_error', 302);
-  const tok = await tokRes.json();
-  if (!tok.access_token) { console.log('oauth exchange:', JSON.stringify(tok).slice(0, 200)); return Response.redirect(back + '#login_error', 302); }
+  const tok = await exchangeToken(env, { code });
+  if (!tok) return fail();
 
   const userRes = await fetch(API + '/user', {
     headers: {
@@ -459,20 +535,23 @@ async function authCallback(env, req, url) {
       'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'snapmap-plus-community',
     },
   });
-  if (!userRes.ok) return Response.redirect(back + '#login_error', 302);
+  if (!userRes.ok) return fail();
   const user = await userRes.json();
 
+  const now = Math.floor(Date.now() / 1000);
+  const fields = tokenFields(tok, now);
   const sid = randomHex(32);
-  await env.SESSIONS.put('session:' + sid, JSON.stringify({
-    token: tok.access_token,
+  await saveSession(env, sid, {
+    ...fields,
+    session_exp: sessionEnd(fields, now),
     id: String(user.id),
     login: user.login,
     name: user.name || user.login,
     avatar: user.avatar_url,
-  }), { expirationTtl: SESSION_TTL });
+  });
   /* Return the opaque session in the URL fragment; the page stores it and clears
    * the fragment. GitHub tokens remain in KV. */
-  return Response.redirect(back + '#session=' + sid, 302);
+  return redirect(back + '#session=' + sid, clear);
 }
 
 /* ---------------- read handlers ---------------- */
