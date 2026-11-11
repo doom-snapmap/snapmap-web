@@ -382,7 +382,9 @@ land on the thing you want.
 
 **Asset** (right) — once you pick something, its actual preview shows here: materials and images render
 as real pixels (decoded straight from the game's own texture data, not a stand-in icon), and sounds get a
-play/stop button so you can listen before committing. Below the preview:
+play/stop button so you can listen before committing. Sounds play only while a map is open, and your
+sound settings are put back as they were when the sound stops. When a preview or a sound cannot be
+shown, the panel says why. Below the preview:
 
 - **Copy** — copies the asset's path, for pasting into a decl by hand.
 - **Apply to selection** — writes the asset onto whichever entity you currently have selected, immediately.
@@ -535,12 +537,11 @@ A Timeline is organized into **entity events** and **eventcalls**. For every ent
 you add one entity-event tab; under that tab, you add one eventcall per script you want to run on that
 entity.
 
-- The **+** tab adds a new entity-event tab, labeled **Item N** (matching the underlying decl's own
-  `item[N]` numbering).
+- The **+** tab adds a new entity-event tab, labeled with the name (or ID) of the entity it runs on.
 - **Runs on** picks which entity that tab's eventcalls apply to — type an ID, pick from the dropdown, or
   select the entity in the SnapMap editor and click **Use current selection** (exactly one entity must be
   selected for that to work).
-- **Add Eventcall** appends a new, blank script call under the current tab.
+- **Add event** appends a new, blank script call under the current tab.
 - Each eventcall has a **Time** (milliseconds of delay between the Timeline firing and this eventcall
   running — can be left blank) and an event/script name — type to search, or pick from the dropdown. Once
   a script is picked, its specific parameters appear below it as proper typed fields (a checkbox for a
@@ -548,7 +549,7 @@ entity.
   every one of these needs a value, or you'll hit errors.
 - **What does this event do?** (collapsible, under a configured eventcall) gives a short explanation of
   the selected script, when one's on file.
-- **Save Timeline** commits your edits to the Timeline entity. As with any other entity, **you still need
+- **Save** commits your edits to the Timeline entity. As with any other entity, **you still need
   to save the map itself** from SnapMap's own menu afterward. **Revert** discards local edits and re-reads
   the Timeline as it currently exists on the map.
 
