@@ -7,7 +7,7 @@ Serves the website's Community pages through GitHub Discussions on this reposito
 ## Contents
 
 - `worker.js` defines the HTTP API, authentication, discussion operations and media handling.
-- `quota.js` and `quota_store.js` coordinate Community write limits across a user's sessions.
+- `quota.js` and `quota_store.js` coordinate write limits across a user's sessions, and mod store limits per hashed client address.
 - `mods_store.js` defines the `/mods/*` routes, uploads in parts, the streamed check of each build archive and the scheduled purge.
 - `mods_registry.js` and `mods_registry_store.js` hold the mod store index, its anonymous claims and the uploads in parts in progress.
 - `wrangler.toml` binds `SESSIONS` KV, `MEDIA` and `MODS` R2, the SQLite `WRITE_QUOTAS` and `MOD_REGISTRY` Durable Objects, the `MODS_BLOCKED` variable and the daily purge trigger.
@@ -72,9 +72,9 @@ callers get the same allowlist as the rest of the API.
 
 The store imposes no limit of its own (the owner's decision 26 of the 1.0 program): not
 on a build's size, its number of files, one file's size, its scripts, the builds one
-claim names, a published item's reference or the length of a name or path, and there is
-no per-address rate limit. What remains is what the platform and the archive form fix,
-stated here as theirs:
+claim names, a published item's reference or the length of a name or path. The per-address
+hourly limits below are not limits on a mod: they protect the bucket and its bill from
+abuse. What remains is what the platform and the archive form fix, stated here as theirs:
 
 - one request body: 100 MB (100,000,000 bytes) on the Free and Pro plans (200 MB
   Business, 500 MB Enterprise). An archive up to one part goes in one `PUT`; a larger one
@@ -209,6 +209,16 @@ re-claim that leaves the build out) removes it from the index and deletes its ob
 once. The daily cron (`[triggers]` in `wrangler.toml`) collects uploads nothing ever
 claimed, past the hour, and uploads in parts abandoned for a day, in batches; the next
 run continues.
+
+Hourly limits per client address and UTC hour: 64 build uploads, 4 GiB of declared
+upload bytes, 20,000 reads (`GET` or `HEAD`) and 64 claim or release calls. A publish in
+parts counts as one upload of its whole size, when its upload starts: its parts, its
+resumes and its completion count nothing, so a large publish is never stopped half way.
+Exhaustion returns 429 with `Retry-After`. The counters live in `WRITE_QUOTAS` objects named
+`mods-address:<digest>`; the raw address is never stored. IPv6 addresses are keyed by their
+/64. Set the optional secret `MODS_ADDRESS_KEY` to make the digest an HMAC that cannot be
+reversed by enumerating addresses. Uploads and claims fail closed with 503 when quota storage
+is unavailable; reads fail open.
 
 Takedown is the `MODS_BLOCKED` variable in `wrangler.toml`: a JSON array of build
 hashes. Edit it and redeploy. Every route answers a blocked hash with 451 and the

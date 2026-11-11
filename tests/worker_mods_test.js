@@ -15,6 +15,7 @@ const workerURL = dataURL(read('worker.js').replace('./request_body.js', bodyURL
   .replace("export { CommunityQuota } from './quota.js';", '').replace("export { ModRegistry } from './mods_registry.js';", ''));
 const modsModule = import(modsURL);
 const workerModule = import(workerURL);
+const quotaModule = import(dataURL(read('quota_store.js')));
 const registryModule = import(dataURL(read('mods_registry_store.js')));
 
 const DAY = 86400000;
@@ -158,14 +159,25 @@ function memoryBucket() {
 }
 
 async function modsEnv(extra = {}) {
+  const { initializeQuota, consumeModQuota } = await quotaModule;
   const registry = await registryModule;
   const clock = { offset: 0, now() { return Date.now() + this.offset; } };
+  const quotaObjects = new Map();
+  const names = [];
   const storage = sqliteStorage();
   registry.initializeRegistry(storage);
   const env = {
-    clock, registryStorage: storage,
+    clock, names, registryStorage: storage,
     MODS: memoryBucket(),
     MODS_BLOCKED: '[]',
+    WRITE_QUOTAS: {
+      idFromName(name) { names.push(name); return name; },
+      get(name) {
+        if (!quotaObjects.has(name)) { const s = sqliteStorage(); initializeQuota(s); quotaObjects.set(name, s); }
+        const s = quotaObjects.get(name);
+        return { consumeMods: async entries => consumeModQuota(s, entries, clock.now()) };
+      },
+    },
     MOD_REGISTRY: {
       idFromName(name) { assert.equal(name, 'registry'); return name; },
       get() {
@@ -683,6 +695,11 @@ test('every refusal on every mod route is one plain sentence', async () => {
   const down = await fetchWorker(env, call('GET', '/mods/build/' + hash));
   assert.equal(down.status, 503);
   assertSentence((await down.json()).error, 'index down');
+  const limitedEnv = await modsEnv();
+  for (let i = 0; i < 64; i++) await fetchWorker(limitedEnv, postJson('/mods/claim', { ref: 'a', builds: ['d'.repeat(64)] }));
+  const limited = await fetchWorker(limitedEnv, postJson('/mods/claim', { ref: 'a', builds: ['d'.repeat(64)] }));
+  assert.equal(limited.status, 429);
+  assertSentence((await limited.json()).error, 'rate limited');
 });
 
 test('archive PUT refuses wrong type, no length, oversize and malformed hashes before reading', async () => {
@@ -759,6 +776,98 @@ test('blocked hashes are refused with 451 on every route', async () => {
   assert.deepEqual((await claim.json()).blocked, [clean.hash]);
   env.MODS_BLOCKED = '{"not":"a list"}';
   assert.equal((await fetchWorker(env, call('GET', '/mods/build/' + clean.hash))).status, 503);
+});
+
+/* ---------------- quotas ---------------- */
+
+test('per-address limits exhaust with 429, use hashed names and leave other addresses alone', async () => {
+  const env = await modsEnv();
+  const archive = build();
+  for (let i = 0; i < 64; i++) assert.notEqual((await put(env, archive)).status, 429, 'put ' + i);
+  const limited = await put(env, archive);
+  assert.equal(limited.status, 429);
+  assert.match(limited.headers.get('Retry-After'), /^\d+$/);
+  const elsewhere = call('PUT', '/mods/build/' + archive.hash, { body: archive.bytes, headers: {
+    'CF-Connecting-IP': '198.51.100.9', 'Content-Type': 'application/zip', 'Content-Length': String(archive.bytes.length) } });
+  assert.equal((await fetchWorker(env, elsewhere)).status, 200);
+  assert.ok(env.names.length > 0);
+  for (const name of env.names) {
+    assert.match(name, /^mods-address:[0-9a-f]{64}$/);
+    assert.ok(!name.includes(ADDRESS));
+  }
+  const keyed = await modsEnv({ MODS_ADDRESS_KEY: 'local-test-key' });
+  await fetchWorker(keyed, call('GET', '/mods/build/' + archive.hash));
+  assert.notEqual(keyed.names[0], env.names[0]);
+
+  const failing = await modsEnv();
+  failing.WRITE_QUOTAS = { idFromName: () => 'x', get: () => ({ consumeMods: async () => { throw new Error('down'); } }) };
+  assert.equal((await put(failing, archive)).status, 503);
+  assert.equal((await fetchWorker(failing, postJson('/mods/claim', { ref: 'a', builds: [archive.hash] }))).status, 503);
+  assert.equal((await fetchWorker(failing, call('GET', '/mods/build/' + archive.hash))).status, 404, 'reads fail open');
+});
+
+test('the byte quota refuses an upload that would exceed the hourly bytes', async () => {
+  const env = await modsEnv();
+  const { MOD_LIMITS } = await quotaModule;
+  let first = true;
+  const original = env.WRITE_QUOTAS.get;
+  env.WRITE_QUOTAS.get = name => {
+    const stub = original(name);
+    if (first) { first = false; stub.consumeMods([['mod_bytes', MOD_LIMITS.mod_bytes - 4]]); }
+    return stub;
+  };
+  const response = await put(env, build());
+  assert.equal(response.status, 429);
+  assert.equal(env.MODS.objects.size, 0);
+});
+
+test('mod quota admits each limit exactly and all-or-nothing across kinds', async () => {
+  const { initializeQuota, consumeModQuota, MOD_LIMITS } = await quotaModule;
+  assert.deepEqual({ ...MOD_LIMITS }, { mod_build_put: 64, mod_bytes: 4 * 1024 ** 3, mod_get: 20000, mod_claim: 64 });
+  const storage = sqliteStorage();
+  initializeQuota(storage);
+  const hour = 3600000 * 10;
+  for (const kind of ['mod_build_put', 'mod_claim', 'mod_get']) {
+    for (let i = 0; i < MOD_LIMITS[kind]; i++) assert.equal(consumeModQuota(storage, [[kind, 1]], hour).allowed, true);
+    assert.equal(consumeModQuota(storage, [[kind, 1]], hour + 3599999).allowed, false, kind);
+    assert.equal(consumeModQuota(storage, [[kind, 1]], hour + 3600000).allowed, true, kind);
+  }
+  const fresh = sqliteStorage();
+  initializeQuota(fresh);
+  assert.equal(consumeModQuota(fresh, [['mod_build_put', 1], ['mod_bytes', MOD_LIMITS.mod_bytes]], hour).allowed, true);
+  assert.deepEqual(consumeModQuota(fresh, [['mod_build_put', 1], ['mod_bytes', 1]], hour + 1), { allowed: false, kind: 'mod_bytes' });
+  assert.equal(fresh.sql.exec("SELECT used FROM mod_quota WHERE kind = 'mod_build_put'").toArray()[0].used, 1, 'refusal spent nothing');
+  for (const bad of [[], [['post', 1]], [['mod_get', 0]], [['mod_get', 1], ['mod_get', 1]], [['mod_get', 1.5]], [['mod_blob_put', 1]]]) {
+    assert.throws(() => consumeModQuota(storage, bad, hour));
+  }
+});
+
+test('addresses normalize to IPv4 or an IPv6 /64', async () => {
+  const { normalizeAddress } = await modsModule;
+  assert.equal(normalizeAddress('203.0.113.7'), '203.0.113.7');
+  assert.equal(normalizeAddress('2001:db8:1:2:3:4:5:6'), '2001:db8:1:2::/64');
+  assert.equal(normalizeAddress('2001:DB8:1:2::9'), '2001:db8:1:2::/64');
+  assert.equal(normalizeAddress('2001:db8::'), '2001:db8:0:0::/64');
+  assert.equal(normalizeAddress('::ffff:198.51.100.4'), '198.51.100.4');
+  for (const junk of [null, '', 'example', '1::2::3', '1:2:3:4:5:6:7:8:9']) assert.equal(normalizeAddress(junk), 'unknown');
+});
+
+test('a publish in parts counts as one upload, so a large publish is never stopped half way', async () => {
+  const env = await modsEnv();
+  for (let i = 0; i < 63; i++) assert.notEqual((await put(env, build({ files: [] }))).status, 429, 'put ' + i);
+  const archive = largeBuild();
+  const size = archive.bytes.length;
+  assert.equal((await startParts(env, archive.hash, size)).status, 201, 'the 64th upload');
+  assert.equal((await sendPart(env, archive.hash, size, 1, slice(archive.bytes, 1))).status, 200);
+  assert.equal((await startParts(env, archive.hash, size)).status, 200, 'a resume counts nothing');
+  assert.equal((await sendPart(env, archive.hash, size, 2, slice(archive.bytes, 2))).status, 200);
+  assert.equal((await completeParts(env, archive.hash, size)).status, 201);
+  assert.equal((await put(env, build({ files: [] }))).status, 429, 'the 65th upload this hour');
+  const other = await modsEnv();
+  assert.equal((await startParts(other, archive.hash, size)).status, 201);
+  const { MOD_LIMITS } = await quotaModule;
+  for (let i = 0; i < MOD_LIMITS.mod_build_put - 1; i++) await put(other, build({ files: [] }));
+  assert.equal((await startParts(other, sha(Buffer.from('another')), size)).status, 429, 'a new upload in parts is an upload');
 });
 
 /* ---------------- claims, serving window, release and purge ---------------- */
@@ -1029,7 +1138,9 @@ test('no limit on files per mod, builds per claim or mod.json size', async () =>
   assert.equal(sha(Buffer.from(await got.arrayBuffer())), sha(many.bytes));
 
   const builds = Array.from({ length: 600 }, () => build({ files: [] }));
-  for (const b of builds) assert.equal((await put(env, b)).status, 201);
+  for (const [i, b] of builds.entries()) {
+    assert.equal((await put(env, b, { 'CF-Connecting-IP': '198.51.' + (i >> 6) + '.' + (i & 63) })).status, 201);
+  }
   const made = await fetchWorker(env, postJson('/mods/claim', { ref: 'a map naming 600 mods', builds: builds.map(b => b.hash) }));
   assert.equal(made.status, 201);
   const { claim, secret } = await made.json();

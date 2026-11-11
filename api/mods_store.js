@@ -8,9 +8,10 @@
  *
  * The store imposes no limit of its own on a build: not on its size, its file count, one
  * file's size, its scripts, the builds one claim names, or the length of a name or path.
- * What remains is what the platform and the archive format fix, stated where they apply:
- * one request body (which is why a large build goes in parts), R2's multipart rules, and
- * the ZIP form Snapmap+ writes (no ZIP64: at most 65,535 entries and 4 GiB). */
+ * What remains is what the platform fixes, stated where it applies: one request body
+ * (which is why a large build goes in parts) and R2's multipart rules. The per-address
+ * hourly limits (WRITE_QUOTAS) are not limits on a mod: they protect the bucket and its
+ * bill from abuse, and a publish in parts counts as one upload against them. */
 
 import { RequestError, readJsonObject } from './request_body.js';
 
@@ -116,9 +117,70 @@ function blockedSet(env) {
   return blockedCache.set;
 }
 
+function retryAfterHour() {
+  return String(Math.max(1, Math.ceil((3600000 - (Date.now() % 3600000)) / 1000)));
+}
+
 function blockedResponse(hashes) {
   return refuse(hashes.length === 1 ? 'This build was taken down from the mod store.' : 'Some of these builds were taken down from the mod store.',
     451, { blocked: hashes });
+}
+
+/* ---------------- per-address quotas ---------------- */
+
+/* IPv6 clients are keyed by their /64, since one host can rotate freely inside it. */
+export function normalizeAddress(raw) {
+  const value = String(raw || '').trim().toLowerCase().replace(/%.*$/, '');
+  if (!value.includes(':')) return /^\d{1,3}(\.\d{1,3}){3}$/.test(value) ? value : 'unknown';
+  let text = value;
+  const dotted = text.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(2).map(Number);
+    text = dotted[1] + ((a << 8) | b).toString(16) + ':' + ((c << 8) | d).toString(16);
+  }
+  const halves = text.split('::');
+  if (halves.length > 2) return 'unknown';
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0) return 'unknown';
+  const groups = [...head, ...Array(fill).fill('0'), ...tail].map(group => (/^[0-9a-f]{1,4}$/.test(group) ? parseInt(group, 16) : NaN));
+  if (groups.length !== 8 || groups.some(Number.isNaN)) return 'unknown';
+  if (groups.slice(0, 5).every(group => group === 0) && groups[5] === 0xffff) {
+    return [groups[6] >> 8, groups[6] & 255, groups[7] >> 8, groups[7] & 255].join('.');   // IPv4-mapped
+  }
+  return groups.slice(0, 4).map(group => group.toString(16)).join(':') + '::/64';
+}
+
+/* Only a digest of the address names the quota object. With the optional MODS_ADDRESS_KEY
+ * secret the digest is an HMAC, so it cannot be reversed by enumerating addresses. */
+async function addressKey(req, env) {
+  const data = new TextEncoder().encode('snapmap-mods-address:' + normalizeAddress(req.headers.get('CF-Connecting-IP')));
+  if (env.MODS_ADDRESS_KEY) {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(env.MODS_ADDRESS_KEY)),
+      { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return hex(await crypto.subtle.sign('HMAC', key, data));
+  }
+  return sha256Hex(data);
+}
+
+/* Writes fail closed when quota storage is unavailable; reads fail open so installed
+ * content stays fetchable through a quota outage. */
+async function admit(req, env, entries, failOpen) {
+  try {
+    const key = await addressKey(req, env);
+    const stub = env.WRITE_QUOTAS.get(env.WRITE_QUOTAS.idFromName('mods-address:' + key));
+    const result = await stub.consumeMods(entries);
+    if (typeof result?.allowed !== 'boolean') throw new Error('invalid quota result');
+    return result.allowed;
+  } catch {
+    if (failOpen) { console.log('mods: read quota unavailable; admitting'); return true; }
+    throw new RequestError(UNAVAILABLE, 503);
+  }
+}
+
+function rateLimited() {
+  return refuse('Too many mod store requests came from this address this hour; try again later.', 429, {}, { 'Retry-After': retryAfterHour() });
 }
 
 /* ---------------- registry ---------------- */
@@ -720,6 +782,7 @@ function objectHeaders(obj, hash, scripts) {
  * before it asks the player. */
 async function serveBuild(req, env, hash) {
   if (blockedSet(env).has(hash)) return blockedResponse([hash]);
+  if (!(await admit(req, env, [['mod_get', 1]], true))) return rateLimited();
   const served = await registry(env, 'buildServed', hash);
   if (!served) return refuse(NO_BUILD, 404);
   const obj = req.method === 'HEAD' ? await env.MODS.head(served.object) : await env.MODS.get(served.object);
@@ -745,6 +808,7 @@ async function putBuild(req, env, hash) {
   if (refusal) { await discard(req); return refusal; }
   if (length > PART_SIZE) { await discard(req); return refuse('An archive over 95 MiB goes to the mod store in parts.', 413); }
   if (length < 22) { await discard(req); return refuse(NOT_ZIP, 422); }
+  if (!(await admit(req, env, [['mod_build_put', 1], ['mod_bytes', length]], false))) { await discard(req); return rateLimited(); }
   const held = await heldAlready(env, hash, length);
   if (held) {
     /* Read the body to its end before answering: a client still sending would otherwise
@@ -802,7 +866,9 @@ async function readSize(req) {
 }
 
 /* POST /mods/build/<hash>/parts {"size"}: starts an upload in parts, or resumes the one of
- * this build at this size, answering which parts the store holds already. */
+ * this build at this size, answering which parts the store holds already. Only a new upload
+ * counts against the per-address limits, as one upload of its whole size: its parts, its
+ * resumes and its completion count nothing, so a publish is never stopped half way. */
 async function startParts(req, env, hash) {
   if (blockedSet(env).has(hash)) { await discard(req); return blockedResponse([hash]); }
   const size = await readSize(req);
@@ -810,6 +876,7 @@ async function startParts(req, env, hash) {
   if (held) return reply({ build: hash, size: held.size, scripts: held.scripts, stored: true }, 200);
   const session = await registry(env, 'uploadSession', hash, size);
   if (session) return sessionReply(hash, size, session, 200);
+  if (!(await admit(req, env, [['mod_build_put', 1], ['mod_bytes', size]], false))) return rateLimited();
   const object = newObject(hash);
   const upload = await env.MODS.createMultipartUpload(object, { httpMetadata: { contentType: 'application/zip', cacheControl: IMMUTABLE } });
   const opened = await registry(env, 'openUpload', { hash, size, object, upload: upload.uploadId, partSize: PART_SIZE, parts: partsOf(size) });
@@ -902,6 +969,7 @@ function hashArray(value) {
 }
 
 async function postClaim(req, env) {
+  if (!(await admit(req, env, [['mod_claim', 1]], false))) { await discard(req); return rateLimited(); }
   const body = await readRequestJson(req);
   if (!displayText(body.ref) || !body.ref.length) return refuse('The claim names no published item.', 400);
   const builds = hashArray(body.builds);
@@ -921,6 +989,7 @@ async function postClaim(req, env) {
 }
 
 async function postRelease(req, env) {
+  if (!(await admit(req, env, [['mod_claim', 1]], false))) { await discard(req); return rateLimited(); }
   const body = await readRequestJson(req);
   if (typeof body.claim !== 'string' || !HEX32.test(body.claim)) return refuse('The release names no claim.', 400);
   if (typeof body.secret !== 'string' || !HEX64.test(body.secret)) return refuse(BAD_SECRET, 400);
@@ -983,7 +1052,7 @@ export async function handleMods(req, env, path) {
 }
 
 async function routeMods(req, env, path) {
-  if (!env.MODS || !env.MOD_REGISTRY) { await discard(req); return refuse(UNAVAILABLE, 503); }
+  if (!env.MODS || !env.MOD_REGISTRY || !env.WRITE_QUOTAS) { await discard(req); return refuse(UNAVAILABLE, 503); }
   const build = path.match(/^\/mods\/build\/([0-9a-fA-F]{64})(?:\/(parts|complete)(?:\/(\d{1,9}))?)?$/);
   if (build) {
     const [, raw, kind, part] = build;
