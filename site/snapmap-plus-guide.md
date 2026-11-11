@@ -645,39 +645,42 @@ All rawmap actions are in the **File** menu:
 
 | Menu option | What it does |
 |---|---|
-| **Load Rawmap...** | Pick a rawmap file. Snapmap+ asks if you want to open it now. **OK** opens it as a new map and discards unsaved edits in the editor. **Cancel** keeps the file waiting, so you can save your work first. |
+| **Load Rawmap...** | Pick a rawmap file (`.json` or `.zip`). Snapmap+ asks whether to open it now; **Open** opens it in the editor as a new map and discards unsaved edits, **Cancel** opens nothing. If the file cannot be opened, the message says why. |
 | **Save Rawmap** | Write the map you are editing to the **Save Path**, including unsaved edits. |
 | **Save Rawmap As...** | Pick a file and write the map you are editing to it. Later **Save Rawmap** clicks go to the same file. |
-| **Open *file* as New Map** | Open the rawmap that is waiting. It shows the file name, and it is grey when no file is waiting. Use it after you cancel **Load Rawmap...**, or to open a rawmap again after you change it in a text editor. |
+| **Open *file* Again** | Open the last rawmap you loaded again, for example after you change it in a text editor. It names the file, and it is grey until you have loaded one. |
 | **Keep This Save Path** | Ticked after **Save Rawmap As...**. Untick it to send saves back to the default file. Opening another map also sends saves back to the default file. |
-| **Use Rawmaps for Every Save/Load** | Off by default. On, every map you open is replaced by the **Load Path** file, and every DOOM Save also writes the **Save Path** file. The console commands `sh_rawmaps on` and `sh_rawmaps off` do the same. |
 
 Under these options, **Load Path** and **Save Path** show the files Snapmap+
 uses. Hover over one to see the full path.
 
-A rawmap you open is a new map. DOOM's own Save asks for a new name, so it
-does not replace the saved map it opened over. If Snapmap+ cannot give that
-protection, it refuses to load rawmaps. Opening a rawmap in place needs at least
-one local map saved through DOOM. You can also open a map from DOOM's list while
-a rawmap is waiting.
+A rawmap you open is a new map: DOOM's own Save asks for a new name, so it
+does not replace the saved map it opened over. A save is refused when no map is
+open in the editor.
 
-A save is refused when no map is open in the editor. A save is cancelled if you
-leave the map before it runs.
-
-A map that uses mods also gets a `.zip` beside its `.json` on every save, and
-**Load Rawmap...** opens either. Share the `.zip`; see
-[Sharing a map that uses mods](#sharing-a-map-that-uses-mods).
+**Rawmaps of maps that use mods.** Every save of such a map also writes a `.zip`
+beside the `.json` (for example `rawmap.zip` beside `rawmap.json`), and **Save
+Rawmap As...** offers `.zip` first. The `.zip` holds the map and every mod it
+uses: share that one file. Opening it installs its mods into
+`mods\maps\<the .zip's name>\`, the map's own folder of mods, and the map opens.
+The map remembers that folder: if you save it to My Maps, it reopens with its
+mods. To make one of those mods your own, use **Add to my mods** in the Mods
+tab (see [Mods](#mods)). A rawmap whose mods you do not have is never opened
+without them: when the mod store has them, the game offers to download them;
+otherwise the message names each one, and you can ask the map's author for the
+`.zip`.
 
 Rawmaps are saved as compact JSON on one line. To save them with line breaks and
 indents, type `sh_pretty_on 1` in the console before you save. Type
 `sh_pretty_on 0` to go back to compact JSON.
 
-Run `sh_rawmaps help` for the console commands. `sh_rawmaps list [folder]`
-lists rawmap files, `sh_rawmaps load <path>` stages a file, `sh_rawmaps load`
-opens it, and `sh_rawmaps save [path]` exports the live map. Console loads
-discard unsaved edits without a confirmation prompt. The advanced command
-`sh_rawmaps overwrite on` allows DOOM's Save to replace the borrowed saved map;
-that choice lasts only until DOOM closes. Keep it off to preserve that map.
+Run `sh_rawmaps help` for the console commands: `sh_rawmaps list [folder]`
+lists rawmap files, `sh_rawmaps load <path>` opens a file in the editor at once
+as a new map (no confirmation: unsaved edits are discarded), `sh_rawmaps load`
+opens the Load Path again, and `sh_rawmaps save [path]` writes the open map.
+The advanced command `sh_rawmaps overwrite on` lets DOOM's Save replace the
+saved map a rawmap opened over; that choice lasts only until DOOM closes. Keep
+it off to preserve that map.
 
 ---
 
