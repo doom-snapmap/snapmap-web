@@ -580,8 +580,10 @@ tags, plus an **interactive 3D preview** of what you're about to place: drag to 
 double-click to frame it. The preview colors entities by what they do — solid, blocking, AI Navigation,
 interactable, logic/I/O, triggers — so you can tell what a prefab actually contains before you drop it in.
 It shows the prefab level and upright, the way it pastes, even when it was created while hovering a tilted
-ramp. Blocking Boxes ticked for **AI Navigation** are tinted green, and their number appears beside the
-entity count. Click **Load / Place** to stage the prefab for placement with SnapMap's built-in paste
+ramp. The key button at the bottom left of the preview opens its legend. Blocking Boxes ticked for **AI
+Navigation** are tinted green, and their number appears beside the entity count. Objects a mod adds show
+as boxes. Under the preview, **Limits** lists what the prefab adds to the map's editor limits and where
+the open map would stand after placing it. Click **Load / Place** to stage the prefab for placement with SnapMap's built-in paste
 function, then switch to the editor and press **Ctrl+V** to actually drop it into the map. When the
 placed prefab brings in AI Navigation boxes, Snapmap+ updates the navmesh by itself once you drop
 it, just as **View > Update Navmesh** would.
@@ -595,9 +597,10 @@ first module marked as the anchor, plus the module, object and door counts. **Pl
 only enabled in Blueprint mode: the rooms appear under your cursor already grabbed, like SnapMap's own
 Duplicate, so move them, rotate with **Q** and **E**, press **Space** to drop them (one undo step) or
 **Esc** to discard them. A placement that would push the map over the editor's limits is refused and
-taken back.
+taken back; if it cannot be taken back, it becomes one undo step and the message says to press
+**Ctrl+Z**.
 
-**Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter prefabs...** narrows
+**Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter by name or tag...** narrows
 the list by name or tag. Folders start closed, and the ones you open stay open when you switch tabs or
 restart the game; a filter shows every folder that has a match. **Shift-click** selects a run of rows and
 **Ctrl-click** adds or removes one (folders too). With more than one prefab selected the details pane
@@ -614,17 +617,21 @@ right away.
 **Sharing a prefab:** select it and click **Export** in the details pane. A Save As dialog opens, proposes
 `<name>.zip`, and writes the prefab with every mod it uses into that one `.zip` wherever you choose. Send
 that file. On the other end, **Import** at the top of the list opens a file dialog: pick the `.zip` (or,
-if it was already extracted, the `.json` inside the extracted folder) and Snapmap+ installs any mods they
-do not have yet and adds the prefab to their list. Importing the same export twice changes nothing; an
+if it was already extracted, the `.json` inside the extracted folder) and Snapmap+ adds the prefab to
+their list and installs the mods they do not have yet into their own mods folder, where every map of
+theirs can use them. Importing the same export twice changes nothing; an
 export whose prefab has the same name but different contents lands as `<name> (2)`. The console does the
-same with `sh_prefab export "<name>" "<path.zip>"` and `sh_prefab import "<path.zip or path.json>"`.
+same with `sh_prefab export "<name>" "<path.zip>"` and `sh_prefab import "<path.zip or path.json>"`;
+`sh_prefab mods "<name>"` lists the mods a prefab needs and whether each is installed. A prefab name
+may not contain `..` or be a Windows device name such as `CON`.
 
 **Prefabs that use mods:** the list shows **Mods:** with their names, or **Needs mods:** when one is not
 installed, and the details pane lists each mod as Installed or Not installed. **Load / Place** checks
-first: if the mod store has the missing mods, the game asks whether to download them, then places the
-prefab and adds the mods to the open map (the Mods tab's **Remove from map** takes them out again); if
-the store does not have them, nothing is placed and the message names each mod and asks for the
-prefab's export. A prefab whose mods you already have places as any other.
+first: if the mod store has the missing mods, the game asks whether to download them, installs them in
+your own mods folder, then places the prefab and adds the mods to the open map (the Mods tab's **Remove
+from map** takes them out again); if the store does not have them, nothing is placed and the message
+names each mod and asks for the prefab's export. A prefab whose mods you already have places as any
+other. Placing a prefab never changes where the open map finds its other mods.
 
 ---
 
