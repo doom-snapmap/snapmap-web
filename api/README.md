@@ -81,8 +81,10 @@ abuse. What remains is what the platform and the archive form fix, stated here a
   goes in parts of `PART_SIZE`, 95 MiB (99,614,720 bytes), in `api/mods_store.js`;
 - R2 multipart uploads: every part but the last of one size, at least 5 MiB, at most
   10,000 parts, an object of at most 5 TiB;
-- the archive form Snapmap+ writes: a ZIP without ZIP64, so at most 65,535 entries and
-  4 GiB, which the product refuses before it sends anything;
+- none from the archive form: the product writes ZIP64 records exactly where a value does
+  not fit a classic field (an entry of 4 GiB or more, an offset past 4 GiB, 65,535 entries
+  or more), and the check reads them; a size past 2^53 bytes (about 9 PB) is past what a
+  JavaScript number counts exactly and is refused as the platform's;
 - a Worker's memory (128 MB) and CPU time per request (30 s by default on the paid plan,
   configurable up to 5 minutes with `limits.cpu_ms`; 10 ms on Free). The archive check
   streams: file contents pass through untouched and are never held, a script's bytes
@@ -120,7 +122,9 @@ refuses what the product would refuse and nothing it writes.
 
 The archive check, the same for one request and for parts, refuses with 422 and the
 first cause, one sentence: a body that is not a ZIP; bytes before, between or after the
-entries; a ZIP64 or split archive; a compressed or encrypted entry; an entry without its
+entries; a split archive; a ZIP64 marker without its value in a ZIP64 extra field, a ZIP64
+extra field no marker asks for, or ZIP64 end records that disagree with the end record or
+each other; a compressed or encrypted entry; an entry without its
 sizes in the local header or without a name; two entries of one name; a central
 directory or end record that disagrees with the entries; a `mod.json` that is missing,
 not UTF-8 JSON, without a `snapmap-plus` block of `format` 2 holding only the keys the

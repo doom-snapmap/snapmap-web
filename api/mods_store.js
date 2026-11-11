@@ -266,23 +266,44 @@ const SIG_ZIP64_END = 0x06064b50;
 const SIG_ZIP64_LOCATOR = 0x07064b50;
 const FLAG_UTF8 = 0x0800;
 const NAME_DECODER = new TextDecoder('utf-8', { fatal: true });
-const ZIP64 = 'The archive uses ZIP64, which Snapmap+ never writes.';
 const MALFORMED_EXTRA = 'The archive has a malformed extra field.';
+const ZIP64_EXTRA = 'The archive has a ZIP64 extra field that does not match its entry.';
+const ZIP64_END = 'The archive\'s ZIP64 end records are malformed.';
+const UNCOUNTABLE = 'The archive declares a size larger than this platform can count.';
+const M32 = 0xffffffff, M16 = 0xffff;
 
 const u16 = (b, at) => b[at] | (b[at + 1] << 8);
 const u32 = (b, at) => (b[at] | (b[at + 1] << 8) | (b[at + 2] << 16)) + b[at + 3] * 0x1000000;
 
-/* null when an extra field is well formed and holds no ZIP64 record, else the refusal. */
-function extraError(bytes) {
-  let at = 0;
+/* A 64-bit little-endian value, or null past what a JavaScript number counts exactly
+ * (2^53 bytes, about 9 PB: the platform's limit, not the store's). */
+function u64(b, at) {
+  const hi = u32(b, at + 4);
+  return hi > 0x1fffff ? null : u32(b, at) + hi * 0x100000000;
+}
+
+/* An extra field, well formed, whose ZIP64 record (id 1) holds exactly the `want` 64-bit
+ * values the entry's markers ask for, in the format's order; there is none when nothing
+ * asks. Returns { values } or { error }. */
+function zip64Values(bytes, want) {
+  let at = 0, values = null;
   while (at < bytes.length) {
-    if (bytes.length - at < 4) return MALFORMED_EXTRA;
+    if (bytes.length - at < 4) return { error: MALFORMED_EXTRA };
     const id = u16(bytes, at), len = u16(bytes, at + 2);
-    if (id === 0x0001) return ZIP64;
+    if (at + 4 + len > bytes.length) return { error: MALFORMED_EXTRA };
+    if (id === 0x0001) {
+      if (values || !want || len !== want * 8) return { error: ZIP64_EXTRA };
+      values = [];
+      for (let k = 0; k < want; k++) {
+        const v = u64(bytes, at + 4 + 8 * k);
+        if (v === null) return { error: UNCOUNTABLE };
+        values.push(v);
+      }
+    }
     at += 4 + len;
-    if (at > bytes.length) return MALFORMED_EXTRA;
   }
-  return null;
+  if (want && !values) return { error: ZIP64_EXTRA };
+  return { values: values || [] };
 }
 
 function isScript(name) {
@@ -343,8 +364,10 @@ class ScriptCheck {
  * checked record by record against the entries as it streams, so memory grows with the
  * number of entries and the size of mod.json, never with the archive's size. The form is
  * the product's (modzip.c): stored entries with their sizes in the local header, then the
- * central directory, then the end record; nothing before, between or after. error is the
- * first refusal; once set, later bytes are ignored. */
+ * central directory, then (when a value needs it) the ZIP64 end record and locator, then
+ * the end record; nothing before, between or after. ZIP64 values stand where a field holds
+ * its marker, so there is no bound on an entry's size, the archive's size or the number of
+ * entries. error is the first refusal; once set, later bytes are ignored. */
 export class ArchiveWalker {
   constructor(length) {
     this.length = length;
@@ -364,6 +387,7 @@ export class ArchiveWalker {
     this.central = 0;                // central records read
     this.cdStart = -1;
     this.cdEnd = -1;
+    this.z64 = null;                 // the ZIP64 end record's values, when the archive has one
     this.error = null;
     this.done = false;
   }
@@ -421,7 +445,22 @@ export class ArchiveWalker {
     switch (this.state) {
     case 'sig': {
       const sig = u32(b, 0);
-      if (sig === SIG_ZIP64_END || sig === SIG_ZIP64_LOCATOR) return this.fail(ZIP64);
+      if (this.z64 && !this.z64.located) {
+        if (sig !== SIG_ZIP64_LOCATOR) return this.fail(ZIP64_END);
+        this.state = 'locator';
+        this.expect(20);
+        return;
+      }
+      if (this.z64 && sig !== SIG_END) return this.fail('The archive has no end of central directory record.');
+      if (sig === SIG_ZIP64_LOCATOR) return this.fail(ZIP64_END);
+      if (sig === SIG_ZIP64_END) {
+        if (this.cdStart < 0) this.cdStart = this.recordStart;
+        if (this.central < this.entries.length) return this.fail('The archive\'s central directory does not list every entry.');
+        this.cdEnd = this.recordStart;
+        this.state = 'end64';
+        this.expect(56);
+        return;
+      }
       if (sig === SIG_LOCAL && this.cdStart < 0) { this.state = 'local'; this.expect(30); return; }
       if (sig === SIG_CENTRAL) {
         if (this.cdStart < 0) this.cdStart = this.recordStart;
@@ -433,7 +472,7 @@ export class ArchiveWalker {
       if (sig === SIG_END) {
         if (this.cdStart < 0) this.cdStart = this.recordStart;
         if (this.central < this.entries.length) return this.fail('The archive\'s central directory does not list every entry.');
-        this.cdEnd = this.recordStart;
+        if (!this.z64) this.cdEnd = this.recordStart;
         this.state = 'end';
         this.expect(22);
         return;
@@ -448,11 +487,9 @@ export class ArchiveWalker {
       if (flags & 0x0001) return this.fail('The archive has an encrypted entry.');
       if (flags & 0x0008) return this.fail('The archive has an entry without its sizes in its local header.');
       if (flags & ~FLAG_UTF8) return this.fail('The archive has an entry with flags Snapmap+ never writes.');
-      if (csize === 0xffffffff || usize === 0xffffffff) return this.fail(ZIP64);
       if (method !== 0) return this.fail('The archive has a compressed entry; Snapmap+ stores every file uncompressed.');
-      if (csize !== usize) return this.fail('The archive has a stored entry whose two sizes disagree.');
       if (nameLength < 1) return this.fail('The archive has an entry without a name.');
-      this.current = { flags, crc: u32(b, 14), size: usize, nameLength, extraLength: u16(b, 28), offset: this.recordStart };
+      this.current = { flags, crc: u32(b, 14), usize, csize, nameLength, extraLength: u16(b, 28), offset: this.recordStart };
       this.state = 'localVar';
       this.expect(30 + nameLength + this.current.extraLength);
       if (this.have === this.need) this.step();
@@ -463,8 +500,15 @@ export class ArchiveWalker {
       let name;
       try { name = NAME_DECODER.decode(b.subarray(30, 30 + entry.nameLength)); }
       catch { return this.fail('The archive has an entry name that is not UTF-8.'); }
-      const extra = extraError(b.subarray(30 + entry.nameLength, this.need));
-      if (extra) return this.fail(extra);
+      const mu = entry.usize === M32, mc = entry.csize === M32;
+      const extra = zip64Values(b.subarray(30 + entry.nameLength, this.need), (mu ? 1 : 0) + (mc ? 1 : 0));
+      if (extra.error) return this.fail(extra.error);
+      if (mu) entry.usize = extra.values.shift();
+      if (mc) entry.csize = extra.values.shift();
+      if (entry.csize !== entry.usize) return this.fail('The archive has a stored entry whose two sizes disagree.');
+      entry.size = entry.usize;
+      delete entry.usize;
+      delete entry.csize;
       if (this.names.has(name)) return this.fail('The archive holds ' + shown(name) + ' twice.');
       entry.name = name;
       this.names.add(name);
@@ -493,9 +537,13 @@ export class ArchiveWalker {
     }
     case 'centralVar': {
       const c = this.pending, entry = this.entries[this.central];
-      if (c.csize === 0xffffffff || c.usize === 0xffffffff || c.offset === 0xffffffff || c.disk === 0xffff) return this.fail(ZIP64);
-      const extra = extraError(b.subarray(46 + c.nameLength, 46 + c.nameLength + c.extraLength));
-      if (extra) return this.fail(extra);
+      if (c.disk !== 0) return this.fail('The archive is split across several files.');
+      const mu = c.usize === M32, mc = c.csize === M32, mo = c.offset === M32;
+      const extra = zip64Values(b.subarray(46 + c.nameLength, 46 + c.nameLength + c.extraLength), (mu ? 1 : 0) + (mc ? 1 : 0) + (mo ? 1 : 0));
+      if (extra.error) return this.fail(extra.error);
+      if (mu) c.usize = extra.values.shift();
+      if (mc) c.csize = extra.values.shift();
+      if (mo) c.offset = extra.values.shift();
       let name;
       try { name = NAME_DECODER.decode(b.subarray(46, 46 + c.nameLength)); }
       catch { return this.fail('The archive has an entry name that is not UTF-8.'); }
@@ -508,10 +556,46 @@ export class ArchiveWalker {
       this.toSig();
       return;
     }
+    case 'end64': {
+      const rest = u64(b, 4);
+      if (rest === null || rest < 44 || rest > this.length - this.recordStart) return this.fail(ZIP64_END);
+      this.z64 = { at: this.recordStart, rest };
+      this.state = 'end64Var';
+      this.expect(12 + rest);
+      if (this.have === this.need) this.step();
+      return;
+    }
+    case 'end64Var': {
+      const z = this.z64;
+      if (u32(b, 16) !== 0 || u32(b, 20) !== 0) return this.fail('The archive is split across several files.');
+      z.onDisk = u64(b, 24); z.total = u64(b, 32); z.cdSize = u64(b, 40); z.cdOffset = u64(b, 48);
+      if ([z.onDisk, z.total, z.cdSize, z.cdOffset].includes(null)) return this.fail(UNCOUNTABLE);
+      if (z.onDisk !== z.total) return this.fail('The archive is split across several files.');
+      this.toSig();
+      return;
+    }
+    case 'locator': {
+      const at = u64(b, 8);
+      if (u32(b, 4) !== 0 || u32(b, 16) !== 1) return this.fail('The archive is split across several files.');
+      if (at !== this.z64.at) return this.fail(ZIP64_END);
+      this.z64.located = true;
+      this.toSig();
+      return;
+    }
     case 'end': {
-      const disk = u16(b, 4), cdDisk = u16(b, 6), onDisk = u16(b, 8), total = u16(b, 10);
-      const cdSize = u32(b, 12), cdOffset = u32(b, 16), commentLength = u16(b, 20);
-      if (onDisk === 0xffff || total === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) return this.fail(ZIP64);
+      const disk = u16(b, 4), cdDisk = u16(b, 6), commentLength = u16(b, 20);
+      let onDisk = u16(b, 8), total = u16(b, 10), cdSize = u32(b, 12), cdOffset = u32(b, 16);
+      if (this.z64) {
+        /* A classic field holds its value or the marker; the ZIP64 record's values count. */
+        const z = this.z64;
+        if ((onDisk !== M16 && onDisk !== z.onDisk) || (total !== M16 && total !== z.total) ||
+            (cdSize !== M32 && cdSize !== z.cdSize) || (cdOffset !== M32 && cdOffset !== z.cdOffset)) {
+          return this.fail(ZIP64_END);
+        }
+        onDisk = z.onDisk; total = z.total; cdSize = z.cdSize; cdOffset = z.cdOffset;
+      } else if (onDisk === M16 || total === M16 || cdSize === M32 || cdOffset === M32) {
+        return this.fail('The archive\'s end record points to ZIP64 records the archive does not have.');
+      }
       if (disk !== 0 || cdDisk !== 0) return this.fail('The archive is split across several files.');
       if (onDisk !== this.entries.length || total !== this.entries.length) return this.fail('The archive\'s end record counts its entries wrongly.');
       if (cdSize !== this.cdEnd - this.cdStart || cdOffset !== this.cdStart) return this.fail('The archive\'s end record places its central directory wrongly.');

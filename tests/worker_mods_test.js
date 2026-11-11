@@ -275,7 +275,7 @@ function zip(entries, { comment = Buffer.alloc(0), before = Buffer.alloc(0), bet
   const cdSize = offset - cd;
   if (zip64End) { const z = Buffer.alloc(56); z.writeUInt32LE(0x06064b50, 0); parts.push(z); offset += 56; }
   const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(records.length, 8); end.writeUInt16LE(records.length, 10);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Math.min(records.length, 0xffff), 8); end.writeUInt16LE(Math.min(records.length, 0xffff), 10);
   end.writeUInt32LE(cdSize, 12); end.writeUInt32LE(cd, 16); end.writeUInt16LE(comment.length, 20);
   parts.push(end, comment, after);
   return { bytes: Buffer.concat(parts), cd, end: offset, records };
@@ -316,6 +316,45 @@ function build({ salt = SALT, files = defaultFiles(salt), stock = [], hash = sha
   const doc = { name: 'Pink Imp', description: 'A pinker imp.', ...author, 'snapmap-plus': modBlock };
   const modjson = Buffer.from(pretty ? JSON.stringify(doc, null, 2) + '\n' : JSON.stringify(doc), 'utf8');
   return { hash, modjson, doc, files, ...zip(entriesFor(modjson, files)) };
+}
+
+/* The build written as ZIP64, as the product writes an archive past 4 GiB or 65,535 entries:
+ * every size and offset a marker with its value in a ZIP64 extra field, then the ZIP64 end
+ * record and locator, then an end record of markers. */
+function zip64Archive(archive) {
+  const entries = entriesFor(archive.modjson, archive.files);
+  const parts = [], records = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name), data = Buffer.from(entry.data), crc = crc32(data);
+    const local = Buffer.alloc(30), extra = Buffer.alloc(20);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(45, 4); local.writeUInt16LE(0x21, 12); local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(0xffffffff, 18); local.writeUInt32LE(0xffffffff, 22); local.writeUInt16LE(name.length, 26); local.writeUInt16LE(20, 28);
+    extra.writeUInt16LE(1, 0); extra.writeUInt16LE(16, 2); extra.writeBigUInt64LE(BigInt(data.length), 4); extra.writeBigUInt64LE(BigInt(data.length), 12);
+    records.push({ name, crc, size: data.length, offset });
+    parts.push(local, name, extra, data);
+    offset += 30 + name.length + 20 + data.length;
+  }
+  const cd = offset;
+  for (const r of records) {
+    const central = Buffer.alloc(46), extra = Buffer.alloc(28);
+    central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(45, 4); central.writeUInt16LE(45, 6); central.writeUInt16LE(0x21, 14);
+    central.writeUInt32LE(r.crc, 16); central.writeUInt32LE(0xffffffff, 20); central.writeUInt32LE(0xffffffff, 24);
+    central.writeUInt16LE(r.name.length, 28); central.writeUInt16LE(28, 30); central.writeUInt32LE(0xffffffff, 42);
+    extra.writeUInt16LE(1, 0); extra.writeUInt16LE(24, 2); extra.writeBigUInt64LE(BigInt(r.size), 4); extra.writeBigUInt64LE(BigInt(r.size), 12);
+    extra.writeBigUInt64LE(BigInt(r.offset), 20);
+    parts.push(central, r.name, extra);
+    offset += 46 + r.name.length + 28;
+  }
+  const end64At = offset, end64 = Buffer.alloc(56), locator = Buffer.alloc(20), end = Buffer.alloc(22);
+  end64.writeUInt32LE(0x06064b50, 0); end64.writeBigUInt64LE(44n, 4); end64.writeUInt16LE(45, 12); end64.writeUInt16LE(45, 14);
+  end64.writeBigUInt64LE(BigInt(records.length), 24); end64.writeBigUInt64LE(BigInt(records.length), 32);
+  end64.writeBigUInt64LE(BigInt(end64At - cd), 40); end64.writeBigUInt64LE(BigInt(cd), 48);
+  locator.writeUInt32LE(0x07064b50, 0); locator.writeBigUInt64LE(BigInt(end64At), 8); locator.writeUInt32LE(1, 16);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(0xffff, 8); end.writeUInt16LE(0xffff, 10);
+  end.writeUInt32LE(0xffffffff, 12); end.writeUInt32LE(0xffffffff, 16);
+  parts.push(end64, locator, end);
+  return { hash: archive.hash, modjson: archive.modjson, bytes: Buffer.concat(parts), locator: end64At + 56 };
 }
 
 /* The same build's mod.json over other entries. */
@@ -436,12 +475,21 @@ function damaged(archive, edit) {
 test('archive PUT refuses every structural fault of the ZIP', async () => {
   const env = await modsEnv();
   await refusedWith(env, { hash: sha(Buffer.from('x')), bytes: Buffer.from('this is not a zip archive at all') }, /^The upload is not a ZIP archive\.$/);
-  await refusedWith(env, damaged(build(), b => b.writeUInt32LE(0xffffffff, 18)), /^The archive uses ZIP64, which Snapmap\+ never writes\.$/);
+  /* ZIP64 is read, but only as the format has it: a marker needs its value in a ZIP64 extra
+   * field, an extra field no marker asks for is refused, and the end records must agree. */
+  const ZIP64_EXTRA = /^The archive has a ZIP64 extra field that does not match its entry\.$/;
+  await refusedWith(env, damaged(build(), b => b.writeUInt32LE(0xffffffff, 18)), ZIP64_EXTRA);
   const g64 = build();
-  await refusedWith(env, { hash: g64.hash, ...zip(entriesFor(g64.modjson, g64.files), { zip64End: true }) }, /^The archive uses ZIP64, which Snapmap\+ never writes\.$/);
+  await refusedWith(env, { hash: g64.hash, ...zip(entriesFor(g64.modjson, g64.files), { zip64End: true }) }, /^The archive's ZIP64 end records are malformed\.$/);
   const gx = build({ files: [] });
   const zip64Extra = Buffer.alloc(20); zip64Extra.writeUInt16LE(0x0001, 0); zip64Extra.writeUInt16LE(16, 2);
-  await refusedWith(env, rezip(gx, [{ name: 'mod.json', data: gx.modjson, extra: zip64Extra }]), /^The archive uses ZIP64, which Snapmap\+ never writes\.$/);
+  await refusedWith(env, rezip(gx, [{ name: 'mod.json', data: gx.modjson, extra: zip64Extra }]), ZIP64_EXTRA);
+  await refusedWith(env, damaged(build(), (b, a) => b.writeUInt16LE(0xffff, a.end + 10)), /^The archive's end record points to ZIP64 records the archive does not have\.$/);
+  const z = zip64Archive(build());
+  await refusedWith(env, { ...z, bytes: Buffer.concat([z.bytes.subarray(0, z.locator + 8), Buffer.from([1, 0, 0, 0, 0, 0, 0, 0]), z.bytes.subarray(z.locator + 16)]) },
+    /^The archive's ZIP64 end records are malformed\.$/);
+  await refusedWith(env, { ...z, bytes: Buffer.concat([z.bytes.subarray(0, z.locator + 16), Buffer.from([2, 0, 0, 0]), z.bytes.subarray(z.locator + 20)]) },
+    /^The archive is split across several files\.$/);
   const gc = build({ files: [] });
   await refusedWith(env, rezip(gc, [{ name: 'mod.json', data: gc.modjson, method: 8 }]), /^The archive has a compressed entry; Snapmap\+ stores every file uncompressed\.$/);
   await refusedWith(env, damaged(build(), b => b.writeUInt16LE(0x0001, 6)), /^The archive has an encrypted entry\.$/);
@@ -1186,6 +1234,67 @@ function* streamedArchive(hash, files, size) {
   end.writeUInt32LE(offset - cd, 12); end.writeUInt32LE(cd, 16);
   yield end;
 }
+
+test('a ZIP64 archive is stored, and the check reads one entry past 4 GiB and 70,000 entries', async () => {
+  const env = await modsEnv();
+  const z = zip64Archive(build());
+  const stored64 = await put(env, z);
+  assert.equal(stored64.status, 201, await stored64.clone().text());
+  const got = await fetchWorker(env, call('GET', '/mods/build/' + z.hash));
+  assert.deepEqual(Buffer.from(await got.arrayBuffer()), z.bytes);
+
+  const { ArchiveWalker, buildVerdict } = await modsModule;
+  /* One entry of 4.5 GiB, streamed from a block that is never larger than 4 MiB. */
+  const hash = sha(Buffer.from('huge entry'));
+  const name = 'assets/generated/image/mods/' + SALT + '/huge.bimage', size = 4.5 * 1024 * MIB;
+  const doc = { name: 'Huge', 'snapmap-plus': { format: 2, salt: SALT, build: hash,
+    files: [{ path: name, sha256: 'a'.repeat(64), size, provides: { type: 'image', name: name.slice(7) }, needs: [] }] } };
+  const modjson = Buffer.from(JSON.stringify(doc));
+  function* stream() {
+    const nm = Buffer.from('mod.json'), local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt32LE(modjson.length, 18); local.writeUInt32LE(modjson.length, 22); local.writeUInt16LE(nm.length, 26);
+    yield Buffer.concat([local, nm, modjson]);
+    const hn = Buffer.from(name), local2 = Buffer.alloc(30), x = Buffer.alloc(20);
+    local2.writeUInt32LE(0x04034b50, 0); local2.writeUInt16LE(45, 4); local2.writeUInt32LE(0xffffffff, 18); local2.writeUInt32LE(0xffffffff, 22);
+    local2.writeUInt16LE(hn.length, 26); local2.writeUInt16LE(20, 28);
+    x.writeUInt16LE(1, 0); x.writeUInt16LE(16, 2); x.writeBigUInt64LE(BigInt(size), 4); x.writeBigUInt64LE(BigInt(size), 12);
+    yield Buffer.concat([local2, hn, x]);
+    const block = new Uint8Array(4 * MIB);
+    for (let left = size; left > 0; left -= block.length) yield block.subarray(0, Math.min(left, block.length));
+    const off2 = 30 + nm.length + modjson.length, cd = off2 + 30 + hn.length + 20 + size;
+    const c1 = Buffer.alloc(46), c2 = Buffer.alloc(46), cx = Buffer.alloc(20);
+    c1.writeUInt32LE(0x02014b50, 0); c1.writeUInt32LE(modjson.length, 20); c1.writeUInt32LE(modjson.length, 24); c1.writeUInt16LE(nm.length, 28);
+    c2.writeUInt32LE(0x02014b50, 0); c2.writeUInt32LE(0xffffffff, 20); c2.writeUInt32LE(0xffffffff, 24); c2.writeUInt16LE(hn.length, 28);
+    c2.writeUInt16LE(20, 30); c2.writeUInt32LE(off2, 42);
+    cx.writeUInt16LE(1, 0); cx.writeUInt16LE(16, 2); cx.writeBigUInt64LE(BigInt(size), 4); cx.writeBigUInt64LE(BigInt(size), 12);
+    const central = Buffer.concat([c1, nm, c2, hn, cx]);
+    yield central;
+    const end64 = Buffer.alloc(56), loc = Buffer.alloc(20), end = Buffer.alloc(22), at64 = cd + central.length;
+    end64.writeUInt32LE(0x06064b50, 0); end64.writeBigUInt64LE(44n, 4); end64.writeBigUInt64LE(2n, 24); end64.writeBigUInt64LE(2n, 32);
+    end64.writeBigUInt64LE(BigInt(central.length), 40); end64.writeBigUInt64LE(BigInt(cd), 48);
+    loc.writeUInt32LE(0x07064b50, 0); loc.writeBigUInt64LE(BigInt(at64), 8); loc.writeUInt32LE(1, 16);
+    end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(2, 8); end.writeUInt16LE(2, 10); end.writeUInt32LE(central.length, 12); end.writeUInt32LE(0xffffffff, 16);
+    yield Buffer.concat([end64, loc, end]);
+  }
+  let length = 0;
+  for (const chunk of stream()) length += chunk.length;
+  assert.ok(length > 4.5 * 1024 * MIB);
+  const walker = new ArchiveWalker(length);
+  for (const chunk of stream()) walker.push(chunk);
+  walker.finish();
+  assert.equal(walker.error, null);
+  assert.deepEqual(buildVerdict(hash, walker.entries, walker.modjson), { salt: SALT, scripts: 0 });
+
+  /* 70,000 entries: past what the classic end record counts. */
+  const many = build({ files: Array.from({ length: 70000 }, (_, i) => ({ request: 'generated/decls/entitydef/mods/' + SALT + '/m' + i + '.decl', data: 'x' })), pretty: false });
+  const z2 = zip64Archive(many);
+  const w2 = new ArchiveWalker(z2.bytes.length);
+  for (let at = 0; at < z2.bytes.length; at += 1 << 20) w2.push(new Uint8Array(z2.bytes.subarray(at, at + (1 << 20))));
+  w2.finish();
+  assert.equal(w2.error, null);
+  assert.equal(w2.entries.length, 70001);
+  assert.deepEqual(buildVerdict(many.hash, w2.entries, w2.modjson), { salt: SALT, scripts: 0 });
+});
 
 test('the streaming check reads a 1.2 GiB archive holding only its headers and mod.json', async () => {
   const { ArchiveWalker, buildVerdict } = await modsModule;
