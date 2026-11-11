@@ -8,9 +8,8 @@ Checks the API Worker's request-body bounds, write quotas and local runtime beha
 
 - `worker_body_test.js` covers streamed body limits, JSON validation, CORS on refusals, upload overflow and quota refusals.
 - `worker_quota_test.js` covers the SQLite quota store's atomic admission and rollback.
-- `worker_mods_test.js` covers every `/mods/*` route's success and refusal paths, bundle manifest rules, takedown, per-address limits, claims, the serving window and purge ordering, with in-memory R2 and SQLite-backed Durable Object doubles.
-- `fixtures/campaign-interactables-progression.canon.json` is a real product manifest whose companion transforms keep fixed decimals such as `-1.0`; the mods suite checks it hashes to its path.
-- `worker_runtime_test.js` runs the Worker under Miniflare with local KV, R2 and a Durable Object, checking concurrent per-account quotas and persistence across restarts.
+- `worker_mods_test.js` covers every `/mods/*` route's success and refusal paths, the build archive checks, takedown, per-address limits, claims, release, the serving window, purge and reset, with in-memory R2 and SQLite-backed Durable Object doubles.
+- `worker_runtime_test.js` runs the Worker under Miniflare with local KV, R2 and a Durable Object, checking concurrent per-account quotas, persistence across restarts, and that R2 never commits a refused build archive.
 
 ## Working here
 
