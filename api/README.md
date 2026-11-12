@@ -78,8 +78,10 @@ hourly limits below are not limits on a mod: they protect the bucket and its bil
 abuse. What remains is what the platform and the archive form fix, stated here as theirs:
 
 - one request body: 100 MB (100,000,000 bytes) on the Free and Pro plans (200 MB
-  Business, 500 MB Enterprise). An archive up to one part goes in one `PUT`; a larger one
-  goes in parts of `PART_SIZE`, 95 MiB (99,614,720 bytes), in `api/mods_store.js`;
+  Business, 500 MB Enterprise). An archive up to `ONE_REQUEST_MAX`, 95 MiB
+  (99,614,720 bytes), may go in one `PUT`; a client sends a larger one, and any it wants
+  sent faster, in parts of `PART_SIZE`, 16 MiB, several at once and in any order (both in
+  `api/mods_store.js`);
 - R2 multipart uploads: every part but the last of one size, at least 5 MiB, at most
   10,000 parts, an object of at most 5 TiB;
 - none from the archive form: the product writes ZIP64 records exactly where a value does

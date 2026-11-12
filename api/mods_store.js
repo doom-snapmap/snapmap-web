@@ -15,11 +15,14 @@
 
 import { RequestError, readJsonObject } from './request_body.js';
 
-/* One part, and the largest archive one PUT takes. The platform refuses a request body over
- * 100 MB (100,000,000 bytes) on the Free and Pro plans (200 MB Business, 500 MB
- * Enterprise); 95 MiB is 99,614,720 bytes. R2 multipart uploads need every part but the
- * last to have one size, at least 5 MiB, and allow at most 10,000 parts. */
-export const PART_SIZE = 95 * 1024 * 1024;
+/* The largest archive one PUT takes, and one part of a larger one. The platform refuses a
+ * request body over 100 MB (100,000,000 bytes) on the Free and Pro plans (200 MB Business,
+ * 500 MB Enterprise); 95 MiB is 99,614,720 bytes. R2 multipart uploads need every part but
+ * the last to have one size, at least 5 MiB, and allow at most 10,000 parts (160 GiB at this
+ * size). Parts are small so a client sends several at once, each on its own connection, and a
+ * dropped connection costs one small part. */
+export const ONE_REQUEST_MAX = 95 * 1024 * 1024;
+export const PART_SIZE = 16 * 1024 * 1024;
 export const CLAIM_WINDOW_MS = 3600000;   // upload-before-claim window (one hour), as in mods_registry_store.js
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 const PURGE_BATCH = 500;
@@ -928,7 +931,7 @@ async function putBuild(req, env, hash) {
   if (type !== 'application/zip') { await discard(req); return refuse('A build archive must be sent as application/zip.', 415); }
   const { length, refusal } = declaredLength(req);
   if (refusal) { await discard(req); return refusal; }
-  if (length > PART_SIZE) { await discard(req); return refuse('An archive over 95 MiB goes to the mod store in parts.', 413); }
+  if (length > ONE_REQUEST_MAX) { await discard(req); return refuse('An archive over 95 MiB goes to the mod store in parts.', 413); }
   if (length < 22) { await discard(req); return refuse(NOT_ZIP, 422); }
   if (!(await admit(req, env, [['mod_build_put', 1], ['mod_bytes', length]], false))) { await discard(req); return rateLimited(); }
   const held = await heldAlready(env, hash, length);

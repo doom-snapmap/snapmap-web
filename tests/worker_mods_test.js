@@ -814,8 +814,9 @@ test('archive PUT refuses wrong type, no length, oversize and malformed hashes b
   assert.equal((await fetchWorker(env, putRequest(archive.hash.toUpperCase(), archive.bytes))).status, 400);
   assert.equal((await fetchWorker(env, putRequest('abc', archive.bytes))).status, 404);
   assert.equal((await fetchWorker(env, call('DELETE', '/mods/build/' + archive.hash))).status, 405);
-  const { PART_SIZE } = await modsModule;
-  assert.equal(PART_SIZE, 95 * MIB);
+  const { PART_SIZE, ONE_REQUEST_MAX } = await modsModule;
+  assert.equal(ONE_REQUEST_MAX, 95 * MIB);
+  assert.equal(PART_SIZE, PART);
   assert.equal(env.MODS.objects.size, 0);
   assert.equal((await put(env, archive, { 'Content-Type': 'application/zip; charset=binary' })).status, 201);
 });
@@ -957,7 +958,7 @@ test('a publish in parts counts as one upload, so a large publish is never stopp
   assert.equal((await startParts(env, archive.hash, size)).status, 201, 'the 64th upload');
   assert.equal((await sendPart(env, archive.hash, size, 1, slice(archive.bytes, 1))).status, 200);
   assert.equal((await startParts(env, archive.hash, size)).status, 200, 'a resume counts nothing');
-  assert.equal((await sendPart(env, archive.hash, size, 2, slice(archive.bytes, 2))).status, 200);
+  for (const part of allParts(size).slice(1)) assert.equal((await sendPart(env, archive.hash, size, part, slice(archive.bytes, part))).status, 200);
   assert.equal((await completeParts(env, archive.hash, size)).status, 201);
   assert.equal((await put(env, build({ files: [] }))).status, 429, 'the 65th upload this hour');
   const other = await modsEnv();
@@ -1112,8 +1113,14 @@ function largeBuild(extra = {}) {
   return build({ files: [{ request: 'generated/image/mods/' + SALT + '/huge.bimage', data: Buffer.alloc(95 * MIB + 4096, 3) }], ...extra });
 }
 
+/* One part of an upload in parts (the Worker's PART_SIZE), and the parts of an archive. */
+const PART = 16 * MIB;
+function allParts(size) {
+  return Array.from({ length: Math.ceil(size / PART) }, (_, i) => i + 1);
+}
+
 function slice(bytes, part) {
-  return bytes.subarray((part - 1) * 95 * MIB, Math.min(bytes.length, part * 95 * MIB));
+  return bytes.subarray((part - 1) * PART, Math.min(bytes.length, part * PART));
 }
 
 test('a build larger than one part goes up in parts, resumes without resending a part, and serves its bytes', async () => {
@@ -1124,7 +1131,7 @@ test('a build larger than one part goes up in parts, resumes without resending a
 
   const started = await startParts(env, archive.hash, size);
   assert.equal(started.status, 201);
-  assert.deepEqual(await started.json(), { build: archive.hash, size, partSize: 95 * MIB, parts: 2, have: [] });
+  assert.deepEqual(await started.json(), { build: archive.hash, size, partSize: PART, parts: allParts(size).length, have: [] });
   const wrong = await sendPart(env, archive.hash, size, 1, archive.bytes.subarray(0, 1000));
   assert.equal(wrong.status, 400, 'a part is exactly its place in the archive');
   const first = await sendPart(env, archive.hash, size, 1, slice(archive.bytes, 1));
@@ -1138,8 +1145,9 @@ test('a build larger than one part goes up in parts, resumes without resending a
   const resumed = await startParts(env, archive.hash, size);
   assert.equal(resumed.status, 200);
   assert.deepEqual((await resumed.json()).have, [1]);
-  assert.equal((await sendPart(env, archive.hash, size, 2, slice(archive.bytes, 2))).status, 200);
-  assert.deepEqual(env.MODS.log.filter(([op]) => op === 'part').map(([, , n]) => n), [1, 2], 'no part was sent twice');
+  /* the rest in any order, as a client sending several at once does */
+  for (const part of allParts(size).slice(1).reverse()) assert.equal((await sendPart(env, archive.hash, size, part, slice(archive.bytes, part))).status, 200);
+  assert.deepEqual(env.MODS.log.filter(([op]) => op === 'part').map(([, , n]) => n).sort((a, b) => a - b), allParts(size), 'no part was sent twice');
   assert.equal(objectOf(env, archive.hash), undefined, 'nothing is served before the archive is complete and checked');
 
   const done = await completeParts(env, archive.hash, size);
@@ -1162,7 +1170,7 @@ test('an archive in parts is checked by the same rules, and a refused one leaves
   const archive = damaged(largeBuild(), (b, a) => b.writeUInt32LE(a.cd - 1, a.end + 16));
   const size = archive.bytes.length;
   assert.equal((await startParts(env, archive.hash, size)).status, 201);
-  for (const part of [1, 2]) assert.equal((await sendPart(env, archive.hash, size, part, slice(archive.bytes, part))).status, 200);
+  for (const part of allParts(size)) assert.equal((await sendPart(env, archive.hash, size, part, slice(archive.bytes, part))).status, 200);
   const refused = await completeParts(env, archive.hash, size);
   assert.equal(refused.status, 422);
   assert.equal((await refused.json()).error, "The archive's end record places its central directory wrongly.");
@@ -1174,7 +1182,7 @@ test('an archive in parts is checked by the same rules, and a refused one leaves
     { request: 'mods/' + SALT + '/scripts/main.lua', data: Buffer.from([0x1b, 0x4c, 0x75, 0x61, 1, 2]) }], block: { scripts: { files: 1 } } });
   const ssize = script.bytes.length;
   await startParts(env, script.hash, ssize);
-  for (const part of [1, 2]) await sendPart(env, script.hash, ssize, part, slice(script.bytes, part));
+  for (const part of allParts(ssize)) await sendPart(env, script.hash, ssize, part, slice(script.bytes, part));
   const bytecode = await completeParts(env, script.hash, ssize);
   assert.equal(bytecode.status, 422);
   assert.match((await bytecode.json()).error, /main\.lua is compiled Lua bytecode/);
