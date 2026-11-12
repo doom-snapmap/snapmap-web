@@ -1,0 +1,43 @@
+# A staging copy of the API Worker for clean mod-store testing: its own name, buckets, session store
+# and index, on workers.dev, never the custom domain, so nothing a player uses is touched.
+#   npx wrangler deploy -c wrangler.staging.toml
+# Empty it between runs with the reset route (README.md, "MODS_ADMIN_TOKEN") or by deleting the
+# objects of snapmap-plus-mods-staging.
+name = "snapmap-plus-community-staging"
+main = "worker.js"
+compatibility_date = "2026-07-01"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "16b82daba3214db2912e3a498c401d93"
+
+[[r2_buckets]]
+bucket_name = "snapmap-plus-media-staging"
+binding = "MEDIA"
+
+[[durable_objects.bindings]]
+name = "WRITE_QUOTAS"
+class_name = "CommunityQuota"
+
+[[migrations]]
+tag = "v1-write-quotas"
+new_sqlite_classes = ["CommunityQuota"]
+
+[[r2_buckets]]
+bucket_name = "snapmap-plus-mods-staging"
+binding = "MODS"
+
+[[durable_objects.bindings]]
+name = "MOD_REGISTRY"
+class_name = "ModRegistry"
+
+[[migrations]]
+tag = "v2-mod-registry"
+new_sqlite_classes = ["ModRegistry"]
+
+[vars]
+MODS_BLOCKED = "[]"
+
+[triggers]
+crons = ["23 4 * * *"]
