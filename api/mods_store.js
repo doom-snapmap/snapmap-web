@@ -1,79 +1,56 @@
-/* Anonymous mod store. A build is the ZIP of a mod's folder (mod.json and the assets/ files its
- * builder block lists) as the product writes it, named by the build hash the product computed.
- * Nothing is browsable: every object is reachable only by hash.
+/* The mod store (SPEC-distribution section 10). It is internal to map publishing: it holds the
+ * units published maps claim, and nothing else. A unit is the closure of one placed object, named by
+ * the SHA-256 of its canonical manifest (unit.json, the product's modunit.c); its files are blobs,
+ * named by their SHA-256 and stored once however many units carry them. Nothing is browsable:
+ * every object is reachable only by hash, and any player fetches any unit by hash.
  *
- * Storage is content addressed (mods_pack.js, mods_registry_store.js): each file's bytes are
- * stored once, as a blob named by its SHA-256, in packs in the MODS bucket, however many builds,
- * revisions of a mod or parts of it that maps name carry them; a build is its skeleton (the
- * archive's own headers) and the blobs it names, served back byte for byte. An upload is
- * checked (every file's SHA-256 against its mod.json, by the product's own reading rules) in the
- * build's MOD_CHECKER Durable Object, served from its archive at once, and packed in the
- * background by the MOD_REGISTRY Durable Object, which indexes builds, blobs, packs, the claims
- * that keep builds served and the uploads in parts in progress. See README.md.
+ * Publishing a map (the product's modpublish.c): POST /mods/units says which units the store holds;
+ * for each it lacks, POST /mods/unit/<hash>/begin sends the manifest and learns which blobs the store
+ * lacks; PUT /mods/unit/<hash>/archive sends them in one ZIP (a blob over one request goes in parts,
+ * /mods/blob/<sha>/parts); then POST /mods/map/claim names the map's units. Writes are signed with
+ * the publisher's key (mods_publisher.js). Every byte is checked in a MOD_CHECKER Durable Object
+ * (every file's SHA-256, size and CRC-32 against the manifest, the manifest against its hash), so the
+ * Worker only moves bytes; the MOD_REGISTRY Durable Object indexes units, blobs, packs, claims, the
+ * deletion delay and uploads in parts (mods_registry_store.js).
  *
- * The store imposes no limit of its own on a build: not on its size, its file count, one
- * file's size, its scripts, the builds one claim names, or the length of a name or path.
- * What remains is what the platform fixes, stated where it applies: one request body
- * (which is why a large build goes in parts) and R2's multipart rules. The per-address
- * hourly limits (WRITE_QUOTAS) are not limits on a mod: they protect the bucket and its
- * bill from abuse, a single upload of any size is admitted, and a publish in parts counts
- * as one upload against them. */
+ * The store imposes no limit of its own on a unit: not its size, its file count, one file's size, or
+ * the units one claim names. What remains is what the platform fixes (one request body, which is why
+ * a large blob goes in parts, and R2's multipart rules). The per-key and per-address hourly limits
+ * (WRITE_QUOTAS, D45) protect the bucket and its bill from abuse; a single upload of any size is
+ * admitted. Every refusal is one plain sentence in "error". */
 
-import { RequestError, readJsonObject } from './request_body.js';
-import { encodeSkeleton, readSkeleton, readSkeletonBytes, skeletonRaw, planStream } from './mods_pack.js';
-import { routeDist, readSigned, authorSigned } from './mods_dist.js';
+import { RequestError, readJsonObject, readBody } from './request_body.js';
+import { planStream, unitArchive, crc32, newObjectKey } from './mods_pack.js';
+import { authOf, verifySigned, verifyBody, claimedKey, foldedName } from './mods_publisher.js';
 
-/* The largest archive one PUT takes, and one part of a larger one. The platform refuses a
- * request body over 100 MB (100,000,000 bytes) on the Free and Pro plans (200 MB Business,
- * 500 MB Enterprise); 95 MiB is 99,614,720 bytes. R2 multipart uploads need every part but
- * the last to have one size, at least 5 MiB, and allow at most 10,000 parts (160 GiB at this
- * size). Parts are small so a client sends several at once, each on its own connection, and a
- * dropped connection costs one small part. */
+/* The largest body one PUT takes, and one part of a larger blob. The platform refuses a request body
+ * over 100 MB (100,000,000 bytes) on the Free and Pro plans; 95 MiB is 99,614,720 bytes. R2
+ * multipart uploads need every part but the last to have one size, at least 5 MiB, and allow at most
+ * 10,000 parts (160 GiB at this size). */
 export const ONE_REQUEST_MAX = 95 * 1024 * 1024;
 export const PART_SIZE = 16 * 1024 * 1024;
-export const CLAIM_WINDOW_MS = 3600000;   // upload-before-claim window (one hour), as in mods_registry_store.js
+export const UNITS_MAX = 4096;                 // units one status request names (SPEC 10.2)
+export const MANIFEST_INLINE = 1024 * 1024;    // a manifest larger than this is an R2 object of its own
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 const PURGE_BATCH = 500;
 const PURGE_ROUNDS = 20;
 const SWEEP_PAGES = 200;                  // 200,000 objects listed per daily run
 const ORPHAN_AGE_MS = 86400000;          // an object no row names is deleted once it is a day old
-const ASKER_SHOWN = 256;
-const READ_CHUNK = 1024 * 1024;               // the check reads an archive back this much at a time
-const PARTS_FROM = 256 * 1024 * 1024;          // an archive larger than this is checked in parts
-const PART_BYTES = 512 * 1024 * 1024;          // the bytes one checker walks and hashes (a larger file alone)
-const PART_WORKERS = 4;                        // checkers at work on one archive at once                 // what asked for a missing file, as its author is shown it
+const READ_CHUNK = 1024 * 1024;           // the check reads an upload back this much at a time
+const REF_MAX = 256;
 
 const HEX64 = /^[0-9a-f]{64}$/;
-const HEX32 = /^[0-9a-f]{32}$/;
 const SALT_RE = /^[a-z][a-z0-9]{7}$/;
-/* A path segment's characters as the builder allows them (modbundle.c mb_path_char),
- * lower-cased as every request path is. */
+/* A path segment's characters as the builder allows them (modbundle.c mb_path_char), lower case. */
 const SEGMENT_RE = /^[a-z0-9._$+@~() -]+$/;
-const CVAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const PRINTABLE_RE = /^[\x20-\x7e]*$/;
-/* The types the builder carries (modbundle.c sh_mb_extension_allowed); .bswf, .lua, .mega2 and .baas_<class>
- * have rules of their own below. tests/contract/client.json records the product's list, and the contract test
- * fails when this one lacks a type the product writes. */
-export const CARRIED_EXTENSIONS = new Set(['decl', 'bmd6model', 'bmd6skl', 'bmd6anim', 'bimage', 'bmodel', 'bcm', 'bnk', 'json', 'bin', 'vspv', 'fspv',
-  'cspv', 'mrpr', 'dmodel', 'pmodel']);
-const BLOCK_KEY = 'snapmap-plus';
-/* The builder block's keys (modbundle.c mb_load_root) and the author keys a built mod.json
- * may no longer use (mb_retired_key). A hand-written "version" is not among them: it is an
- * unknown author key, kept and ignored like any other. */
-const BLOCK_KEYS = new Set(['build', 'built', 'cause', 'classes', 'edits', 'editor', 'files', 'format', 'registries',
-  'rules', 'salt', 'scripts', 'shadows', 'stock', 'tree', 'warnings']);
-const RETIRED_KEYS = ['id', 'key', 'shadows', 'stock', 'scope', 'player', 'extends', 'replaces', 'legacy', 'composes', 'schema'];
-const FILE_KEYS = ['needs', 'path', 'provides', 'sha256', 'size'];
-const POINTER_KEYS = new Set(['closure', 'needs', 'path', 'provides', 'sha256', 'source']);
 const LUA_SIGNATURE = [0x1b, 0x4c, 0x75, 0x61];   // "\x1bLua", the start of every precompiled chunk
-/* A published map that uses only part of a mod uploads just the files it needs: a build of
- * its own whose author part names, in "slice-of", the build it was cut from, and whose
- * archive carries that build's canonical manifest as source.json (modslice.h). */
-const SLICE_KEY = 'slice-of';
-const SOURCE_JSON = 'source.json';
-
-/* Every refusal is one plain sentence the product shows as it is: printable ASCII, whole
- * (modnet.c mn_error_text keeps the printable ASCII of the text, of any length). */
+const UNIT_JSON = 'unit.json';
+const UNIT_FORMAT = 1;
+/* The folders of a mod's own files (R-NM1's layout, SPEC 3.10) and native/ for DOOM files it changes. */
+const KIND_FOLDERS = new Set(['entities', 'materials', 'images', 'meshes', 'animations', 'effects', 'particles', 'sounds',
+  'scripts', 'movies', 'programs', 'map-modules', 'virtual-textures', 'atlases', 'decls', 'environments', 'native']);
+const ROOT_KINDS = new Set(['entity', 'toybox', 'module', 'mod']);
+const SOURCE_RE = /^[a-z0-9_.-]{1,64}$/;
 
 /* ---------------- responses ---------------- */
 
@@ -81,7 +58,11 @@ const UNAVAILABLE = 'The mod store is unavailable right now; try again later.';
 const NOT_FOUND = 'The mod store has nothing at this address.';
 const NOT_ZIP = 'The upload is not a ZIP archive.';
 const BAD_SECRET = 'The secret is not 64 lowercase hex characters.';
-const NO_BUILD = 'The mod store does not have this build.';
+const NO_UNIT = 'The mod store does not have this unit.';
+const NO_BLOB = 'The mod store does not have this file.';
+const REMOVED = 'This unit was removed from the mod store.';
+/* SPEC 5.22: what a client that speaks the retired routes is told. */
+export const RETIRED = 'This version of Snapmap+ cannot use the mod store; run the Snapmap+ installer to update.';
 
 function reply(obj, status, extra) {
   return new Response(JSON.stringify(obj), { status: status || 200, headers: { 'Content-Type': 'application/json', ...extra } });
@@ -141,39 +122,6 @@ function randomHex(bytes) {
   return hex(buf);
 }
 
-/* A new archive's own object: build/<hash>/<random>. */
-function newObject(hash) {
-  return 'build/' + hash + '/' + randomHex(16);
-}
-
-/* ---------------- takedown list ---------------- */
-
-/* MODS_BLOCKED is a Worker variable holding a JSON array of blocked build hashes. A
- * malformed list fails closed so an editing mistake cannot unblock anything. */
-let blockedCache = { source: null, set: null };
-
-function blockedSet(env) {
-  const source = env.MODS_BLOCKED === undefined ? '[]' : String(env.MODS_BLOCKED);
-  if (blockedCache.source === source) return blockedCache.set;
-  let list;
-  try { list = JSON.parse(source); } catch { list = null; }
-  if (!Array.isArray(list) || !list.every(hash => typeof hash === 'string' && HEX64.test(hash.toLowerCase()))) {
-    console.log('mods: MODS_BLOCKED is not a JSON array of SHA-256 hex strings; refusing mod requests');
-    throw new RequestError(UNAVAILABLE, 503);
-  }
-  blockedCache = { source, set: new Set(list.map(hash => hash.toLowerCase())) };
-  return blockedCache.set;
-}
-
-function retryAfterHour() {
-  return String(Math.max(1, Math.ceil((3600000 - (Date.now() % 3600000)) / 1000)));
-}
-
-function blockedResponse(hashes) {
-  return refuse(hashes.length === 1 ? 'This build was taken down from the mod store.' : 'Some of these builds were taken down from the mod store.',
-    451, { blocked: hashes });
-}
-
 /* ---------------- per-address quotas ---------------- */
 
 /* IPv6 clients are keyed by their /64, since one host can rotate freely inside it. */
@@ -212,10 +160,18 @@ async function addressKey(req, env) {
   return sha256Hex(data);
 }
 
-/* Writes fail closed when quota storage is unavailable; reads fail open so installed
- * content stays fetchable through a quota outage. */
-async function admit(req, env, entries, failOpen) {
+/* The hourly limits (D45): every entry against the client's hashed address, and a write's also
+ * against its publishing key (`publisher`, its base64url public half), so neither a key nor an
+ * address can flood the store. Writes fail closed when quota storage is unavailable; reads fail
+ * open so map content stays fetchable through a quota outage. */
+async function admit(req, env, entries, failOpen, publisher = null) {
   try {
+    if (publisher) {
+      const stub = env.WRITE_QUOTAS.get(env.WRITE_QUOTAS.idFromName('mods-key:' + await sha256Hex(publisher)));
+      const result = await stub.consumeMods(entries);
+      if (typeof result?.allowed !== 'boolean') throw new Error('invalid quota result');
+      if (!result.allowed) return false;
+    }
     const key = await addressKey(req, env);
     const stub = env.WRITE_QUOTAS.get(env.WRITE_QUOTAS.idFromName('mods-address:' + key));
     const result = await stub.consumeMods(entries);
@@ -227,8 +183,12 @@ async function admit(req, env, entries, failOpen) {
   }
 }
 
+function retryAfterHour() {
+  return String(Math.max(1, Math.ceil((3600000 - (Date.now() % 3600000)) / 1000)));
+}
+
 function rateLimited() {
-  return refuse('Too many mod store requests came from this address this hour; try again later.', 429, {}, { 'Retry-After': retryAfterHour() });
+  return refuse('Too many mod store requests came from this computer or publishing key this hour; try again later.', 429, {}, { 'Retry-After': retryAfterHour() });
 }
 
 /* ---------------- registry ---------------- */
@@ -255,8 +215,6 @@ function retryAfterFor(error) {
   return RETRY_SOON;
 }
 
-/* ---------------- request paths ---------------- */
-
 function plainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -265,55 +223,26 @@ function displayText(value) {
   return typeof value === 'string' && value.isWellFormed() && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
 }
 
-export function validSalt(salt) {
-  return typeof salt === 'string' && SALT_RE.test(salt);
-}
-
 /* A path or key as a refusal names it: whole, each character outside printable ASCII
  * shown as "?" (the product reads printable ASCII only). */
 function shown(text) {
   return String(text).replace(/[^\x20-\x7e]/g, '?');
 }
 
-/* What is wrong with a request path (the part below assets/), as the end of a sentence
- * that starts with the path, or null. The rules are the builder's (modbundle.c
- * sh_mb_check_request, mb_rp_forbidden, sh_mb_extension_allowed, sh_mb_vt_member):
- * relative; no backslash; no empty, "." or ".." segment; no segment starting with a space
- * or ending in a dot or space; the builder's characters only. A carried file
- * (options.carried) also needs a type the builder carries and must not be one of the
- * engine's own caches: a cooked movie only under generated/swf/, a virtual-texture member
- * only as the mod's own virtualtextures/mods/<salt>/..._sq1 to _sq16 outside any stock _vmtr
- * family, and a script (.lua) only under the mod's mods/<salt>/scripts/. */
-export function pathFault(request, options = {}) {
+/* What is wrong with a path, as the end of a sentence that starts with the path, or null. The rules
+ * are the builder's (modbundle.c sh_mb_check_request, mb_rp_forbidden): relative; no backslash; no
+ * empty, "." or ".." segment; no segment starting with a space or ending in a dot or space; the
+ * builder's characters only (which excludes every control byte). */
+export function pathFault(request) {
   if (typeof request !== 'string' || request.length < 1) return 'has an empty path';
   if (request.startsWith('/')) return 'is an absolute path';
   if (request.includes('\\')) return 'contains a backslash';
-  const segments = request.split('/');
-  for (const segment of segments) {
+  for (const segment of request.split('/')) {
     if (segment === '..' || segment === '.') return 'climbs out of its folder with "." or ".."';
     if (!segment) return 'has an empty folder name';
     if (segment.startsWith(' ') || /[. ]$/.test(segment)) return 'has a name that starts with a space or ends in a dot or a space';
     if (!SEGMENT_RE.test(segment)) return 'has a character a mod path may not use';
   }
-  if (!options.carried) return null;
-  const leaf = segments[segments.length - 1];
-  if (request.startsWith('decls/renderprogs/') || request.startsWith('generated/glslbinaries/') ||
-      request.startsWith('generated/glsl/') || leaf === 'vulkan_pipelines.bin') return 'is an engine file a mod may not ship';
-  const dot = leaf.lastIndexOf('.');
-  const ext = dot >= 0 ? leaf.slice(dot + 1) : null;
-  if (ext === 'lua') {
-    const folder = 'mods/' + (options.salt || '') + '/scripts/';
-    return options.salt && request.startsWith(folder) && dot > 0 ? null
-      : 'is a script outside this mod\'s mods/' + (options.salt || '<salt>') + '/scripts/ folder';
-  }
-  if (ext === 'bswf') return request.startsWith('generated/swf/') ? null : 'is a movie outside generated/swf/';
-  if (ext === 'mega2') {
-    const prefix = 'virtualtextures/mods/' + (options.salt || '') + '/';
-    const ok = options.salt && request.startsWith(prefix) && /_sq(?:[1-9]|1[0-6])\.mega2$/.test(request) &&
-      request.length > prefix.length && !request.slice(prefix.length).includes('_vmtr');
-    return ok ? null : 'is not one of this mod\'s own virtual-texture members';
-  }
-  if (ext === null || (!CARRIED_EXTENSIONS.has(ext) && !/^baas_[a-z0-9_]+$/.test(ext))) return 'is a type of file a mod cannot carry';
   return null;
 }
 
@@ -419,10 +348,10 @@ class ScriptCheck {
 }
 
 /* Reads an archive as it streams past, one chunk at a time, keeping only what it must
- * judge: each entry's header fields and name, mod.json (parsed at the end), and a few
- * integers per script. File contents pass through untouched and the central directory is
+ * judge: each entry's header fields and name, the one entry named options.capture (unit.json)
+ * whole, and a few integers per script. File contents pass through untouched and the central directory is
  * checked record by record against the entries as it streams, so memory grows with the
- * number of entries and the size of mod.json, never with the archive's size. The form is
+ * number of entries and the size of the captured entry, never with the archive's size. The form is
  * the product's (modzip.c): stored entries with their sizes in the local header, then the
  * central directory, then (when a value needs it) the ZIP64 end record and locator, then
  * the end record; nothing before, between or after. ZIP64 values stand where a field holds
@@ -435,6 +364,8 @@ export class ArchiveWalker {
    * the entries already walked (options.entries). length is the offset the stream ends at. */
   constructor(length, options = {}) {
     this.hashEntries = options.hash !== false;
+    this.crc = !!options.crc;          // each entry's CRC-32 computed as it passes (entry.crcComputed)
+    this.capture = options.capture || null;
     this.length = length;
     this.at = options.base || 0;     // the archive offset reached
     this.segmentEnd = options.segmentEnd ?? null;
@@ -449,8 +380,7 @@ export class ArchiveWalker {
     this.remaining = 0;
     this.entries = options.entries || [];
     this.names = new Set(this.entries.map(e => e.name));
-    this.modjson = null;
-    this.source = null;              // source.json: the canonical manifest of the build a part was cut from
+    this.captured = null;            // the bytes of the entry named options.capture
     this.scripts = 0;
     this.central = 0;                // central records read
     this.cdStart = -1;
@@ -510,6 +440,7 @@ export class ArchiveWalker {
         if (entry.data) { entry.data.set(bytes, entry.captured); entry.captured += n; }
         else if (entry.check) entry.check.push(bytes);
         if (entry.hash) this.hashing = entry.hash.write(bytes);
+        if (this.crc) entry.crcRun = crc32(bytes, entry.crcRun);
         this.remaining -= n; i += n; this.at += n;
         if (this.remaining === 0) this.endEntry();
         continue;
@@ -528,6 +459,7 @@ export class ArchiveWalker {
     const entry = this.current;
     if (entry.check) { entry.scriptFault = entry.check.fault(); entry.check = null; }
     entry.digest = entry.hash ? entry.hash.end() : null;
+    if (this.crc) entry.crcComputed = entry.crcRun;
     entry.hash = null;
     this.current = null;
     this.toSig();
@@ -616,11 +548,10 @@ export class ArchiveWalker {
       entry.hash = this.hashEntries ? new StreamHash() : null;
       this.names.add(name);
       this.entries.push(entry);
-      if (name === 'mod.json') {
-        entry.data = this.modjson = new Uint8Array(entry.size);
-        entry.captured = 0;
-      } else if (name === SOURCE_JSON) {
-        entry.data = this.source = new Uint8Array(entry.size);
+      if (this.crc) entry.crcRun = 0;
+      if (this.capture !== null && name === this.capture) {
+        if (entry.size > PART_SIZE) return this.fail('The archive\'s ' + shown(name) + ' is larger than a manifest may be.');
+        entry.data = this.captured = new Uint8Array(entry.size);
         entry.captured = 0;
       } else if (isScript(name)) {
         this.scripts++;
@@ -741,231 +672,126 @@ export class ArchiveWalker {
   }
 }
 
-const MODJSON = 'The archive\'s mod.json ';
-const UNWRITTEN_FILE = MODJSON + 'lists a file entry Snapmap+ did not write.';
-const UNWRITTEN_POINTER = MODJSON + 'lists a pointer entry Snapmap+ did not write.';
-const POINTER_REQUIRED = ['path', 'sha256', 'source', 'provides', 'needs'];
+/* ---------------- the unit's manifest ---------------- */
 
-/* The archive's mod.json against its entries, by the rules the product's own reader applies
- * to a built mod.json (modbundle.c mb_load_root, mb_descriptor_root, mb_common_fields,
- * mb_requirements, mb_load_block_file) and to a downloaded archive (modsync.c
- * msy_archive_matches): every carried file the block lists is in the archive at
- * assets/<its request path, in lower case>, with the size and SHA-256 the block gives it
- * (entry.sha, when the caller hashed the entries), and nothing else is; the block's "scripts"
- * member is present exactly when the archive carries scripts and counts them. The Worker
- * does not recompute the build hash (the canonical manifest, modbundle.c mb_emit) or check
- * what each file provides; the product does both before it installs. There is no mod version anywhere in this: a "version" key an
- * author wrote is an unknown author key and is ignored. Part of a build (SLICE_KEY) also
- * carries source.json, `source` with its SHA-256 `sourceHash`. Returns { salt, scripts },
- * with sliceOf for part of a build, or { error }. */
-export function buildVerdict(hash, entries, modjson, source = null, sourceHash = null) {
-  if (!modjson) return { error: 'The archive has no mod.json.' };
-  let text, doc;
-  try { text = new TextDecoder('utf-8', { fatal: true }).decode(modjson); }
-  catch { return { error: MODJSON + 'is not UTF-8 text.' }; }
-  try { doc = JSON.parse(text); }
-  catch { return { error: MODJSON + 'is not valid JSON.' }; }
-  if (!plainObject(doc)) return { error: MODJSON + 'is not a JSON object.' };
-  const block = doc[BLOCK_KEY];
-  if (!plainObject(block)) return { error: MODJSON + 'has no "snapmap-plus" block, so the mod was never built.' };
-  if (block.format !== 2) return { error: MODJSON + 'is not in format 2, the only one Snapmap+ builds.' };
-  for (const key of Object.keys(block)) {
-    if (!BLOCK_KEYS.has(key)) return { error: MODJSON + 'has a key Snapmap+ does not write in its "snapmap-plus" block: ' + shown(key) + '.' };
-  }
-  if (!validSalt(block.salt)) return { error: MODJSON + 'has no valid salt.' };
-  const salt = block.salt;
-  if (block.cause !== undefined) return { error: MODJSON + 'records a build that failed; fix the mod and build it again.' };
-  if (typeof block.build !== 'string' || !HEX64.test(block.build)) return { error: MODJSON + 'has no build hash.' };
-  if (block.build !== hash) return { error: MODJSON + 'names another build than the one uploaded.' };
-  if ((block.built !== undefined && !(Number.isSafeInteger(block.built) && block.built >= 0)) ||
-      (block.rules !== undefined && !(Number.isSafeInteger(block.rules) && block.rules >= 0)) ||
-      (block.tree !== undefined && !(typeof block.tree === 'string' && HEX64.test(block.tree)))) {
-    return { error: MODJSON + 'has a "snapmap-plus" block Snapmap+ did not write.' };
-  }
-  const author = authorError(doc);
-  if (author) return { error: author };
-
-  if (!Array.isArray(block.files)) return { error: MODJSON + 'has no file list.' };
-  const pointers = block.stock === undefined ? [] : block.stock;
-  if (!Array.isArray(pointers)) return { error: UNWRITTEN_POINTER };
-  const carried = new Map(), requests = new Set();
-  for (const file of block.files) {
-    const keys = plainObject(file) ? Object.keys(file) : [];
-    if (keys.length !== FILE_KEYS.length || !FILE_KEYS.every(key => keys.includes(key)) || typeof file.path !== 'string' ||
-        !file.path.startsWith('assets/')) {
-      return { error: UNWRITTEN_FILE };
-    }
-    const request = file.path.slice(7).toLowerCase();
-    const fault = pathFault(request, { salt, carried: true });
-    if (fault) return { error: 'The file ' + shown(file.path) + ' ' + fault + '.' };
-    if (requests.has(request)) return { error: MODJSON + 'lists ' + shown(file.path) + ' twice.' };
-    if (typeof file.sha256 !== 'string' || !HEX64.test(file.sha256)) return { error: MODJSON + 'gives ' + shown(file.path) + ' no valid hash.' };
-    if (!Number.isSafeInteger(file.size) || file.size < 1) return { error: MODJSON + 'gives ' + shown(file.path) + ' no valid size.' };
-    if (!providesOk(file.provides) || !needsOk(file.needs)) return { error: UNWRITTEN_FILE };
-    requests.add(request);
-    carried.set(request, { size: file.size, sha256: file.sha256 });
-  }
-  /* A pointer names the player's own installed content and never uploads. */
-  for (const pointer of pointers) {
-    const keys = plainObject(pointer) ? Object.keys(pointer) : [];
-    if (!keys.every(key => POINTER_KEYS.has(key)) || POINTER_REQUIRED.some(key => !keys.includes(key)) ||
-        typeof pointer.path !== 'string' || !pointer.path.startsWith('assets/') || typeof pointer.sha256 !== 'string' ||
-        !HEX64.test(pointer.sha256) || typeof pointer.source !== 'string' || !pointer.source ||
-        pointer.source !== pointer.source.toLowerCase() || pointer.source.includes('\\') ||
-        (pointer.closure !== undefined && typeof pointer.closure !== 'boolean') || !providesOk(pointer.provides) || !needsOk(pointer.needs)) {
-      return { error: UNWRITTEN_POINTER };
-    }
-    const request = pointer.path.slice(7).toLowerCase();
-    const fault = pathFault(request);
-    if (fault) return { error: 'The pointer ' + shown(pointer.path) + ' ' + fault + '.' };
-    if (requests.has(request)) return { error: MODJSON + 'lists ' + shown(pointer.path) + ' twice.' };
-    requests.add(request);
-  }
-
-  /* Part of a build: source.json is the canonical manifest of the build "slice-of" names
-   * (its SHA-256 is that hash), of the same mod, and every carried file is a file of it with
-   * the same hash and size. */
-  const sliceOf = doc[SLICE_KEY];
-  if (sliceOf !== undefined) {
-    if (typeof sliceOf !== 'string' || !HEX64.test(sliceOf)) return { error: MODJSON + 'names the build it was cut from by something other than its hash.' };
-    if (!source) return { error: 'The archive has no ' + SOURCE_JSON + ', which names the files of the build it was cut from.' };
-    if (sourceHash !== sliceOf) return { error: 'The archive\'s ' + SOURCE_JSON + ' is not the build its mod.json was cut from.' };
-    let whole;
-    try { whole = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(source)); }
-    catch { return { error: 'The archive\'s ' + SOURCE_JSON + ' is not UTF-8 JSON.' }; }
-    if (!plainObject(whole) || !Array.isArray(whole.files)) return { error: 'The archive\'s ' + SOURCE_JSON + ' lists no files.' };
-    if (whole.id !== salt) return { error: 'The archive\'s ' + SOURCE_JSON + ' is another mod.' };
-    const had = new Map();
-    for (const file of whole.files) {
-      if (plainObject(file) && typeof file.path === 'string' && typeof file.blob === 'string') had.set(file.path, file);
-    }
-    for (const file of block.files) {
-      const was = had.get(file.path);
-      if (!was || was.blob !== file.sha256 || was.size !== file.size) {
-        return { error: 'The file ' + shown(file.path) + ' is not a file of the build it was cut from.' };
-      }
-    }
-  }
-
-  let scripts = 0;
-  for (const entry of entries) {
-    if (entry.name === 'mod.json') continue;
-    if (entry.name === SOURCE_JSON) {
-      if (sliceOf === undefined) return { error: 'The archive holds ' + SOURCE_JSON + ', which only part of a build carries.' };
-      continue;
-    }
-    if (!entry.name.startsWith('assets/')) return { error: 'The archive holds ' + shown(entry.name) + ', which is outside assets/.' };
-    const request = entry.name.slice(7);
-    if (request !== request.toLowerCase()) return { error: 'The archive holds ' + shown(entry.name) + ', whose path is not in lower case.' };
-    const fault = pathFault(request, { salt, carried: true });
-    if (fault) return { error: 'The file ' + shown(entry.name) + ' ' + fault + '.' };
-    if (!carried.has(request)) return { error: 'The archive holds ' + shown(entry.name) + ', which mod.json does not list.' };
-    if (carried.get(request).size !== entry.size) return { error: 'The size of ' + shown(entry.name) + ' does not match mod.json.' };
-    /* The bytes are the file mod.json names: the store keeps each file once by its SHA-256, so
-     * a file is checked before any build can name it. */
-    if (entry.sha !== undefined && entry.sha !== carried.get(request).sha256) {
-      return { error: 'The file ' + shown(entry.name) + ' does not match the SHA-256 its mod.json gives it.' };
-    }
-    if (isScript(entry.name)) {
-      scripts++;
-      if (entry.scriptFault) return { error: 'The script ' + shown(entry.name) + ' ' + entry.scriptFault + '.' };
-    }
-  }
-  const present = new Set(entries.map(entry => entry.name));
-  for (const request of carried.keys()) {
-    if (!present.has('assets/' + request)) return { error: 'The archive lacks ' + shown('assets/' + request) + ', which mod.json lists.' };
-  }
-  /* The block's "scripts" member describes the scripts the archive carries (modbundle.h):
-   * present exactly when there are any, with their count in "files". The index records
-   * the count, and the store's answers say it, so a player is told before downloading. */
-  if (block.scripts === undefined) {
-    if (scripts) return { error: MODJSON + 'does not describe the scripts the archive carries.' };
-  } else if (!scripts || !plainObject(block.scripts) || block.scripts.files !== scripts) {
-    return { error: MODJSON + 'describes scripts the archive does not carry.' };
-  }
-  return sliceOf === undefined ? { salt, scripts } : { salt, scripts, sliceOf };
-}
-
-function providesOk(value) {
-  return plainObject(value) && Object.keys(value).length === 2 && typeof value.type === 'string' && typeof value.name === 'string';
-}
-
-function needsOk(value) {
-  return Array.isArray(value) && value.every(need => plainObject(need) && Object.keys(need).length === 2 &&
-    typeof need.type === 'string' && need.type.length > 0 && typeof need.name === 'string' && need.name.length > 0);
-}
-
-/* The author part of a built mod.json as the product reads it back: no retired key, no
- * builder member at the top level, a name, display text, and requirements in the
- * builder's shape. Every other key is the author's own and is ignored, "version" included. */
-function authorError(doc) {
-  for (const key of RETIRED_KEYS) {
-    if (Object.hasOwn(doc, key)) return MODJSON + 'uses "' + key + '", which Snapmap+ no longer reads.';
-  }
-  if (plainObject(doc.hud) && Object.hasOwn(doc.hud, 'schema')) return MODJSON + 'uses "hud.schema", which Snapmap+ no longer reads.';
-  for (const key of ['files', 'bundle', 'build']) {
-    if (Object.hasOwn(doc, key)) return MODJSON + 'has "' + key + '" outside its "snapmap-plus" block.';
-  }
-  const name = typeof doc.name === 'string' ? doc.name.trim() : '';
-  if (!name || name.includes('\u0000')) return MODJSON + 'has no name.';
-  if (doc.author !== undefined && (typeof doc.author !== 'string' || doc.author.includes('\u0000'))) {
-    return MODJSON + 'has an author that is not text.';
-  }
-  if (doc.homepage !== undefined && typeof doc.homepage !== 'string') return MODJSON + 'has a homepage that is not text.';
-  for (const key of ['strings', 'hud']) {
-    if (doc[key] !== undefined && !plainObject(doc[key])) return MODJSON + 'has "' + key + '" that is not an object.';
-  }
-  if (doc.requirements !== undefined && !requirementsOk(doc.requirements)) return MODJSON + 'has requirements Snapmap+ would not apply.';
+/* What is wrong with a unit file's path (the mod's own path, author layout), as the end of a sentence
+ * that starts with the path, or null: lower case, the builder's characters, inside one of a mod's
+ * folders (SPEC 3.4). */
+function authorPathFault(path) {
+  if (typeof path !== 'string' || path !== path.toLowerCase()) return 'is not written in lower case';
+  const fault = pathFault(path);
+  if (fault) return fault;
+  if (!path.includes('/') || !KIND_FOLDERS.has(path.slice(0, path.indexOf('/')))) return 'is in none of a mod\'s folders';
   return null;
 }
 
-/* Console settings and lines the product applies while a mod's requirements are live, in
- * the builder's shape (modbundle.c mb_requirements): any number of cvars named like cvars,
- * each a string of printable ASCII, an integer or a boolean, no name twice in any case;
- * activate and deactivate lists of any length, each line printable ASCII without ';' and
- * not empty once its spaces are trimmed. No count or length of the store's own. */
-function requirementsOk(req) {
-  if (!plainObject(req) || Object.keys(req).some(key => key !== 'cvars' && key !== 'commands')) return false;
-  if (req.cvars !== undefined) {
-    if (!plainObject(req.cvars)) return false;
-    const seen = new Set();
-    for (const [name, value] of Object.entries(req.cvars)) {
-      if (!CVAR_RE.test(name) || seen.has(name.toLowerCase())) return false;
-      seen.add(name.toLowerCase());
-      const ok = typeof value === 'boolean' || (Number.isSafeInteger(value) && Math.abs(value) < 1e15) ||
-        (typeof value === 'string' && PRINTABLE_RE.test(value));
-      if (!ok) return false;
-    }
+/* The manifest (its exact bytes) judged by SPEC 3.7's upload checks 2: it parses, its keys are
+ * exactly SPEC 3.4's, its paths are valid. Returns { files, game, root, spelled, size, distinct } or
+ * { error } (one sentence). `distinct` is [[sha, size]] per blob. The hash is checked by the caller. */
+export function unitVerdict(bytes) {
+  const bad = what => ({ error: 'The unit\'s manifest ' + what });
+  let doc;
+  try { doc = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)); }
+  catch { return bad('is not JSON text.'); }
+  if (!plainObject(doc)) return bad('is not a JSON object.');
+  for (const key of Object.keys(doc)) if (!['files', 'format', 'game', 'mod', 'root', 'spelled'].includes(key)) return bad('has a key a unit does not have: ' + shown(key) + '.');
+  for (const key of ['files', 'format', 'game', 'mod', 'root']) if (!(key in doc)) return bad('has no "' + key + '".');
+  if (doc.format !== UNIT_FORMAT) return bad('is in a unit format this mod store does not know.');
+  if (!Array.isArray(doc.files)) return bad('lists its files by something other than a list.');
+  if (!Array.isArray(doc.game)) return bad('lists DOOM\'s files by something other than a list.');
+  if (!plainObject(doc.mod)) return bad('gives its mod part as something other than an object.');
+  if (!plainObject(doc.root) || Object.keys(doc.root).length !== 2 || !ROOT_KINDS.has(doc.root.kind) ||
+      typeof doc.root.name !== 'string' || !doc.root.name || !displayText(doc.root.name)) return bad('names its root wrongly.');
+  if ('spelled' in doc && !(typeof doc.spelled === 'string' && SALT_RE.test(doc.spelled))) return bad('names the namespace its files spell wrongly.');
+  const sizes = new Map();
+  let size = 0, last = null;
+  for (const f of doc.files) {
+    if (!plainObject(f) || Object.keys(f).length !== 3 || typeof f.path !== 'string' || typeof f.sha256 !== 'string' ||
+        !HEX64.test(f.sha256) || !Number.isSafeInteger(f.size) || f.size < 0) return bad('lists a file entry Snapmap+ did not write.');
+    const fault = authorPathFault(f.path);
+    if (fault) return bad('lists ' + shown(f.path) + ', which ' + fault + '.');
+    if (last !== null && !(f.path > last)) return bad('lists its files out of order or twice.');
+    last = f.path;
+    if (sizes.has(f.sha256) && sizes.get(f.sha256) !== f.size) return bad('names one SHA-256 at two sizes.');
+    sizes.set(f.sha256, f.size);
+    size += f.size;
   }
-  if (req.commands !== undefined) {
-    if (!plainObject(req.commands) || Object.keys(req.commands).some(key => key !== 'activate' && key !== 'deactivate')) return false;
-    for (const list of Object.values(req.commands)) {
-      if (!Array.isArray(list)) return false;
-      for (const line of list) {
-        if (typeof line !== 'string') return false;
-        const trimmed = line.replace(/^ +| +$/g, '');
-        if (!trimmed || !PRINTABLE_RE.test(trimmed) || trimmed.includes(';')) return false;
-      }
-    }
+  last = null;
+  for (const g of doc.game) {
+    if (!plainObject(g) || typeof g.path !== 'string' || typeof g.sha256 !== 'string' || !HEX64.test(g.sha256) ||
+        typeof g.source !== 'string' || !SOURCE_RE.test(g.source) ||
+        Object.keys(g).some(k => !['at', 'path', 'sha256', 'source'].includes(k))) return bad('lists a DOOM file entry Snapmap+ did not write.');
+    const fault = g.path !== g.path.toLowerCase() ? 'is not written in lower case' : pathFault(g.path);
+    if (fault) return bad('lists DOOM\'s ' + shown(g.path) + ', which ' + fault + '.');
+    if ('at' in g) { const f2 = authorPathFault(g.at); if (f2) return bad('places DOOM\'s file at ' + shown(g.at) + ', which ' + f2 + '.'); }
+    if (last !== null && g.path < last) return bad('lists DOOM\'s files out of order.');
+    last = g.path;
   }
-  return true;
+  return { files: doc.files, game: doc.game, root: doc.root, spelled: doc.spelled ?? null, size, distinct: [...sizes] };
 }
 
-/* Runs a stream through a fresh walker to its end. Returns the walker, with error set when
- * the archive is refused, or null when the stream broke off. */
+function hexOf(bytes) {
+  let s = '';
+  for (const b of bytes) s += b.toString(16).padStart(2, '0');
+  return s;
+}
+
+/* The bytes of a unit's manifest the registry recorded: inline text or an R2 object. */
+async function manifestBytes(env, row) {
+  if (row.manifest !== null && row.manifest !== undefined) return new TextEncoder().encode(row.manifest);
+  const obj = row.manifestObject || row.manifest_object ? await env.MODS.get(row.manifestObject || row.manifest_object) : null;
+  return obj ? new Uint8Array(await obj.arrayBuffer()) : null;
+}
+
+/* ---------------- the checks (in a MOD_CHECKER Durable Object) ---------------- */
+
+/* A signed request's publisher is recorded and its account name bound (D31). */
+async function seen(env, signed) {
+  await registry(env, 'publisherSeen', signed.key, signed.name, foldedName(signed.name));
+}
+
+/* POST /mods/unit/<hash>/begin: `bytes` is the manifest. Its SHA-256 must be the hash (SPEC 3.7 upload
+ * check 1); since it is, the request's body hash is the unit hash. Returns { status, body }. */
+export async function beginIn(env, hash, bytes, auth) {
+  if ((await sha256Hex(bytes)) !== hash) return { status: 422, body: { error: 'The unit\'s manifest does not have the SHA-256 its address names.' } };
+  const signed = await verifySigned(auth, hash);
+  if (signed.refusal) return { status: 403, body: { error: signed.refusal } };
+  const verdict = unitVerdict(bytes);
+  if (verdict.error) return { status: 422, body: { error: verdict.error } };
+  let manifest = null, manifestObject = null;
+  if (bytes.byteLength <= MANIFEST_INLINE) manifest = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
+  else {
+    manifestObject = newObjectKey('manifest', hash);
+    await env.MODS.put(manifestObject, bytes, { httpMetadata: { contentType: 'application/json' } });
+  }
+  const result = await registry(env, 'beginUnit', {
+    hash, manifest, manifestObject, mlen: bytes.byteLength, size: verdict.size, files: verdict.distinct,
+    spelled: verdict.spelled, rootKind: verdict.root.kind, rootName: verdict.root.name, key: signed.key,
+  });
+  await deleteQueued(env, result.discard);
+  await seen(env, signed);
+  if (result.blocked) return { status: 451, body: { error: REMOVED, removed: [hash] } };
+  if (result.conflict) return { status: 422, body: { error: 'The unit\'s manifest names a file at another size than the bytes of that SHA-256.' } };
+  if (result.held) return { status: 200, body: { held: true } };
+  return { status: 200, body: { missing: result.missing, partSize: PART_SIZE, oneRequest: ONE_REQUEST_MAX } };
+}
+
 async function walkStream(stream, length, options = {}) {
   const walker = new ArchiveWalker(length, options);
+  const whole = options.wholeHash ? new StreamHash() : null;
   let reader, byob = true;
-  /* A byte stream (R2's) is read a megabyte at a time: the check's own work is per chunk, so a
-   * gigabyte costs a thousand steps, not hundreds of thousands. */
   try { reader = stream.getReader({ mode: 'byob' }); } catch { byob = false; reader = stream.getReader(); }
+  const feed = async bytes => {
+    if (whole) whole.write(bytes);
+    walker.push(bytes);
+    await walker.settled();
+  };
   try {
     for (;;) {
       if (!byob) {
         const { value, done } = await reader.read();
         if (done) break;
-        walker.push(value);
-        await walker.settled();
+        await feed(value);
         continue;
       }
       let buf = new Uint8Array(READ_CHUNK), filled = 0, done = false;
@@ -975,32 +801,132 @@ async function walkStream(stream, length, options = {}) {
         buf = new Uint8Array(r.value.buffer);
         filled += r.value.byteLength;
       }
-      if (filled) { walker.push(buf.subarray(0, filled)); await walker.settled(); }
+      if (filled) await feed(buf.subarray(0, filled));
       if (done) break;
     }
   } catch { return null; }
   finally { reader.releaseLock(); }
   walker.finish();
+  if (whole) walker.wholeSha = await whole.end();
   return walker;
 }
-async function verdictOf(walker, hash) {
-  if (walker.error) return { refusal: walker.error };
+
+/* The check of an uploaded unit archive stored as `object` (SPEC 3.7 upload checks 3 and 4): read
+ * back once, every entry hashed and its CRC-32 computed; unit.json must be the unit's begun manifest,
+ * every other entry a file that manifest lists, at its path, with its SHA-256 and size, and nothing
+ * else. The signature covers the archive's SHA-256, computed in the same pass. A passing archive is
+ * kept as a pack; a refused one is deleted. Returns { status, body }. */
+export async function checkUnitArchiveIn(env, hash, object, size, auth) {
+  const refuseWith = async (status, error, extra = {}) => { await deleteObjects(env, [object]); return { status, body: { error, ...extra } }; };
+  const head = await env.MODS.head(object);
+  if (!head || head.size !== size) return refuseWith(400, 'The upload ended before the whole archive arrived; try again.');
+  const row = await registry(env, 'unitRow', hash);
+  if (!row) return refuseWith(409, 'The mod store has no upload of this unit begun; begin it again.');
+  const mbytes = await manifestBytes(env, row);
+  if (!mbytes) return refuseWith(503, UNAVAILABLE);
+  const verdict = unitVerdict(mbytes);
+  if (verdict.error) return refuseWith(503, UNAVAILABLE);
+  const listed = new Map(verdict.files.map(f => [f.path, f]));
+  const obj = await env.MODS.get(object);
+  const walker = obj ? await walkStream(obj.body, size, { crc: true, wholeHash: true, capture: UNIT_JSON }) : null;
+  if (!walker) return refuseWith(503, UNAVAILABLE);
+  if (walker.error) return refuseWith(422, walker.error);
   await walker.digests();
-  const sourceHash = walker.source ? walker.entries.find(e => e.name === SOURCE_JSON).sha : null;
-  const verdict = buildVerdict(hash, walker.entries, walker.modjson, walker.source, sourceHash);
-  if (verdict.error) return { refusal: verdict.error };
-  verdict.modjson = walker.entries.find(e => e.name === 'mod.json').sha;
-  return verdict;
+  const signed = await verifySigned(auth, walker.wholeSha);
+  if (signed.refusal) return refuseWith(403, signed.refusal);
+  let manifestSeen = false;
+  const blobs = [];
+  for (const e of walker.entries) {
+    if (e.name === UNIT_JSON) {
+      if (e.sha !== hash) return refuseWith(422, 'The archive\'s unit.json is not the unit\'s manifest.');
+      manifestSeen = true;
+      continue;
+    }
+    const f = listed.get(e.name);
+    if (!f) return refuseWith(422, 'The archive holds ' + shown(e.name) + ', which the unit\'s manifest does not list.');
+    if (f.sha256 !== e.sha || f.size !== e.size) return refuseWith(422, 'The archive\'s ' + shown(e.name) + ' is not the file the unit\'s manifest names.');
+    if (e.crcComputed !== e.crc) return refuseWith(422, 'The archive\'s ' + shown(e.name) + ' does not have the CRC-32 its header gives.');
+    if (e.scriptFault) return refuseWith(422, shown(e.name) + ' ' + e.scriptFault + '.');
+    blobs.push({ sha: e.sha, size: e.size, crc: e.crc, at: e.offset, hlen: e.header.byteLength, hdr: '' });
+  }
+  if (!manifestSeen) return refuseWith(422, 'The archive has no unit.json.');
+  const result = await registry(env, 'commitUnitArchive', hash, object, size, blobs);
+  await deleteQueued(env, result.discard);
+  await seen(env, signed);
+  if (result.gone) return { status: 409, body: { error: 'The mod store has no upload of this unit begun; begin it again.' } };
+  if (result.held) return { status: 201, body: { held: true } };
+  return { status: 200, body: { held: false, missing: result.missing } };
 }
 
-/* Deletes objects nothing names any more (released, purged, refused, or replaced). */
+/* The check of one blob uploaded in parts, stored as `object`: its SHA-256, size and CRC-32. */
+export async function checkBlobIn(env, sha, object, size) {
+  const obj = await env.MODS.get(object);
+  if (!obj || obj.size !== size) { await deleteObjects(env, [object]); return { status: 400, body: { error: 'The parts of this file did not arrive whole; upload it again.' } }; }
+  const h = new StreamHash();
+  let crc = 0;
+  const reader = obj.body.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      crc = crc32(value, crc);
+      await h.write(value);
+    }
+  } catch { await deleteObjects(env, [object]); return { status: 503, body: { error: UNAVAILABLE } }; }
+  if ((await h.end()) !== sha) { await deleteObjects(env, [object]); return { status: 422, body: { error: 'The file\'s bytes do not have the SHA-256 its address names.' } }; }
+  const result = await registry(env, 'commitBlob', sha, size, crc, object);
+  await deleteQueued(env, result.discard);
+  return { status: 201, body: { held: true } };
+}
+
+/* The serving plan of a unit's archive: { size, plan, raw } or null when it is not served. */
+export async function archivePlanIn(env, hash) {
+  const served = await registry(env, 'unitServed', hash, true);
+  if (!served) return null;
+  const mbytes = await manifestBytes(env, served);
+  const verdict = mbytes ? unitVerdict(mbytes) : null;
+  if (!verdict || verdict.error) return null;
+  return unitArchive(mbytes, verdict.files, served.blobs);
+}
+
+/* A player's game asked unit `hash` for `path` (3.8). Returns { status, body }. */
+export async function askedIn(env, hash, path) {
+  const row = await registry(env, 'unitRow', hash);
+  if (!row) return { status: 404, body: { error: NO_UNIT } };
+  const mbytes = await manifestBytes(env, row);
+  const verdict = mbytes ? unitVerdict(mbytes) : null;
+  if (!verdict || verdict.error) return { status: 503, body: { error: UNAVAILABLE } };
+  if (verdict.files.some(f => f.path === path)) return { status: 400, body: { error: 'The unit holds that file already.' } };
+  const result = await registry(env, 'reportAsked', hash, path);
+  if (result.notFound) return { status: 404, body: { error: NO_UNIT } };
+  return { status: 204, body: null };
+}
+
+/* A checker's method: in the unit's MOD_CHECKER Durable Object when the binding is there (deployed),
+ * else here (the unit tests). */
+async function checker(env, name, method, ...args) {
+  const local = { begin: beginIn, archive: checkUnitArchiveIn, blob: checkBlobIn, plan: archivePlanIn, asked: askedIn }[method];
+  if (!env.MOD_CHECKER) return local(env, ...args);
+  try {
+    return await env.MOD_CHECKER.get(env.MOD_CHECKER.idFromName(name))[method](...args);
+  } catch (error) {
+    console.log('mods: the check failed (' + method + '):', String(error && error.message).slice(0, 200));
+    const refusal = new RequestError(UNAVAILABLE, 503);
+    refusal.retryAfter = retryAfterFor(error);
+    throw refusal;
+  }
+}
+
+function answer(result) {
+  return result.body === null ? new Response(null, { status: result.status }) : reply(result.body, result.status);
+}
+
 async function deleteObjects(env, objects) {
   const keys = (objects || []).filter(Boolean);
   for (let i = 0; i < keys.length; i += 1000) await env.MODS.delete(keys.slice(i, i + 1000));
 }
 
-/* Deletes objects the registry put on its delete queue, then tells it so. What is not deleted
- * here stays queued for the packer's alarm and the daily purge. */
+/* Deletes objects the registry queued, then tells it so; what fails stays queued for the purge. */
 async function deleteQueued(env, objects) {
   const keys = (objects || []).filter(Boolean);
   if (!keys.length) return;
@@ -1012,224 +938,29 @@ async function deleteQueued(env, objects) {
   }
 }
 
-/* Records a checked archive stored as `object`: its skeleton (the archive's headers, which file
- * each entry holds, and for part of a build what it left out) is written, and the registry takes
- * the build, staged, served from the archive until the packer has moved its files into packs.
- * Returns the answer to the upload. */
-async function register(env, hash, size, verdict, object, walker) {
-  const skeleton = 'skel/' + hash + '/' + randomHex(16);
-  const entries = walker.entries.map(e => ({ name: e.name, sha: e.sha, size: e.size, at: e.offset, header: e.header }));
-  await env.MODS.put(skeleton, encodeSkeleton(size, entries, walker.tail(), verdict.leftOut || null),
-    { httpMetadata: { contentType: 'application/octet-stream' } });
-  const result = await registry(env, 'registerBuild', {
-    hash, size, salt: verdict.salt, scripts: verdict.scripts, sliceOf: verdict.sliceOf ?? null,
-    archive: object, skeleton, modjson: verdict.modjson, entries: entries.length,
-  });
-  await deleteQueued(env, result.discard);
-  return { status: result.created ? 201 : 200, body: { build: hash, size, scripts: verdict.scripts } };
-}
+/* ---------------- reads ---------------- */
 
-/* The check of an archive stored as `object` (`size` bytes) under `hash`: read back once from R2
- * through the walker, every entry hashed, mod.json and every file judged, the skeleton written
- * and the build registered. A refused archive is deleted. Returns { status, body }: the answer
- * to the upload. It runs in the build's own MOD_CHECKER Durable Object (ModChecker in
- * mods_registry.js), which has the CPU time a large archive needs whatever the account's plan;
- * the Worker only moves bytes. */
-export async function checkArchive(env, hash, object, size) {
-  const obj = await env.MODS.head(object);
-  if (!obj || obj.size !== size) {
-    await deleteObjects(env, [object]);
-    return { status: 400, body: { error: 'The upload ended before the whole archive arrived; try again.' } };
-  }
-  /* A large archive is walked and hashed in parts by several checkers at once (walkInParts), so
-   * no one request spends more CPU than the platform gives it, whatever the archive's size; one
-   * that does not add up is walked again in one piece, which names the first fault. */
-  let walker = null;
-  /* MODS_PARTS_FROM and MODS_PART_BYTES move the thresholds (the unit tests check small archives in parts). */
-  if (size > (Number(env.MODS_PARTS_FROM) || PARTS_FROM)) {
-    try { walker = await walkInParts(env, hash, object, size); }
-    catch (error) { console.log('mods: the check in parts failed:', String(error && error.message).slice(0, 200)); walker = null; }
-  }
-  if (!walker) {
-    const whole = await env.MODS.get(object);
-    walker = whole ? await walkStream(whole.body, size) : null;
-  }
-  if (!walker) {
-    await deleteObjects(env, [object]);
-    console.log('mods: an archive could not be read back');
-    return { status: 503, body: { error: UNAVAILABLE } };
-  }
-  const verdict = await verdictOf(walker, hash);
-  if (verdict.refusal) {
-    await deleteObjects(env, [object]);
-    return { status: 422, body: { error: verdict.refusal } };
-  }
-  if (verdict.sliceOf) verdict.leftOut = leftOutOfSource(walker);
-  return register(env, hash, size, verdict, object, walker);
-}
-
-/* ---------------- the check of a large archive, in parts ---------------- */
-
-/* Where an archive's central directory starts and what it says: { cdOffset, offsets: [the local
- * header offset of each entry, in central order] }, or null when the tail is not what the product
- * writes (the sequential check then says why). Reads only the archive's last bytes and its
- * central directory. */
-async function centralOf(env, object, size) {
-  const window = Math.min(size, 22 + 65535 + 20 + 56);
-  const lastObj = await env.MODS.get(object, { range: { offset: size - window, length: window } });
-  if (!lastObj) return null;
-  const last = new Uint8Array(await lastObj.arrayBuffer());
-  let endAt = -1;
-  for (let i = last.byteLength - 22; i >= 0; i--) {
-    if (u32(last, i) === SIG_END && i + 22 + u16(last, i + 20) === last.byteLength) { endAt = i; break; }
-  }
-  if (endAt < 0) return null;
-  let cdOffset = u32(last, endAt + 16), total = u16(last, endAt + 10);
-  if (cdOffset === M32 || total === M16 || u32(last, endAt + 12) === M32) {
-    if (endAt < 20 || u32(last, endAt - 20) !== SIG_ZIP64_LOCATOR) return null;
-    const at64 = u64(last, endAt - 20 + 8);
-    if (at64 === null || at64 + 56 > size) return null;
-    const recObj = await env.MODS.get(object, { range: { offset: at64, length: 56 } });
-    const rec = recObj && new Uint8Array(await recObj.arrayBuffer());
-    if (!rec || u32(rec, 0) !== SIG_ZIP64_END) return null;
-    cdOffset = u64(rec, 48);
-    total = u64(rec, 32);
-    if (cdOffset === null || total === null) return null;
-  }
-  if (cdOffset < 0 || cdOffset >= size) return null;
-  const cdObj = await env.MODS.get(object, { range: { offset: cdOffset, length: size - cdOffset } });
-  if (!cdObj) return null;
-  const tail = new Uint8Array(await cdObj.arrayBuffer());
-  const offsets = [];
-  let at = 0;
-  while (at + 46 <= tail.byteLength && u32(tail, at) === SIG_CENTRAL && offsets.length < total) {
-    const csize = u32(tail, at + 20), usize = u32(tail, at + 24), nameLength = u16(tail, at + 28), extraLength = u16(tail, at + 30);
-    let offset = u32(tail, at + 42);
-    const mo = offset === M32;
-    if (mo) {
-      const extra = zip64Values(tail.subarray(at + 46 + nameLength, at + 46 + nameLength + extraLength), (usize === M32 ? 1 : 0) + (csize === M32 ? 1 : 0) + 1);
-      if (extra.error) return null;
-      offset = extra.values[extra.values.length - 1];
-    }
-    offsets.push(offset);
-    at += 46 + nameLength + extraLength + u16(tail, at + 32);
-  }
-  if (offsets.length !== total || !offsets.length) return null;
-  for (let i = 0; i < offsets.length; i++) if (offsets[i] !== (i ? offsets[i] : 0) || (i && offsets[i] <= offsets[i - 1])) return null;
-  return { cdOffset, offsets, tail };
-}
-
-/* The entries of [start, end) of an archive: local headers and bytes walked as the sequential
- * check walks them, every entry hashed. Returns { entries } or { error }. Runs in a checker
- * Durable Object of its own. */
-export async function walkSegment(env, object, start, end) {
-  const obj = await env.MODS.get(object, { range: { offset: start, length: end - start } });
-  if (!obj) return { error: 'gone' };
-  const walker = await walkStream(obj.body, end, { base: start, segmentEnd: end });
-  if (!walker) return { error: 'unreadable' };
-  if (walker.error) return { error: walker.error };
-  await walker.digests();
-  return { entries: walker.entries.map(e => ({ name: e.name, flags: e.flags, crc: e.crc, size: e.size, offset: e.offset,
-    nameLength: e.nameLength, extraLength: e.extraLength, header: e.header, sha: e.sha, scriptFault: e.scriptFault ?? null,
-    data: e.data || null })) };
-}
-
-/* The check of a large archive by parts: its entries walked and hashed by up to PART_WORKERS
- * checkers at once, about PART_BYTES each, then the central directory and end records walked
- * against them here. Returns a walker (as walkStream's, entries hashed) or null when anything does
- * not add up, and the sequential check then runs and says why. */
-async function walkInParts(env, hash, object, size) {
-  const central = await centralOf(env, object, size);
-  if (!central) return null;
-  const { cdOffset, offsets, tail } = central;
-  const jobs = [];
-  let begin = 0;
-  for (let i = 1; i <= offsets.length; i++) {
-    const at = i < offsets.length ? offsets[i] : cdOffset;
-    if (i === offsets.length || at - begin >= (Number(env.MODS_PART_BYTES) || PART_BYTES)) { jobs.push([begin, at]); begin = at; }
-  }
-  const results = new Array(jobs.length);
-  let next = 0;
-  const run = async () => {
-    for (let k; (k = next++) < jobs.length;) {
-      const [a, b] = jobs[k];
-      results[k] = env.MOD_CHECKER
-        ? await env.MOD_CHECKER.get(env.MOD_CHECKER.idFromName('walk:' + hash + ':' + k)).walkSegment(object, a, b)
-        : await walkSegment(env, object, a, b);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(PART_WORKERS, jobs.length) }, run));
-  if (results.some(r => !r || r.error)) return null;
-  const entries = results.flatMap(r => r.entries);
-  const names = new Set(entries.map(e => e.name));
-  if (names.size !== entries.length || entries.length !== offsets.length) return null;
-  const walker = new ArchiveWalker(size, { base: cdOffset, tail: true, entries });
-  walker.push(tail);
-  walker.finish();
-  if (walker.error) return null;
-  walker.modjson = entries.find(e => e.name === 'mod.json')?.data || null;
-  walker.source = entries.find(e => e.name === SOURCE_JSON)?.data || null;
-  return walker;
-}
-
-/* The requests of the build a part was cut from that the part does not carry. */
-function leftOutOfSource(walker) {
-  let whole;
-  try { whole = JSON.parse(new TextDecoder().decode(walker.source)); } catch { return []; }
-  const carried = new Set(walker.entries.filter(e => e.name.startsWith('assets/')).map(e => e.name.slice(7)));
-  const out = new Set();
-  for (const file of Array.isArray(whole.files) ? whole.files : []) {
-    const request = plainObject(file) && typeof file.request === 'string' ? file.request.toLowerCase() : null;
-    if (request && !file.stock && !carried.has(request)) out.add(request);
-  }
-  return [...out].sort();
-}
-
-/* The check, in the build's checker Durable Object when the binding is there (deployed), else
- * here (the unit tests). */
-async function runCheck(env, hash, object, size) {
-  if (!env.MOD_CHECKER) return checkArchive(env, hash, object, size);
-  try {
-    const stub = env.MOD_CHECKER.get(env.MOD_CHECKER.idFromName('check:' + hash));
-    return await stub.check(hash, object, size);
-  } catch (error) {
-    console.log('mods: the archive check failed:', String(error && error.message).slice(0, 200));
-    throw new RequestError(UNAVAILABLE, 503);
-  }
-}
-
-/* A build an upload need not send again: one a claim names, whole. An unclaimed build is
- * taken again (the registry keeps the stored one when the upload is the same archive and
- * replaces it otherwise), so an archive that names a hash it is not cannot hold that hash
- * against the real one. */
-async function heldAlready(env, hash) {
-  const row = await registry(env, 'buildRow', hash);
-  return row && (row.claims > 0 || row.vrefs > 0) && !row.broken ? row : null;
-}
-/* ---------------- build routes ---------------- */
-
-function objectHeaders(length, hash, scripts) {
+function objectHeaders(type, length, tag) {
   const h = new Headers();
-  h.set('Content-Type', 'application/zip');
+  h.set('Content-Type', type);
   h.set('Content-Length', String(length));
   h.set('Cache-Control', IMMUTABLE);
-  h.set('ETag', '"' + hash + '"');
+  h.set('ETag', '"' + tag + '"');
   h.set('Accept-Ranges', 'bytes');
   h.set('X-Content-Type-Options', 'nosniff');
   h.set('Content-Security-Policy', "default-src 'none'; sandbox");
   h.set('Content-Disposition', 'attachment');
-  h.set('X-Mod-Scripts', String(scripts));
   return h;
 }
 
-/* The one byte range a GET asks for, as { start, end } (end exclusive); null for the whole
- * archive (no Range, an If-Range for another build, or a form this store does not serve, such
- * as several ranges); 'unsatisfiable' for a range wholly past the end. */
-export function wantedRange(req, size, hash) {
+/* The one byte range a GET asks for, as { start, end } (end exclusive); null for the whole object
+ * (no Range, an If-Range for another object, or a form this store does not serve, such as several
+ * ranges); 'unsatisfiable' for a range wholly past the end. */
+export function wantedRange(req, size, tag) {
   const header = req.headers.get('Range');
   if (!header) return null;
   const ifRange = req.headers.get('If-Range');
-  if (ifRange && ifRange.trim() !== '"' + hash + '"') return null;
+  if (ifRange && ifRange.trim() !== '"' + tag + '"') return null;
   const m = header.trim().match(/^bytes=(\d*)-(\d*)$/);
   if (!m || (m[1] === '' && m[2] === '')) return null;
   if (m[1] === '') {
@@ -1246,190 +977,224 @@ export function wantedRange(req, size, hash) {
   return { start, end: Math.min(last, size - 1) + 1 };
 }
 
-/* A build is served while a claim names it, or for one hour after its upload. Every answer
- * says how many scripts the build carries (X-Mod-Scripts), so a HEAD tells the product
- * before it asks the player. A GET may ask for one byte range (Range: bytes=a-b), so a
- * download that broke off resumes where it stopped. The archive is the one uploaded, byte for
- * byte, whether it is still staged (served from its archive) or packed (its plan's ranges of
- * packs and skeleton, piped without the Worker touching the bytes). An object found missing
- * marks the build broken: it answers 404 from then on, and the author's next publish uploads it
- * again and repairs it. */
-async function serveBuild(req, env, hash) {
-  if (blockedSet(env).has(hash)) return blockedResponse([hash]);
-  if (!(await admit(req, env, [['mod_get', 1]], true))) return rateLimited();
-  const served = await registry(env, 'buildServed', hash);
-  if (!served) return refuse(NO_BUILD, 404);
-  const size = served.size;
-  const range = req.method === 'GET' ? wantedRange(req, size, hash) : null;
-  if (range === 'unsatisfiable') {
-    const h = objectHeaders(0, hash, served.scripts);
-    h.set('Content-Range', 'bytes */' + size);
-    h.set('Content-Type', 'application/json');
-    h.delete('Content-Length');
-    return new Response(JSON.stringify({ error: 'The range asked for lies past the end of this build.' }), { status: 416, headers: h });
-  }
-  const start = range ? range.start : 0, end = range ? range.end : size;
-  const headers = objectHeaders(end - start, hash, served.scripts);
-  if (range) headers.set('Content-Range', 'bytes ' + start + '-' + (end - 1) + '/' + size);
-  const status = range ? 206 : 200;
-  const missing = async object => { await registry(env, 'markBroken', hash, object); return refuse(NO_BUILD, 404); };
-
-  if (served.state !== 'packed') {
-    if (req.method === 'HEAD') {
-      if (!(await env.MODS.head(served.archive))) return missing(served.archive);
-      return new Response(null, { status, headers: objectHeaders(size, hash, served.scripts) });
-    }
-    const obj = await env.MODS.get(served.archive, range ? { range: { offset: start, length: end - start } } : undefined);
-    if (!obj) return missing(served.archive);
-    return new Response(obj.body, { status, headers });
-  }
-  if (req.method === 'HEAD') return new Response(null, { status, headers: objectHeaders(size, hash, served.scripts) });
-  const needsRaw = served.plan.some(([object]) => object === null);
-  const skel = needsRaw ? await readSkeletonBytes(env, served.skeleton) : null;
-  if (needsRaw && !skel) return missing(served.skeleton);
-  const body = planStream(env, served.plan, skel ? skeletonRaw(skel) : null, start, end, object => registry(env, 'markBroken', hash, object));
-  return new Response(body, { status, headers });
+function unsatisfiable(size) {
+  return new Response(JSON.stringify({ error: 'The range asked for lies past the end of this file.' }),
+    { status: 416, headers: { 'Content-Type': 'application/json', 'Content-Range': 'bytes */' + size } });
 }
+
+/* POST /mods/units {"units": [hash...]}: held, missing or removed for each (at most UNITS_MAX). */
+async function postUnits(req, env) {
+  if (!(await admit(req, env, [['mod_get', 1]], true))) { await discard(req); return rateLimited(); }
+  const body = await readRequestJson(req);
+  if (!Array.isArray(body.units) || !body.units.every(h => typeof h === 'string' && HEX64.test(h))) return refuse('The request does not list units by hash.', 400);
+  if (body.units.length > UNITS_MAX) return refuse('The request names more than ' + UNITS_MAX + ' units; ask in several requests.', 400);
+  return reply(await registry(env, 'unitStatus', body.units));
+}
+
+/* GET /mods/unit/<hash>: the manifest's exact bytes. Held units are served while a claim names them
+ * or within their deletion delay. */
+async function getUnit(req, env, hash) {
+  if (!(await admit(req, env, [['mod_get', 1]], true))) return rateLimited();
+  const status = await registry(env, 'unitStatus', [hash]);
+  if (status[hash] === 'removed') return refuse(REMOVED, 451, { removed: [hash] });
+  const served = await registry(env, 'unitServed', hash, false);
+  if (!served) return refuse(NO_UNIT, 404);
+  const bytes = await manifestBytes(env, served);
+  if (!bytes) return refuse(NO_UNIT, 404);
+  const headers = objectHeaders('application/json', bytes.byteLength, hash);
+  headers.delete('Content-Disposition');
+  return new Response(req.method === 'HEAD' ? null : bytes, { status: 200, headers });
+}
+
+/* GET /mods/unit/<hash>/archive: a ZIP of unit.json and every file at its path, written from the
+ * manifest and streamed from packs; one byte range resumes a broken-off download. */
+async function getUnitArchive(req, env, hash) {
+  if (!(await admit(req, env, [['mod_get', 1]], true))) return rateLimited();
+  const status = await registry(env, 'unitStatus', [hash]);
+  if (status[hash] === 'removed') return refuse(REMOVED, 451, { removed: [hash] });
+  const made = await checker(env, 'unit:' + hash, 'plan', hash);
+  if (!made) return refuse(NO_UNIT, 404);
+  const tag = hash + '.zip';
+  const range = req.method === 'GET' ? wantedRange(req, made.size, tag) : null;
+  if (range === 'unsatisfiable') return unsatisfiable(made.size);
+  const start = range ? range.start : 0, end = range ? range.end : made.size;
+  const headers = objectHeaders('application/zip', end - start, tag);
+  if (range) headers.set('Content-Range', 'bytes ' + start + '-' + (end - 1) + '/' + made.size);
+  if (req.method === 'HEAD') return new Response(null, { status: range ? 206 : 200, headers });
+  const raw = made.raw instanceof Uint8Array ? made.raw : new Uint8Array(made.raw);
+  const body = planStream(env, made.plan, raw, start, end, object => registry(env, 'markBroken', object));
+  return new Response(body, { status: range ? 206 : 200, headers });
+}
+
+/* GET /mods/blob/<sha>: one file's bytes, while a held unit names it; one byte range resumes. */
+async function getBlob(req, env, sha) {
+  if (!(await admit(req, env, [['mod_get', 1]], true))) return rateLimited();
+  const loc = await registry(env, 'blobLocation', sha);
+  if (!loc) return refuse(NO_BLOB, 404);
+  const range = req.method === 'GET' ? wantedRange(req, loc.size, sha) : null;
+  if (range === 'unsatisfiable') return unsatisfiable(loc.size);
+  const start = range ? range.start : 0, end = range ? range.end : loc.size;
+  const headers = objectHeaders('application/octet-stream', end - start, sha);
+  if (range) headers.set('Content-Range', 'bytes ' + start + '-' + (end - 1) + '/' + loc.size);
+  if (req.method === 'HEAD') return new Response(null, { status: range ? 206 : 200, headers });
+  if (end === start) return new Response(new Uint8Array(0), { status: range ? 206 : 200, headers });
+  const obj = await env.MODS.get(loc.object, { range: { offset: loc.at + start, length: end - start } });
+  if (!obj) { await registry(env, 'markBroken', loc.object); return refuse(NO_BLOB, 404); }
+  return new Response(obj.body, { status: range ? 206 : 200, headers });
+}
+
+/* ---------------- uploads ---------------- */
+
 function declaredLength(req) {
   const declared = req.headers.get('Content-Length');
-  if (declared === null) return { refusal: refuse('A build archive must be sent with its Content-Length.', 411) };
+  if (declared === null) return { refusal: refuse('An upload must be sent with its Content-Length.', 411) };
   if (!/^\d+$/.test(declared)) return { refusal: refuse('The Content-Length of the upload is not a number.', 400) };
   return { length: Number(declared) };
 }
 
-/* One archive in one request, up to one part. The body is piped to a new object of its own (the
- * runtime moves the bytes), then checked; a refused archive has its object deleted, and since no
- * row names that object it is never served in between. */
-async function putBuild(req, env, hash) {
-  if (blockedSet(env).has(hash)) { await discard(req); return blockedResponse([hash]); }
+/* A signed write's key, for counting limits before its body is checked, or a refusal. */
+function writerKey(auth) {
+  const key = claimedKey(auth);
+  return key ? { key } : { refusal: refuse('This request must be signed with a publishing key.', 403) };
+}
+
+/* POST /mods/unit/<hash>/begin: the manifest's bytes. */
+async function postBegin(req, env, hash, path) {
+  const auth = authOf(req, path);
+  const { key, refusal } = writerKey(auth);
+  if (refusal) { await discard(req); return refusal; }
+  if (!(await admit(req, env, [['mod_build_put', 1]], false, key))) { await discard(req); return rateLimited(); }
+  const bytes = await readBody(req, PART_SIZE).catch(error => { throw error instanceof RequestError && error.status === 413
+    ? new RequestError('The manifest is larger than one request may be.', 413) : error; });
+  return answer(await checker(env, 'unit:' + hash, 'begin', hash, bytes, auth));
+}
+
+/* PUT /mods/unit/<hash>/archive: a ZIP of unit.json and the blobs the begin answered missing, in one
+ * request of at most ONE_REQUEST_MAX bytes. Piped to an object of its own, then checked; a refused
+ * archive is deleted, and since no row names it, it is never served in between. */
+async function putUnitArchive(req, env, hash, path) {
+  const auth = authOf(req, path);
+  const { key, refusal: unsigned } = writerKey(auth);
+  if (unsigned) { await discard(req); return unsigned; }
   const type = (req.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
-  if (type !== 'application/zip') { await discard(req); return refuse('A build archive must be sent as application/zip.', 415); }
+  if (type !== 'application/zip') { await discard(req); return refuse('A unit archive must be sent as application/zip.', 415); }
   const { length, refusal } = declaredLength(req);
   if (refusal) { await discard(req); return refusal; }
-  if (length > ONE_REQUEST_MAX) { await discard(req); return refuse('An archive over 95 MiB goes to the mod store in parts.', 413); }
+  if (length > ONE_REQUEST_MAX) { await discard(req); return refuse('An archive over 95 MiB goes to the mod store as several archives, or a large file in parts.', 413); }
   if (length < 22) { await discard(req); return refuse(NOT_ZIP, 422); }
-  if (!(await admit(req, env, [['mod_build_put', 1], ['mod_bytes', length]], false))) { await discard(req); return rateLimited(); }
-  const held = await heldAlready(env, hash);
-  if (held) {
-    /* Read the body to its end before answering: a client still sending would otherwise
-     * see a reset connection instead of the idempotent 200. */
-    await drain(req);
-    return reply({ build: hash, size: held.size, scripts: held.scripts }, 200);
-  }
+  if (!(await admit(req, env, [['mod_bytes', length]], false, key))) { await discard(req); return rateLimited(); }
   if (!req.body) return refuse('The upload ended before the whole archive arrived; try again.', 400);
-  const object = newObject(hash);
+  const object = newObjectKey('pack', hash);
   try {
-    await env.MODS.put(object, req.body.pipeThrough(new FixedLengthStream(length)),
-      { httpMetadata: { contentType: 'application/zip', cacheControl: IMMUTABLE } });
+    await env.MODS.put(object, req.body.pipeThrough(new FixedLengthStream(length)), { httpMetadata: { contentType: 'application/zip' } });
   } catch {
     await deleteObjects(env, [object]);
     return refuse('The upload ended before the whole archive arrived; try again.', 400);
   }
-  const answer = await runCheck(env, hash, object, length);
-  return reply(answer.body, answer.status);
-}
-/* ---------------- uploads in parts ---------------- */
-
-function partsOf(size) {
-  return Math.ceil(size / PART_SIZE);
+  return answer(await checker(env, 'unit:' + hash, 'archive', hash, object, length, auth));
 }
 
-function partLength(size, part) {
-  return part < partsOf(size) ? PART_SIZE : size - (partsOf(size) - 1) * PART_SIZE;
+/* POST /mods/unit/<hash>/complete: 201 when every blob is held, 409 with what is missing. */
+async function postComplete(req, env, hash, path) {
+  const auth = authOf(req, path);
+  const bytes = await readBody(req, PART_SIZE);
+  const signed = await verifyBody(auth, bytes);
+  if (signed.refusal) return refuse(signed.refusal, 403);
+  const result = await registry(env, 'completeUnit', hash);
+  if (result.notFound) return refuse('The mod store has no upload of this unit begun; begin it again.', 404);
+  if (result.missing) return refuse('The mod store does not hold every file of this unit yet; upload the rest.', 409, { missing: result.missing });
+  return reply({ held: true }, 201);
 }
 
-function sessionReply(hash, size, session, status) {
+function partsOf(size) { return Math.ceil(size / PART_SIZE); }
+function partLength(size, part) { return part < partsOf(size) ? PART_SIZE : size - (partsOf(size) - 1) * PART_SIZE; }
+
+function sessionReply(sha, size, session, status) {
   const have = [];
   session.etags.forEach((etag, i) => { if (etag) have.push(i + 1); });
-  return reply({ build: hash, size, partSize: session.partSize, parts: session.parts, have }, status);
+  return reply({ blob: sha, size, partSize: session.partSize, parts: session.parts, have }, status);
 }
 
-async function readSize(req) {
-  const body = await readRequestJson(req);
-  if (!Number.isSafeInteger(body.size) || body.size < 22) throw new RequestError('The upload names no archive size.', 400);
-  return body.size;
+/* The size a parts request names, from its signed body. */
+async function signedSize(req, path) {
+  const bytes = await readBody(req, 65536);
+  const signed = await verifyBody(authOf(req, path), bytes);
+  if (signed.refusal) return { refusal: refuse(signed.refusal, 403) };
+  let body;
+  try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { body = null; }
+  if (!plainObject(body) || !Number.isSafeInteger(body.size) || body.size < 1) return { refusal: refuse('The upload names no file size.', 400) };
+  return { size: body.size, signed };
 }
 
-/* POST /mods/build/<hash>/parts {"size"}: starts an upload in parts, or resumes the one of
- * this build at this size, answering which parts the store holds already. Only a new upload
- * counts against the per-address limits, as one upload of its whole size: its parts, its
- * resumes and its completion count nothing, so a publish is never stopped half way. */
-async function startParts(req, env, hash) {
-  if (blockedSet(env).has(hash)) { await discard(req); return blockedResponse([hash]); }
-  const size = await readSize(req);
-  const held = await heldAlready(env, hash);
-  if (held) return reply({ build: hash, size: held.size, scripts: held.scripts, stored: true }, 200);
-  const session = await registry(env, 'uploadSession', hash, size);
-  if (session) return sessionReply(hash, size, session, 200);
-  if (!(await admit(req, env, [['mod_build_put', 1], ['mod_bytes', size]], false))) return rateLimited();
-  const object = newObject(hash);
-  const upload = await env.MODS.createMultipartUpload(object, { httpMetadata: { contentType: 'application/zip', cacheControl: IMMUTABLE } });
-  const opened = await registry(env, 'openUpload', { hash, size, object, upload: upload.uploadId, partSize: PART_SIZE, parts: partsOf(size) });
+/* POST /mods/blob/<sha>/parts {"size"}: starts an upload in parts of one blob a begun unit names, or
+ * resumes the one at this size, answering which parts the store holds. Only a new upload counts
+ * against the limits, as its whole size; its parts and its completion count nothing. */
+async function startParts(req, env, sha, path) {
+  const { size, signed, refusal } = await signedSize(req, path);
+  if (refusal) return refusal;
+  const session = await registry(env, 'uploadSession', sha, size);
+  if (session) return sessionReply(sha, size, session, 200);
+  if (!(await registry(env, 'blobWanted', sha, size))) return refuse('No unit the mod store is receiving needs this file at this size.', 409);
+  if (!(await admit(req, env, [['mod_bytes', size]], false, signed.key))) return rateLimited();
+  const object = newObjectKey('blob', sha);
+  const upload = await env.MODS.createMultipartUpload(object, { httpMetadata: { contentType: 'application/octet-stream' } });
+  const opened = await registry(env, 'openUpload', { sha, size, object, upload: upload.uploadId, partSize: PART_SIZE, parts: partsOf(size) });
   if (opened.existing) {
     try { await upload.abort(); } catch { /* It held no parts. */ }
-    return sessionReply(hash, size, opened, 200);
+    return sessionReply(sha, size, opened, 200);
   }
-  return sessionReply(hash, size, opened, 201);
+  return sessionReply(sha, size, opened, 201);
 }
 
-/* PUT /mods/build/<hash>/parts/<n> with X-Build-Size: stores one part. Every part but the
- * last is exactly the part size. A part sent again replaces the earlier copy. */
-async function putPart(req, env, hash, part) {
-  if (blockedSet(env).has(hash)) { await discard(req); return blockedResponse([hash]); }
+/* PUT /mods/blob/<sha>/parts/<n> with X-Blob-Size: stores one part. A part is bound to its session;
+ * whoever sends it, the blob's SHA-256 is checked whole at the completion, so a wrong part costs only
+ * a retry. A part sent again replaces the earlier copy. */
+async function putPart(req, env, sha, part) {
   const type = (req.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
   if (type !== 'application/octet-stream') { await discard(req); return refuse('A part must be sent as application/octet-stream.', 415); }
-  const sizeText = req.headers.get('X-Build-Size') || '';
-  if (!/^\d+$/.test(sizeText)) { await discard(req); return refuse('A part must name its archive size in X-Build-Size.', 400); }
+  const sizeText = req.headers.get('X-Blob-Size') || '';
+  if (!/^\d+$/.test(sizeText)) { await discard(req); return refuse('A part must name its file size in X-Blob-Size.', 400); }
   const size = Number(sizeText);
   const { length, refusal } = declaredLength(req);
   if (refusal) { await discard(req); return refusal; }
-  const session = Number.isSafeInteger(size) ? await registry(env, 'uploadSession', hash, size) : null;
-  if (!session) { await discard(req); return refuse('The mod store has no upload of this build in progress; start it again.', 404); }
+  const session = Number.isSafeInteger(size) ? await registry(env, 'uploadSession', sha, size) : null;
+  if (!session) { await discard(req); return refuse('The mod store has no upload of this file in progress; start it again.', 404); }
   if (part < 1 || part > session.parts) { await discard(req); return refuse('The upload has no part with that number.', 400); }
-  if (length !== partLength(size, part)) { await discard(req); return refuse('The part is not the length its place in the archive needs.', 400); }
+  if (length !== partLength(size, part)) { await discard(req); return refuse('The part is not the length its place in the file needs.', 400); }
   if (!req.body) return refuse('The part ended before all of it arrived; send it again.', 400);
   const upload = env.MODS.resumeMultipartUpload(session.object, session.upload);
   let stored;
   try { stored = await upload.uploadPart(part, req.body.pipeThrough(new FixedLengthStream(length))); }
   catch { return refuse('The part ended before all of it arrived; send it again.', 400); }
-  const after = await registry(env, 'recordPart', hash, size, session.upload, part, stored.etag);
-  if (!after) return refuse('The mod store has no upload of this build in progress; start it again.', 404);
-  return sessionReply(hash, size, after, 200);
+  const after = await registry(env, 'recordPart', sha, size, session.upload, part, stored.etag);
+  if (!after) return refuse('The mod store has no upload of this file in progress; start it again.', 404);
+  return sessionReply(sha, size, after, 200);
 }
 
-/* POST /mods/build/<hash>/complete {"size"}: joins the parts into the archive's object, then
- * checks it, the same check a one-request upload gets. Only a passing archive is registered; a
- * refused one is deleted. */
-async function completeParts(req, env, hash) {
-  if (blockedSet(env).has(hash)) { await discard(req); return blockedResponse([hash]); }
-  const size = await readSize(req);
-  const session = await registry(env, 'uploadSession', hash, size);
-  if (!session) {
-    const held = await heldAlready(env, hash);
-    if (held) return reply({ build: hash, size: held.size, scripts: held.scripts }, 200);
-    return refuse('The mod store has no upload of this build in progress; start it again.', 404);
-  }
-  const have = session.etags.filter(Boolean).length;
-  if (have !== session.parts) return sessionReply(hash, size, session, 409);
+/* POST /mods/blob/<sha>/complete {"size"}: joins the parts and checks the blob. */
+async function completeParts(req, env, sha, path) {
+  const { size, refusal } = await signedSize(req, path);
+  if (refusal) return refusal;
+  const session = await registry(env, 'uploadSession', sha, size);
+  if (!session) return refuse('The mod store has no upload of this file in progress; start it again.', 404);
+  if (session.etags.filter(Boolean).length !== session.parts) return sessionReply(sha, size, session, 409);
   const upload = env.MODS.resumeMultipartUpload(session.object, session.upload);
   try {
     await upload.complete(session.etags.map((etag, i) => ({ partNumber: i + 1, etag })));
   } catch {
-    /* A part was replaced under another etag, or the upload is gone: start over. */
     try { await upload.abort(); } catch { /* Already completed or aborted. */ }
-    await registry(env, 'closeUpload', hash, size, session.upload);
+    await registry(env, 'closeUpload', sha, size, session.upload);
     await deleteObjects(env, [session.object]);
-    return refuse('The parts of this upload did not join into one archive; upload the build again.', 409);
+    return refuse('The parts of this upload did not join into one file; upload it again.', 409);
   }
-  let answer;
-  try { answer = await runCheck(env, hash, session.object, size); }
-  finally { await registry(env, 'closeUpload', hash, size, session.upload); }
-  return reply(answer.body, answer.status);
+  let result;
+  try { result = await checker(env, 'blob:' + sha, 'blob', sha, session.object, size); }
+  finally { await registry(env, 'closeUpload', sha, size, session.upload); }
+  return answer(result);
 }
+
 /* ---------------- claims ---------------- */
 
-/* The claim and release bodies, with the shared reader's refusals in plain words. A body is
- * bounded only by the platform's request size. */
 async function readRequestJson(req) {
   try { return await readJsonObject(req, PART_SIZE); }
   catch (error) {
@@ -1439,152 +1204,91 @@ async function readRequestJson(req) {
   }
 }
 
-function hashArray(value) {
-  if (!Array.isArray(value)) throw new RequestError('The claim does not list its builds by hash.', 400);
-  if (!value.every(hash => typeof hash === 'string' && HEX64.test(hash))) throw new RequestError('The claim names a build by something other than its hash.', 400);
-  return [...new Set(value)];
+/* A signed JSON body: { body, signed } or { refusal }. */
+async function signedJson(req, path) {
+  const bytes = await readBody(req, PART_SIZE).catch(error => { throw error instanceof RequestError && error.status === 413
+    ? new RequestError('The request body is larger than one request may be.', 413) : error; });
+  const signed = await verifyBody(authOf(req, path), bytes);
+  if (signed.refusal) return { refusal: refuse(signed.refusal, 403) };
+  let body;
+  try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { body = null; }
+  if (!plainObject(body)) return { refusal: refuse('The request body is not a JSON object.', 400) };
+  return { body, signed };
 }
 
-/* The body of a claim or release: signed by the map's author (X-Mod-Signature; the body names
- * "author" and "time"), or made with the claim's secret alone (today's client). Returns
- * { body, author } or { refusal }. */
-async function claimBody(req, env) {
-  if (!req.headers.get('X-Mod-Signature')) return { body: await readRequestJson(req), author: null };
-  const { bytes, body } = await readSigned(req);
-  const refusal = await authorSigned(req, env, bytes, body);
-  return refusal ? { refusal } : { body, author: body.author };
+function validRef(ref) {
+  return typeof ref === 'string' && ref.length > 0 && ref.length <= REF_MAX && displayText(ref);
 }
 
-async function postClaim(req, env) {
-  if (!(await admit(req, env, [['mod_claim', 1]], false))) { await discard(req); return rateLimited(); }
-  const { body, author, refusal } = await claimBody(req, env);
+/* POST /mods/map/claim {ref, units, secret, rev}, signed (SPEC 10.2, D33). */
+async function postClaim(req, env, path) {
+  const auth = authOf(req, path);
+  const { key, refusal: unsigned } = writerKey(auth);
+  if (unsigned) { await discard(req); return unsigned; }
+  if (!(await admit(req, env, [['mod_claim', 1]], false, key))) { await discard(req); return rateLimited(); }
+  const { body, signed, refusal } = await signedJson(req, path);
   if (refusal) return refusal;
-  if (!displayText(body.ref) || !body.ref.length) return refuse('The claim names no published item.', 400);
-  const builds = hashArray(body.builds);
-  if (!builds.length) return refuse('The claim names no builds.', 400);
-  if (body.secret !== undefined && !(typeof body.secret === 'string' && HEX64.test(body.secret))) return refuse(BAD_SECRET, 400);
-  const blocked = builds.filter(hash => blockedSet(env).has(hash));
-  if (blocked.length) return blockedResponse(blocked);
-  const secret = body.secret === undefined ? randomHex(32) : body.secret;
-  const result = await registry(env, 'claim', {
-    ref: body.ref, builds, id: randomHex(16), secretHash: await sha256Hex(secret),
-    presentedHash: body.secret === undefined ? null : await sha256Hex(body.secret), author,
-  });
-  if (result.forbidden) {
-    return refuse(author ? 'Another author published this map; only its author can change what it claims.' : 'No claim on the mod store matches this item and secret.', 403);
-  }
-  if (result.missing) return refuse('The mod store does not hold every build the claim names; upload them again.', 409, { missing: result.missing });
-  await deleteQueued(env, result.deleted);
-  return reply({ claim: result.claim, secret }, result.created ? 201 : 200);
+  if (!validRef(body.ref)) return refuse('The claim names no published item.', 400);
+  if (!Array.isArray(body.units) || !body.units.every(h => typeof h === 'string' && HEX64.test(h))) return refuse('The claim does not list its units by hash.', 400);
+  if (typeof body.secret !== 'string' || !HEX64.test(body.secret)) return refuse(BAD_SECRET, 400);
+  if (!Number.isSafeInteger(body.rev) || body.rev < 1) return refuse('The claim names no revision.', 400);
+  const result = await registry(env, 'claim', { ref: body.ref, units: body.units, secretHash: await sha256Hex(body.secret), rev: body.rev,
+    key: signed.key, id: randomHex(16) });
+  await seen(env, signed);
+  if (result.stale !== undefined) return refuse('This map\'s claim changed since this computer last saw it.', 409, { rev: result.stale });
+  if (result.missing) return refuse('The mod store does not hold every unit the claim names; upload them first.', 409, { missing: result.missing });
+  if (result.removed.length) return refuse(result.removed.length === 1 ? REMOVED : 'Some of these units were removed from the mod store.', 451,
+    { removed: result.removed, claim: result.claim, rev: result.rev });
+  return reply({ claim: result.claim, rev: result.rev }, result.created ? 201 : 200);
 }
 
-async function postRelease(req, env) {
-  if (!(await admit(req, env, [['mod_claim', 1]], false))) { await discard(req); return rateLimited(); }
-  const { body, author, refusal } = await claimBody(req, env);
+/* POST /mods/map/release {ref, secret, rev}, signed. */
+async function postRelease(req, env, path) {
+  const auth = authOf(req, path);
+  const { key, refusal: unsigned } = writerKey(auth);
+  if (unsigned) { await discard(req); return unsigned; }
+  if (!(await admit(req, env, [['mod_claim', 1]], false, key))) { await discard(req); return rateLimited(); }
+  const { body, signed, refusal } = await signedJson(req, path);
   if (refusal) return refusal;
-  if (typeof body.claim !== 'string' || !HEX32.test(body.claim)) return refuse('The release names no claim.', 400);
-  if (!author && !(typeof body.secret === 'string' && HEX64.test(body.secret))) return refuse(BAD_SECRET, 400);
-  const result = await registry(env, 'release', body.claim, author ? null : await sha256Hex(body.secret), author);
-  if (result.notFound) return refuse('The mod store has no such claim.', 404);
-  if (result.forbidden) return refuse(author ? 'Another author published this map; only its author can unpublish it.' : 'The secret does not match this claim.', 403);
-  await deleteQueued(env, result.deleted);
+  if (!validRef(body.ref)) return refuse('The release names no published item.', 400);
+  if (typeof body.secret !== 'string' || !HEX64.test(body.secret)) return refuse(BAD_SECRET, 400);
+  if (!Number.isSafeInteger(body.rev) || body.rev < 1) return refuse('The release names no revision.', 400);
+  const result = await registry(env, 'release', { ref: body.ref, secretHash: await sha256Hex(body.secret), rev: body.rev });
+  await seen(env, signed);
+  if (result.notFound) return refuse('The mod store has no claim of this item with this secret.', 404);
+  if (result.stale !== undefined) return refuse('This map\'s claim changed since this computer last saw it.', 409, { rev: result.stale });
   return new Response(null, { status: 204 });
 }
 
 /* ---------------- what players asked for ---------------- */
 
-/* Whether `request` is a file the stored part `hash` left out of the build it was cut from (its
- * skeleton records them, from its source.json, when it is checked). Asked in the build's checker
- * Durable Object when the binding is there. */
-async function leftOut(env, hash, request) {
-  const served = await registry(env, 'buildServed', hash);
-  if (!served || !served.sliceOf) return false;
-  if (env.MOD_CHECKER) {
-    try { return await env.MOD_CHECKER.get(env.MOD_CHECKER.idFromName('check:' + hash)).leftOut(served.skeleton, request); }
-    catch { throw new RequestError(UNAVAILABLE, 503); }
-  }
-  return leftOutIn(env, served.skeleton, request);
-}
-
-export async function leftOutIn(env, skeleton, request) {
-  const skel = await readSkeleton(env, skeleton);
-  return !!(skel && skel.leftOut && skel.leftOut.includes(request));
-}
-
-/* POST /mods/build/<hash>/asked {"request","by"}: a player's game asked a published map's part
- * of a mod for a file the part lacks. Kept for the map's author, who sees it beside the
- * published map and publishes again to carry it. Only a stored part of a build takes one,
- * and only for a file its source.json lists that the part does not carry, so the reports of
- * one part can never be more than the files it left out, and nothing else reaches the author.
- * Counts as a claim call. */
+/* POST /mods/unit/<hash>/asked {"path"}: a path a player's game asked the unit for that it lacks.
+ * Anonymous; counts as a claim call. */
 async function postAsked(req, env, hash) {
   if (!(await admit(req, env, [['mod_claim', 1]], false))) { await discard(req); return rateLimited(); }
   const body = await readRequestJson(req);
-  if (typeof body.request !== 'string' || !body.request || body.request !== body.request.toLowerCase() || pathFault(body.request)) {
-    return refuse('The report names no file of a mod.', 400);
-  }
-  if (body.by !== undefined && !displayText(body.by)) return refuse('The report names what asked for the file by something other than text.', 400);
-  const known = await leftOut(env, hash, body.request);
-  /* What asked is a name the product shows its author; a longer one is cut, never refused. */
-  const by = body.by === undefined ? '' : [...body.by].slice(0, ASKER_SHOWN).join('');
-  const result = await registry(env, 'reportAsked', hash, body.request, by, known);
-  if (result.notFound) return refuse(NO_BUILD, 404);
-  if (result.whole) return refuse('This build is a whole mod; nothing was left out of it.', 404);
-  if (result.foreign) return refuse('The report names no file that this part of a mod left out of its build.', 400);
-  return new Response(null, { status: 204 });
+  if (authorPathFault(body.path)) return refuse('The report names no file of a mod.', 400);
+  return answer(await checker(env, 'unit:' + hash, 'asked', hash, body.path));
 }
-/* POST /mods/asked {"claim","secret"}: what players asked for of the builds a claim names,
- * for the claim's holder. Counts as a read. */
-async function postAskedList(req, env) {
+
+/* POST /mods/asked {"claims": [{ref, secret}]}, signed: what players asked of the units those claims
+ * name, for their publisher. */
+async function postAskedList(req, env, path) {
   if (!(await admit(req, env, [['mod_get', 1]], true))) { await discard(req); return rateLimited(); }
-  const body = await readRequestJson(req);
-  if (typeof body.claim !== 'string' || !HEX32.test(body.claim)) return refuse('The request names no claim.', 400);
-  if (typeof body.secret !== 'string' || !HEX64.test(body.secret)) return refuse(BAD_SECRET, 400);
-  const result = await registry(env, 'listAsked', body.claim, await sha256Hex(body.secret));
-  if (result.notFound) return refuse('The mod store has no such claim.', 404);
-  if (result.forbidden) return refuse('The secret does not match this claim.', 403);
-  return reply({ asked: result.asked });
+  const { body, refusal } = await signedJson(req, path);
+  if (refusal) return refusal;
+  if (!Array.isArray(body.claims) || !body.claims.every(c => plainObject(c) && validRef(c.ref) && typeof c.secret === 'string' && HEX64.test(c.secret))) {
+    return refuse('The request does not list its claims by item and secret.', 400);
+  }
+  const claims = [];
+  for (const c of body.claims) claims.push({ ref: c.ref, secretHash: await sha256Hex(c.secret) });
+  return reply(await registry(env, 'listAsked', claims));
 }
 
-/* ---------------- maintainer reset ---------------- */
+/* ---------------- the maintainer ---------------- */
 
-/* Deletes every object in the MODS bucket (build archives, uploads in parts, and anything
- * the retired blob and bundle store left), aborts every upload in parts, and empties the
- * index. Hidden unless the MODS_ADMIN_TOKEN secret is set, and refused without exactly that
- * bearer token. */
-async function postReset(req, env) {
-  const expected = env.MODS_ADMIN_TOKEN === undefined ? '' : String(env.MODS_ADMIN_TOKEN).trim();   // a secret piped in keeps its newline
-  if (!expected) { await discard(req); return refuse(NOT_FOUND, 404); }
-  const given = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
-  if (!given || !(await sameToken(given, expected))) { await discard(req); return refuse('This request needs the maintainer token.', 403); }
-  await discard(req);
-  await abortUploads(env, Infinity, true);
-  const deleted = { builds: 0, other: 0 };
-  let cursor;
-  do {
-    const page = await env.MODS.list({ limit: 1000, cursor });
-    const keys = page.objects.map(object => object.key);
-    if (keys.length) await env.MODS.delete(keys);
-    for (const key of keys) deleted[key.startsWith('build/') || key.startsWith('skel/') || key.startsWith('pack/') ? 'builds' : 'other']++;
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
-  const index = await registry(env, 'reset');
-  console.log('mods reset: deleted ' + deleted.builds + ' objects of builds and ' + deleted.other + ' other objects');
-  return reply({ deleted, index });
-}
-
-/* POST /mods/admin/stats: what the store holds (builds, blobs, packs, bytes), for the
- * maintainer. The same token as the reset; hidden without it. */
-async function postStats(req, env) {
-  const denied = await maintainerDenied(req, env);
-  if (denied) { await discard(req); return denied; }
-  await discard(req);
-  return reply(await registry(env, 'stats'));
-}
-
-/* A refusal unless the request carries the maintainer token (404 while none is set). */
 async function maintainerDenied(req, env) {
-  const expected = env.MODS_ADMIN_TOKEN === undefined ? '' : String(env.MODS_ADMIN_TOKEN).trim();
+  const expected = env.MODS_ADMIN_TOKEN === undefined ? '' : String(env.MODS_ADMIN_TOKEN).trim();   // a secret piped in keeps its newline
   if (!expected) return refuse(NOT_FOUND, 404);
   const given = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
   if (!given || !(await sameToken(given, expected))) return refuse('This request needs the maintainer token.', 403);
@@ -1598,14 +1302,67 @@ async function sameToken(given, expected) {
   return diff === 0;
 }
 
+/* POST /mods/admin/reset: deletes every object in the MODS bucket, aborts every upload in parts and
+ * empties the index. */
+async function adminReset(req, env) {
+  await discard(req);
+  await abortUploads(env, Infinity, true);
+  let objects = 0;
+  let cursor;
+  do {
+    const page = await env.MODS.list({ limit: 1000, cursor });
+    const keys = page.objects.map(object => object.key);
+    if (keys.length) await env.MODS.delete(keys);
+    objects += keys.length;
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  const index = await registry(env, 'reset');
+  console.log('mods reset: deleted ' + objects + ' objects');
+  return reply({ deleted: { objects }, index });
+}
+
+async function adminStats(req, env) {
+  await discard(req);
+  return reply(await registry(env, 'stats'));
+}
+
+/* POST /mods/admin/block {"unit", "reason"}: moderation removes a unit (5.19). */
+async function adminBlock(req, env) {
+  const body = await readRequestJson(req);
+  if (typeof body.unit !== 'string' || !HEX64.test(body.unit)) return refuse('The request names no unit.', 400);
+  const result = await registry(env, 'block', body.unit, typeof body.reason === 'string' ? body.reason.slice(0, 500) : '');
+  await deleteQueued(env, result.objects);
+  return reply({ unit: body.unit, removed: result.removed });
+}
+
+async function adminUnblock(req, env) {
+  const body = await readRequestJson(req);
+  if (typeof body.unit !== 'string' || !HEX64.test(body.unit)) return refuse('The request names no unit.', 400);
+  return reply(await registry(env, 'unblock', body.unit));
+}
+
+/* POST /mods/admin/release-ref {"ref"}: the claims of one published item, at its publisher's request (D42). */
+async function adminReleaseRef(req, env) {
+  const body = await readRequestJson(req);
+  if (!validRef(body.ref)) return refuse('The request names no published item.', 400);
+  return reply(await registry(env, 'releaseRef', body.ref));
+}
+
+/* POST /mods/admin/forget-key {"key"}: the key's record and its name binding go (4.4). */
+async function adminForgetKey(req, env) {
+  const body = await readRequestJson(req);
+  if (typeof body.key !== 'string' || !claimedKey({ key: body.key })) return refuse('The request names no publishing key.', 400);
+  return reply(await registry(env, 'forgetKey', body.key));
+}
+
 /* ---------------- routing ---------------- */
 
 function notAllowed(req, allow) {
   return discard(req).then(() => refuse('This address of the mod store does not take that request.', 405, {}, { Allow: allow }));
 }
 
-/* Handles every path under /mods; anonymous, no session, no Turnstile. Every answer that
- * is not a success carries one plain sentence in "error". */
+/* Handles every path under /mods; no session, no Turnstile. Every answer that is not a success
+ * carries one plain sentence in "error". */
 export async function handleMods(req, env, path) {
   try { return await routeMods(req, env, path); }
   catch (error) {
@@ -1617,36 +1374,54 @@ export async function handleMods(req, env, path) {
   }
 }
 
+/* The routes of the stores this one replaced (SPEC 10.2): 410 with the sentence of 5.22. */
+function retired(req, path) {
+  if (/^\/mods\/(build|bundle|author)(\/|$)/.test(path) || ['/mods/claim', '/mods/release', '/mods/missing'].includes(path)) return true;
+  return req.method === 'PUT' && /^\/mods\/blob\/[^/]+$/.test(path);
+}
+
 async function routeMods(req, env, path) {
   if (!env.MODS || !env.MOD_REGISTRY || !env.WRITE_QUOTAS) { await discard(req); return refuse(UNAVAILABLE, 503); }
-  /* A unit (a placed object's closure, the distribution design) is stored and served like a build. */
-  const build = path.match(/^\/mods\/(?:build|unit)\/([0-9a-fA-F]{64})(?:\/(parts|complete|asked)(?:\/(\d{1,9}))?)?$/);
-  if (build) {
-    const [, raw, kind, part] = build;
-    if (raw !== raw.toLowerCase()) { await discard(req); return refuse('A build hash must be written in lowercase hex.', 400); }
-    if (!kind) {
-      if (req.method === 'GET' || req.method === 'HEAD') return serveBuild(req, env, raw);
-      if (req.method === 'PUT') return putBuild(req, env, raw);
-      return notAllowed(req, 'GET, HEAD, PUT');
+  if (retired(req, path)) { await discard(req); return refuse(RETIRED, 410); }
+  const unit = path.match(/^\/mods\/unit\/([0-9a-fA-F]{64})(?:\/(archive|begin|complete|asked))?$/);
+  if (unit) {
+    const [, raw, kind] = unit;
+    if (raw !== raw.toLowerCase()) { await discard(req); return refuse('A unit hash must be written in lowercase hex.', 400); }
+    if (!kind) return req.method === 'GET' || req.method === 'HEAD' ? getUnit(req, env, raw) : notAllowed(req, 'GET, HEAD');
+    if (kind === 'archive') {
+      if (req.method === 'GET' || req.method === 'HEAD') return getUnitArchive(req, env, raw);
+      return req.method === 'PUT' ? putUnitArchive(req, env, raw, path) : notAllowed(req, 'GET, HEAD, PUT');
     }
-    if (kind === 'asked' && part === undefined) return req.method === 'POST' ? postAsked(req, env, raw) : notAllowed(req, 'POST');
-    if (kind === 'parts' && part === undefined) return req.method === 'POST' ? startParts(req, env, raw) : notAllowed(req, 'POST');
-    if (kind === 'parts') return req.method === 'PUT' ? putPart(req, env, raw, Number(part)) : notAllowed(req, 'PUT');
-    if (part === undefined) return req.method === 'POST' ? completeParts(req, env, raw) : notAllowed(req, 'POST');
+    if (req.method !== 'POST') return notAllowed(req, 'POST');
+    if (kind === 'begin') return postBegin(req, env, raw, path);
+    if (kind === 'complete') return postComplete(req, env, raw, path);
+    return postAsked(req, env, raw);
   }
-  const action = { '/mods/claim': postClaim, '/mods/release': postRelease, '/mods/asked': postAskedList,
-    '/mods/admin/reset': postReset, '/mods/admin/stats': postStats }[path];
-  if (action) return req.method === 'POST' ? action(req, env) : notAllowed(req, 'POST');
-  const dist = await routeDist(req, env, path);
-  if (dist) return dist;
+  const blob = path.match(/^\/mods\/blob\/([0-9a-fA-F]{64})(?:\/(parts|complete)(?:\/(\d{1,9}))?)?$/);
+  if (blob) {
+    const [, raw, kind, part] = blob;
+    if (raw !== raw.toLowerCase()) { await discard(req); return refuse('A file hash must be written in lowercase hex.', 400); }
+    if (!kind) return req.method === 'GET' || req.method === 'HEAD' ? getBlob(req, env, raw) : notAllowed(req, 'GET, HEAD');
+    if (kind === 'parts' && part === undefined) return req.method === 'POST' ? startParts(req, env, raw, path) : notAllowed(req, 'POST');
+    if (kind === 'parts') return req.method === 'PUT' ? putPart(req, env, raw, Number(part)) : notAllowed(req, 'PUT');
+    if (part === undefined) return req.method === 'POST' ? completeParts(req, env, raw, path) : notAllowed(req, 'POST');
+  }
+  const open = { '/mods/units': postUnits, '/mods/map/claim': postClaim, '/mods/map/release': postRelease, '/mods/asked': postAskedList }[path];
+  if (open) return req.method === 'POST' ? open(req, env, path) : notAllowed(req, 'POST');
+  const admin = { '/mods/admin/reset': adminReset, '/mods/admin/stats': adminStats, '/mods/admin/block': adminBlock,
+    '/mods/admin/unblock': adminUnblock, '/mods/admin/release-ref': adminReleaseRef, '/mods/admin/forget-key': adminForgetKey }[path];
+  if (admin) {
+    if (req.method !== 'POST') return notAllowed(req, 'POST');
+    const denied = await maintainerDenied(req, env);
+    if (denied) { await discard(req); return denied; }
+    return admin(req, env);
+  }
   await discard(req);
   return refuse(NOT_FOUND, 404);
 }
 
 /* ---------------- scheduled purge ---------------- */
 
-/* Aborts uploads in parts nobody touched for a day (every one, for the reset) and deletes
- * what they stored. */
 async function abortUploads(env, rounds, all = false) {
   let count = 0;
   for (let i = 0; i < rounds; i++) {
@@ -1661,20 +1436,18 @@ async function abortUploads(env, rounds, all = false) {
   return count;
 }
 
-/* Deletes unclaimed builds older than the upload window (uploads nothing ever claimed),
- * abandoned uploads in parts, what the delete queue still holds and objects no row names, then
- * wakes the packer if anything waits for it. Bounded per run; the next run continues. A released
- * build does not wait for this: its last release deletes it. */
+/* Deletes the units past their deletion delay (D40), abandoned uploads in parts, what the delete
+ * queue still holds and objects no row names. Bounded per run; the next run continues. The daily
+ * cron runs it. */
 export async function purgeMods(env, { batch = PURGE_BATCH, rounds = PURGE_ROUNDS, sweepPages = SWEEP_PAGES, now = Date.now() } = {}) {
-  let builds = 0;
+  let units = 0;
   for (let i = 0; i < rounds; i++) {
-    const doomed = await registry(env, 'purgeBuilds', batch);
+    const doomed = await registry(env, 'purgeUnits', batch);
     await deleteQueued(env, doomed.objects);
-    builds += doomed.builds;
-    if (doomed.builds < batch) break;
+    units += doomed.units;
+    if (doomed.units < batch) break;
   }
   const uploads = await abortUploads(env, rounds);
-
   let queued = 0;
   for (let i = 0; i < rounds; i++) {
     const dead = await registry(env, 'deadObjects', 1000);
@@ -1683,16 +1456,14 @@ export async function purgeMods(env, { batch = PURGE_BATCH, rounds = PURGE_ROUND
     queued += dead.length;
   }
   const orphans = await sweepOrphans(env, sweepPages, now);
-  await registry(env, 'kick');
-  console.log('mods purge: deleted ' + builds + ' builds, ' + uploads + ' abandoned uploads, ' + queued + ' queued objects and ' +
+  console.log('mods purge: deleted ' + units + ' units, ' + uploads + ' abandoned uploads, ' + queued + ' queued objects and ' +
     orphans + ' objects no row names');
-  return { builds, uploads, queued, orphans };
+  return { units, uploads, queued, orphans };
 }
 
-/* Deletes objects in the bucket that no row names and that are older than a day: what a
- * request that failed between writing an object and recording it left behind (a pack written
- * by a packer that stopped, a skeleton of a refused upload, objects of the stores this one
- * replaced). The listing continues from where the last run stopped, `pages` pages a run. */
+/* Deletes objects in the bucket that no row names and that are older than a day: what a request that
+ * failed between writing an object and recording it left behind, and the objects of the stores this
+ * one replaced. The listing continues from where the last run stopped, `pages` pages a run. */
 async function sweepOrphans(env, pages, now) {
   let cursor = (await registry(env, 'meta', 'sweep_cursor')) || undefined;
   let deleted = 0;

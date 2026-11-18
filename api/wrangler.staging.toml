@@ -52,8 +52,6 @@ class_name = "ModChecker"
 tag = "v3-mod-checker"
 new_sqlite_classes = ["ModChecker"]
 
-[vars]
-MODS_BLOCKED = "[]"
 
 [triggers]
 crons = ["23 4 * * *"]

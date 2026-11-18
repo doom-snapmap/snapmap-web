@@ -1,100 +1,71 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
-  initializeRegistry, buildRow, registerBuild, touchBuild, buildServed, markBroken,
-  claimBuilds, releaseClaim, purgeBuilds, resetRegistry, reportAsked, listAsked,
-  uploadSession, openUpload, recordPart, closeUpload, abandonUploads,
-  nextStaged, stagedCount, reserveBlobs, commitPacks, deadObjects, forgetDead, unnamedObjects, storeStats,
-  nextReplan, replanBuild,
-  authorRow, bindAuthor,
+  initializeRegistry, unitStatus, unitRow, unitServed, beginUnit, unitBlobs, commitUnitArchive, completeUnit, blobWanted,
+  commitBlob, blobLocation, markBroken, purgeUnits, claimUnits, releaseClaim, claimRev, releaseRef, reportAsked, listAsked,
+  publisherSeen, forgetKey, publisherRow, blockUnit, unblockUnit, uploadSession, openUpload, recordPart, closeUpload,
+  abandonUploads, deadObjects, forgetDead, unnamedObjects, storeStats, resetRegistry,
 } from './mods_registry_store.js';
-import { packStaged } from './mods_pack.js';
-import { checkArchive, walkSegment, leftOutIn } from './mods_store.js';
+import { beginIn, checkUnitArchiveIn, checkBlobIn, archivePlanIn, askedIn } from './mods_store.js';
 
-const ALARM_BUDGET_MS = 10 * 60 * 1000;   // one alarm packs for at most this long (the platform allows 15 minutes)
-
-/* The registry functions bound to one storage and clock: what the packer calls. */
-export function boundRegistry(storage, now = () => Date.now()) {
-  return {
-    nextStaged: () => nextStaged(storage),
-    stagedCount: () => stagedCount(storage),
-    reserveBlobs: (id, skeleton, shas) => reserveBlobs(storage, id, skeleton, shas),
-    commitPacks: (id, skeleton, packs, skel) => commitPacks(storage, id, skeleton, packs, now(), skel),
-    nextReplan: () => nextReplan(storage),
-    replan: (id, skeleton, skel) => replanBuild(storage, id, skeleton, skel),
-    markBroken: (hash, object) => markBroken(storage, hash, object, now()),
-    deadObjects: limit => deadObjects(storage, limit),
-    forgetDead: objects => forgetDead(storage, objects),
-  };
-}
-
-// The single mod store index (named "registry"); see mods_registry_store.js.
+/* The single mod store index (named "registry"); see mods_registry_store.js. Every method is one
+ * transaction on the object's SQLite storage, with the object's clock. */
 export class ModRegistry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     initializeRegistry(this.ctx.storage);
-    this.reg = boundRegistry(this.ctx.storage);
   }
 
-  /* The packer runs on the alarm: a checked upload is served from its archive at once, and its
-   * blobs move into packs in the background. */
-  async schedule(delay = 50) {
-    const at = await this.ctx.storage.getAlarm();
-    if (at === null || at > Date.now() + delay) await this.ctx.storage.setAlarm(Date.now() + delay);
-  }
-
-  async alarm() {
-    const result = await packStaged(this.env, this.reg, Date.now() + ALARM_BUDGET_MS);
-    if (result.left > 0 || deadObjects(this.ctx.storage, 1).length) await this.ctx.storage.setAlarm(Date.now() + 1000);
-  }
-
-  /* Pack now, for tests and the maintainer: what a scheduled alarm would do. */
-  async packNow(budgetMs = ALARM_BUDGET_MS) { return packStaged(this.env, this.reg, Date.now() + budgetMs); }
-  async kick() { if (stagedCount(this.ctx.storage) || deadObjects(this.ctx.storage, 1).length) await this.schedule(); return true; }
-
-  buildRow(hash) { return buildRow(this.ctx.storage, hash); }
-  async registerBuild(build) {
-    const result = registerBuild(this.ctx.storage, build, Date.now());
-    if (result.created) await this.schedule();
-    return result;
-  }
-  touchBuild(hash) { return touchBuild(this.ctx.storage, hash, Date.now()); }
-  buildServed(hash) { return buildServed(this.ctx.storage, hash, Date.now()); }
-  markBroken(hash, object) { return markBroken(this.ctx.storage, hash, object, Date.now()); }
-  claim(request) { return claimBuilds(this.ctx.storage, request, Date.now()); }
-  release(id, presentedHash, author) { return releaseClaim(this.ctx.storage, id, presentedHash, Date.now(), author ?? null); }
-  purgeBuilds(limit) { return purgeBuilds(this.ctx.storage, Date.now(), limit); }
-  uploadSession(hash, size) { return uploadSession(this.ctx.storage, hash, size); }
-  openUpload(request) { return openUpload(this.ctx.storage, request, Date.now()); }
-  recordPart(hash, size, upload, part, etag) { return recordPart(this.ctx.storage, hash, size, upload, part, etag, Date.now()); }
-  closeUpload(hash, size, upload) { return closeUpload(this.ctx.storage, hash, size, upload); }
-  abandonUploads(limit, all) { return abandonUploads(this.ctx.storage, Date.now(), limit, all); }
-  reportAsked(hash, request, asker, known) { return reportAsked(this.ctx.storage, hash, request, asker, Date.now(), known); }
-  listAsked(id, presentedHash) { return listAsked(this.ctx.storage, id, presentedHash); }
-  deadObjects(limit) { return deadObjects(this.ctx.storage, limit); }
-  forgetDead(objects) { return forgetDead(this.ctx.storage, objects); }
-  unnamedObjects(keys) { return unnamedObjects(this.ctx.storage, keys); }
-  stats() { return storeStats(this.ctx.storage); }
+  get s() { return this.ctx.storage; }
+  unitStatus(hashes) { return unitStatus(this.s, hashes); }
+  unitRow(hash) { return unitRow(this.s, hash); }
+  unitServed(hash, withBlobs) { return unitServed(this.s, hash, withBlobs); }
+  beginUnit(u) { return beginUnit(this.s, u, Date.now()); }
+  unitBlobs(hash) { return unitBlobs(this.s, hash); }
+  commitUnitArchive(hash, object, size, blobs) { return commitUnitArchive(this.s, hash, object, size, blobs, Date.now()); }
+  completeUnit(hash) { return completeUnit(this.s, hash, Date.now()); }
+  blobWanted(sha, size) { return blobWanted(this.s, sha, size); }
+  commitBlob(sha, size, crc, object) { return commitBlob(this.s, sha, size, crc, object, Date.now()); }
+  blobLocation(sha) { return blobLocation(this.s, sha); }
+  markBroken(object) { return markBroken(this.s, object, Date.now()); }
+  purgeUnits(limit) { return purgeUnits(this.s, Date.now(), limit); }
+  claim(request) { return claimUnits(this.s, request, Date.now()); }
+  release(request) { return releaseClaim(this.s, request, Date.now()); }
+  claimRev(ref, secretHash) { return claimRev(this.s, ref, secretHash); }
+  releaseRef(ref) { return releaseRef(this.s, ref, Date.now()); }
+  reportAsked(hash, path) { return reportAsked(this.s, hash, path, Date.now()); }
+  listAsked(claims) { return listAsked(this.s, claims); }
+  publisherSeen(key, name, folded) { return publisherSeen(this.s, key, name, folded, Date.now()); }
+  publisher(key) { return publisherRow(this.s, key); }
+  forgetKey(key) { return forgetKey(this.s, key); }
+  block(hash, reason) { return blockUnit(this.s, hash, reason, Date.now()); }
+  unblock(hash) { return unblockUnit(this.s, hash); }
+  uploadSession(sha, size) { return uploadSession(this.s, sha, size); }
+  openUpload(request) { return openUpload(this.s, request, Date.now()); }
+  recordPart(sha, size, upload, part, etag) { return recordPart(this.s, sha, size, upload, part, etag, Date.now()); }
+  closeUpload(sha, size, upload) { return closeUpload(this.s, sha, size, upload); }
+  abandonUploads(limit, all) { return abandonUploads(this.s, Date.now(), limit, all); }
+  deadObjects(limit) { return deadObjects(this.s, limit); }
+  forgetDead(objects) { return forgetDead(this.s, objects); }
+  unnamedObjects(keys) { return unnamedObjects(this.s, keys); }
+  stats() { return storeStats(this.s); }
   meta(key, value) {
     if (value !== undefined) {
-      this.ctx.storage.sql.exec('INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value));
+      this.s.sql.exec('INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value));
       return true;
     }
-    return this.ctx.storage.sql.exec('SELECT value FROM store_meta WHERE key = ?', key).toArray()[0]?.value ?? null;
+    return this.s.sql.exec('SELECT value FROM store_meta WHERE key = ?', key).toArray()[0]?.value ?? null;
   }
-  reset() { return resetRegistry(this.ctx.storage); }
-
-  /* Authors' keys (mods_dist.js), which sign published maps' claims. */
-  author(id) { return authorRow(this.ctx.storage, id); }
-  bindAuthor(id, key, rotate) { return bindAuthor(this.ctx.storage, id, key, rotate, Date.now()); }
+  reset() { return resetRegistry(this.s); }
 }
 
-/* The check of one build's uploads (named "check:<hash>"): reads an uploaded archive back from R2,
- * hashes every byte and judges it (mods_store.js checkArchive), so the Worker that took the
- * upload only moved its bytes. A Durable Object has the CPU time a large archive needs on any
- * plan; one per build keeps the checks of different builds apart, and the hashing of a large archive
- * is shared among several, named "walk:<hash>:<n>". It keeps no state. */
+/* The checks of one unit's (or one large blob's) uploads, named "unit:<hash>" or "blob:<sha>": they
+ * read what a request stored back from R2 and hash every byte (mods_store.js), so the Worker that
+ * took the request only moved its bytes. A Durable Object has the CPU time this needs on either
+ * Workers plan. It keeps no state. */
 export class ModChecker extends DurableObject {
-  check(hash, object, size) { return checkArchive(this.env, hash, object, size); }
-  walkSegment(object, start, end) { return walkSegment(this.env, object, start, end); }
-  leftOut(skeleton, request) { return leftOutIn(this.env, skeleton, request); }
+  begin(hash, bytes, auth) { return beginIn(this.env, hash, bytes, auth); }
+  archive(hash, object, size, auth) { return checkUnitArchiveIn(this.env, hash, object, size, auth); }
+  blob(sha, object, size) { return checkBlobIn(this.env, sha, object, size); }
+  plan(hash) { return archivePlanIn(this.env, hash); }
+  asked(hash, path) { return askedIn(this.env, hash, path); }
 }

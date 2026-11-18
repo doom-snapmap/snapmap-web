@@ -1,86 +1,93 @@
-/* Index of the mod store. One Durable Object holds every row, so claim counts, references,
- * releases, purges and repairs are decided in single transactions. The clock comes from the
- * Durable Object, never from an HTTP client.
+/* Index of the mod store (SPEC-distribution section 10). One Durable Object holds every row, so
+ * claim counts, deletion delays, purges and repairs are decided in single transactions. The clock
+ * comes from the Durable Object, never from an HTTP client.
  *
- * Storage is content addressed. A file's bytes (a blob, named by its SHA-256) are stored once
- * however many builds carry them, inside a pack: an R2 object of one or more blobs laid end to
- * end. A build is its skeleton (the archive's own ZIP headers and central directory, and which
- * blob each entry holds) plus the blobs it names; the store serves the build's archive byte for
- * byte as it was uploaded by writing the skeleton's headers around the blobs. A build arrives
- * as an archive, is checked (every file's SHA-256 against its mod.json), and is served from
- * that archive while it is staged; the packer (mods_pack.js, run by the Durable Object's alarm)
- * then moves the blobs it does not already hold into packs and deletes the archive. A published
- * map's part of a mod, and the per-object units a map will name (each the closure of one placed object), are builds like
- * any other, so units that share files share their blobs.
+ * The store is internal to map publishing: it holds the units published maps claim, and nothing
+ * else. A unit is the closure of one placed object, named by the SHA-256 of its canonical manifest
+ * (the product's modunit.c); it never changes. Its files are blobs, named by their SHA-256 and
+ * stored once however many units carry them. A blob lives in a pack: an R2 object holding one or
+ * more blobs, each after the ZIP local header it arrived with (hlen bytes, hdr in hex), or alone
+ * with no header (an upload in parts). An uploaded unit archive (stored entries, the product's
+ * modzip form) is checked and then kept as it is as a pack: no bytes are moved again. A blob that
+ * arrives twice (two publishers racing) is dead space in the later pack.
+ *
+ * A unit is "pending" from its begin (its manifest is known, some blobs are not held yet) and
+ * "held" once every blob it names is. A unit no map claim names records unclaimed_at (the store's
+ * clock) and is served and kept for DELETE_DELAY_MS, then deleted at the first purge; a claim
+ * within the delay clears it (D40). A blob no unit names is deleted with it, and a pack no blob
+ * row points into goes to the delete queue.
  *
  * Every R2 object a row names has its own random key, written once. A row that stops naming an
  * object puts the key on the delete queue (dead) in the same transaction, so an object is never
- * deleted while a row names it and never left behind when the deleting request fails; the
- * caller deletes what a call returns and forgets it, and the alarm and the daily purge finish
- * whatever is still queued. Tables grow; nothing here caps how many builds, blobs, claims or
- * builds per claim there are. */
+ * deleted while a row names it and never left behind when the deleting request fails. Tables
+ * grow; nothing here caps units, blobs, claims or units per claim. */
 
-import { planOf } from './mods_pack.js';
-
-export const CLAIM_WINDOW_MS = 3600000;      // upload-before-claim window (one hour)
+export const DELETE_DELAY_MS = 86400000;     // D40: an unclaimed unit is kept and served this long
 export const UPLOAD_IDLE_MS = 86400000;      // an upload in parts untouched this long is abandoned
-export const SCHEMA_VERSION = 3;
+export const ASKED_MAX = 256;                // D44: asked paths kept per unit
+export const SCHEMA_VERSION = 4;
 
-/* Tables of the stores this index replaced (the blob and bundle store, then one archive per
- * build). The mod store is emptied before this store goes live (README.md, "Emptying the mod
- * store"), so their rows are dropped, not migrated; their R2 objects are deleted by the reset
- * route, and the daily sweep deletes any that no row names. */
-const RETIRED_TABLES = ['mod_claim_bundle', 'mod_bundle_blob', 'mod_bundle', 'mod_blob',
-  'mod_claim_build', 'mod_claim', 'mod_build', 'mod_upload', 'mod_asked'];
+/* Tables of the stores this index replaced (the blob and bundle store, one archive per build, and
+ * ST1's builds and listings). The store is emptied before it goes live, so their rows are dropped,
+ * not migrated; the daily sweep deletes their R2 objects, which no row names. */
+const RETIRED_TABLES = ['mod_claim_bundle', 'mod_bundle_blob', 'mod_bundle', 'mod_blob', 'mod_claim_build', 'mod_claim',
+  'mod_build', 'mod_upload', 'mod_asked', 'build', 'build_blob', 'claim', 'claim_build', 'author', 'dist_mod',
+  'dist_version', 'dist_unit', 'map_claim_row'];
+/* Tables whose shape changed with schema 4: dropped when an older schema is found. */
+const RESHAPED_TABLES = ['blob', 'pack', 'upload', 'asked', 'dead'];
 
 const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
-  /* A build: its archive while staged, its skeleton always. broken: an object it needs is
-   * missing from R2; it is not served until an upload repairs it. */
-  'CREATE TABLE IF NOT EXISTS build (id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, ' +
-    'salt TEXT NOT NULL, created INTEGER NOT NULL, claims INTEGER NOT NULL DEFAULT 0, scripts INTEGER NOT NULL DEFAULT 0, ' +
-    'slice_of TEXT, state TEXT NOT NULL, archive TEXT, skeleton TEXT NOT NULL, modjson TEXT NOT NULL, ' +
-    'entries INTEGER NOT NULL, broken INTEGER NOT NULL DEFAULT 0, packed INTEGER, plan TEXT, replan INTEGER NOT NULL DEFAULT 0, ' +
-    'vrefs INTEGER NOT NULL DEFAULT 0)',   // vrefs: reserved for mod listings (a later feature); 0 today
-  'CREATE INDEX IF NOT EXISTS build_unclaimed ON build (claims, created)',
-  'CREATE INDEX IF NOT EXISTS build_state ON build (state, created)',
-  /* A blob: one file's bytes, once, after the ZIP local header (hdr, hlen bytes) it had in the
-   * archive that brought it. pack and at say where that header starts; refs counts the builds
-   * naming the blob. */
+  /* A blob: one file's bytes, once. pack and at say where its header starts in the pack; the bytes
+   * follow the hlen header bytes. crc is the CRC-32 the check computed (the archive route's). broken:
+   * its pack is missing from R2; a later upload of the blob repairs it. */
   'CREATE TABLE IF NOT EXISTS blob (id INTEGER PRIMARY KEY, sha TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, ' +
-    'pack INTEGER NOT NULL, at INTEGER NOT NULL, hlen INTEGER NOT NULL, hdr TEXT NOT NULL, refs INTEGER NOT NULL DEFAULT 0, ' +
+    'crc INTEGER NOT NULL, pack INTEGER NOT NULL, at INTEGER NOT NULL, hlen INTEGER NOT NULL, hdr TEXT NOT NULL, ' +
     'broken INTEGER NOT NULL DEFAULT 0)',
   'CREATE INDEX IF NOT EXISTS blob_pack ON blob (pack)',
-  /* A pack: an R2 object of blobs. live counts the blobs whose row points into it. */
+  /* A pack: an R2 object of blobs. live counts the blob rows pointing into it. */
   'CREATE TABLE IF NOT EXISTS pack (id INTEGER PRIMARY KEY, object TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, ' +
     'live INTEGER NOT NULL, live_bytes INTEGER NOT NULL, created INTEGER NOT NULL)',
-  'CREATE TABLE IF NOT EXISTS build_blob (build INTEGER NOT NULL, blob INTEGER NOT NULL, PRIMARY KEY (build, blob)) WITHOUT ROWID',
-  'CREATE INDEX IF NOT EXISTS build_blob_by_blob ON build_blob (blob)',
-  /* author: the SnapMap author whose key signed the claim; null for a claim made with its secret alone. */
-  'CREATE TABLE IF NOT EXISTS claim (id TEXT PRIMARY KEY, ref TEXT NOT NULL, secret TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, author TEXT)',
-  'CREATE UNIQUE INDEX IF NOT EXISTS claim_by_secret ON claim (ref, secret)',
-  /* By hash: a claim names a build (or unit) by its hash, whichever upload of it is stored. */
-  'CREATE TABLE IF NOT EXISTS claim_build (claim TEXT NOT NULL, build TEXT NOT NULL, PRIMARY KEY (claim, build)) WITHOUT ROWID',
-  'CREATE INDEX IF NOT EXISTS claim_build_by_build ON claim_build (build)',
-  'CREATE TABLE IF NOT EXISTS upload (hash TEXT NOT NULL, size INTEGER NOT NULL, object TEXT NOT NULL, upload TEXT NOT NULL, ' +
+  /* A unit: its manifest (the canonical bytes, inline, or an R2 object when over MANIFEST_INLINE),
+   * what it carries, its claim count and the store-clock time it lost its last claim. */
+  'CREATE TABLE IF NOT EXISTS unit (id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, manifest TEXT, manifest_object TEXT, ' +
+    'mlen INTEGER NOT NULL, size INTEGER NOT NULL, files INTEGER NOT NULL, spelled TEXT, root_kind TEXT NOT NULL, ' +
+    'root_name TEXT NOT NULL, created INTEGER NOT NULL, claims INTEGER NOT NULL DEFAULT 0, unclaimed_at INTEGER, ' +
+    'state TEXT NOT NULL, uploaded_by TEXT)',
+  'CREATE INDEX IF NOT EXISTS unit_unclaimed ON unit (claims, unclaimed_at)',
+  /* The blobs a unit names, by SHA-256 (a blob row exists once its bytes are held). A blob's
+   * references are counted from here. */
+  'CREATE TABLE IF NOT EXISTS unit_blob (unit INTEGER NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (unit, sha)) WITHOUT ROWID',
+  'CREATE INDEX IF NOT EXISTS unit_blob_by_sha ON unit_blob (sha)',
+  /* An upload in parts of one large blob. */
+  'CREATE TABLE IF NOT EXISTS upload (sha TEXT NOT NULL, size INTEGER NOT NULL, object TEXT NOT NULL, upload TEXT NOT NULL, ' +
     'part_size INTEGER NOT NULL, parts INTEGER NOT NULL, etags TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, ' +
-    'PRIMARY KEY (hash, size))',
+    'PRIMARY KEY (sha, size))',
   'CREATE INDEX IF NOT EXISTS upload_idle ON upload (updated)',
-  /* A file a published map's part of a mod lacked, which a player's game asked for: kept for
-   * the map's author (the claim's holder) while the build is stored. */
-  'CREATE TABLE IF NOT EXISTS asked (build TEXT NOT NULL, request TEXT NOT NULL, asker TEXT NOT NULL, created INTEGER NOT NULL, ' +
-    'PRIMARY KEY (build, request))',
+  /* A published map's claim (one per item and secret): the SHA-256 of its secret, the publishing
+   * key that last changed it, and its rev (D33). */
+  'CREATE TABLE IF NOT EXISTS map_claim (id TEXT PRIMARY KEY, ref TEXT NOT NULL, secret TEXT NOT NULL, key TEXT, ' +
+    'rev INTEGER NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS map_claim_by_secret ON map_claim (ref, secret)',
+  'CREATE TABLE IF NOT EXISTS map_claim_unit (claim TEXT NOT NULL, unit TEXT NOT NULL, PRIMARY KEY (claim, unit)) WITHOUT ROWID',
+  'CREATE INDEX IF NOT EXISTS map_claim_unit_by_unit ON map_claim_unit (unit)',
+  /* Publishing keys (base64url public halves) and the account names bound to them (D31). */
+  'CREATE TABLE IF NOT EXISTS publisher (key TEXT PRIMARY KEY, first_seen INTEGER NOT NULL)',
+  'CREATE TABLE IF NOT EXISTS publisher_name (name TEXT PRIMARY KEY, display TEXT NOT NULL, key TEXT NOT NULL UNIQUE, bound INTEGER NOT NULL)',
+  /* A path a player's game asked a unit for that the unit lacks (3.8). */
+  'CREATE TABLE IF NOT EXISTS asked (unit TEXT NOT NULL, path TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY (unit, path))',
+  /* Units moderation removed: never served or uploaded again (5.19). */
+  'CREATE TABLE IF NOT EXISTS blocked (hash TEXT PRIMARY KEY, reason TEXT NOT NULL, created INTEGER NOT NULL)',
   /* R2 objects no row names any more, to delete. */
   'CREATE TABLE IF NOT EXISTS dead (object TEXT PRIMARY KEY, queued INTEGER NOT NULL)',
-  /* Distribution (mods_dist.js): an author's signing key, bound to the SnapMap author ID. */
-  'CREATE TABLE IF NOT EXISTS author (id TEXT PRIMARY KEY, key TEXT NOT NULL, bound INTEGER NOT NULL, updated INTEGER NOT NULL)',
 ];
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
-const SALT = /^[a-z][a-z0-9]{7}$/;
-/* Every object this store writes: an archive or upload in parts, a skeleton, a pack. */
-const OBJECT = /^(build\/[0-9a-f]{64}\/[0-9a-f]{32}|skel\/[0-9a-f]{64}\/[0-9a-f]{32}|pack\/[0-9a-f]{32})$/;
+/* Every object this store writes: an uploaded unit archive (a pack), a blob uploaded in parts (a
+ * pack of one), a large manifest. */
+const OBJECT = /^(pack\/[0-9a-f]{64}\/[0-9a-f]{32}|blob\/[0-9a-f]{64}\/[0-9a-f]{32}|manifest\/[0-9a-f]{64}\/[0-9a-f]{32})$/;
+const KEY_RE = /^[A-Za-z0-9_-]{87}$/;        // base64url of a 65-byte P-256 public point, unpadded
 
 function rows(storage, query, ...bindings) {
   return storage.sql.exec(query, ...bindings).toArray();
@@ -102,20 +109,17 @@ export function checkObject(object) {
 export function initializeRegistry(storage) {
   const tables = new Set(rows(storage, "SELECT name FROM sqlite_master WHERE type = 'table'").map(row => row.name));
   for (const table of RETIRED_TABLES) if (tables.has(table)) storage.sql.exec('DROP TABLE IF EXISTS ' + table);
-  for (const statement of SCHEMA) storage.sql.exec(statement);
-  /* Columns added after a table was first made (an index from an earlier form of this store). */
-  for (const [table, column, type] of [['build', 'plan', 'TEXT'], ['build', 'replan', 'INTEGER NOT NULL DEFAULT 0'],
-    ['build', 'vrefs', 'INTEGER NOT NULL DEFAULT 0'], ['claim', 'author', 'TEXT']]) {
-    const have = new Set(rows(storage, 'PRAGMA table_info(' + table + ')').map(r => r.name));
-    if (!have.has(column)) storage.sql.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + type);
+  const meta = tables.has('store_meta') ? one(storage, "SELECT value FROM store_meta WHERE key = 'schema'") : null;
+  if (!meta || Number(meta.value) < SCHEMA_VERSION) {
+    for (const table of RESHAPED_TABLES) if (tables.has(table)) storage.sql.exec('DROP TABLE IF EXISTS ' + table);
   }
+  for (const statement of SCHEMA) storage.sql.exec(statement);
   storage.sql.exec("INSERT INTO store_meta (key, value) VALUES ('schema', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     String(SCHEMA_VERSION));
 }
 
 /* ---------------- the delete queue ---------------- */
 
-/* Queues objects for deletion; returns them (the ones given that are keys). */
 function bury(storage, objects, now) {
   const queued = [];
   for (const object of objects) {
@@ -126,12 +130,10 @@ function bury(storage, objects, now) {
   return queued;
 }
 
-/* Objects queued for deletion, oldest first. */
 export function deadObjects(storage, limit) {
   return rows(storage, 'SELECT object FROM dead ORDER BY queued LIMIT ?', limit).map(row => row.object);
 }
 
-/* Forgets queued objects the caller deleted. */
 export function forgetDead(storage, objects) {
   for (const object of objects) storage.sql.exec('DELETE FROM dead WHERE object = ?', object);
   return true;
@@ -140,45 +142,20 @@ export function forgetDead(storage, objects) {
 /* Which of these keys (an R2 listing's page) no row names: the sweep deletes them. */
 export function unnamedObjects(storage, keys) {
   return keys.filter(key => !(
-    one(storage, 'SELECT 1 AS hit FROM build WHERE archive = ? OR skeleton = ?', key, key) ||
     one(storage, 'SELECT 1 AS hit FROM pack WHERE object = ?', key) ||
     one(storage, 'SELECT 1 AS hit FROM upload WHERE object = ?', key) ||
+    one(storage, 'SELECT 1 AS hit FROM unit WHERE manifest_object = ?', key) ||
     one(storage, 'SELECT 1 AS hit FROM dead WHERE object = ?', key)));
 }
 
-/* ---------------- builds ---------------- */
+/* ---------------- blobs and packs ---------------- */
 
-/* The row of one build, or null. */
-export function buildRow(storage, hash) {
-  if (!HEX64.test(hash)) throw new Error('bad build');
-  return one(storage, 'SELECT id, size, salt, created, claims, vrefs, scripts, slice_of, state, archive, skeleton, modjson, entries, broken ' +
-    'FROM build WHERE hash = ?', hash);
+/* A blob row that is held: present and not broken. */
+function goodBlob(storage, sha) {
+  return one(storage, 'SELECT id, size FROM blob WHERE sha = ? AND broken = 0', sha);
 }
 
-/* Drops one build's row: its blob references (and the blobs and packs no build names any
- * more), its asked rows, its objects onto the delete queue. Inside a transaction. Returns the
- * objects queued. */
-function dropBuild(storage, row, now) {
-  const blobs = rows(storage, 'SELECT blob FROM build_blob WHERE build = ?', row.id).map(r => r.blob);
-  storage.sql.exec('DELETE FROM build_blob WHERE build = ?', row.id);
-  for (const blob of blobs) storage.sql.exec('UPDATE blob SET refs = refs - 1 WHERE id = ?', blob);
-  const queued = dropUnreferencedBlobs(storage, blobs, now);
-  storage.sql.exec('DELETE FROM build WHERE id = ?', row.id);
-  return queued.concat(bury(storage, [row.archive, row.skeleton], now));
-}
-
-function dropUnreferencedBlobs(storage, blobs, now) {
-  const queued = [];
-  for (const id of blobs) {
-    const blob = one(storage, 'SELECT refs, pack, size FROM blob WHERE id = ?', id);
-    if (!blob || blob.refs > 0) continue;
-    storage.sql.exec('DELETE FROM blob WHERE id = ?', id);
-    queued.push(...unlinkFromPack(storage, blob.pack, blob.size, now));
-  }
-  return queued;
-}
-
-/* One blob row left the pack: the pack goes when no blob row points into it. */
+/* One blob row left a pack: the pack goes when no blob row points into it. */
 function unlinkFromPack(storage, packId, size, now) {
   storage.sql.exec('UPDATE pack SET live = live - 1, live_bytes = live_bytes - ? WHERE id = ?', size, packId);
   const pack = one(storage, 'SELECT object, live FROM pack WHERE id = ?', packId);
@@ -189,323 +166,440 @@ function unlinkFromPack(storage, packId, size, now) {
   return [];
 }
 
-/* Records a checked archive stored as `archive`, with its skeleton object. A new build takes it
- * (staged). A build already stored keeps what it has when it is claimed and whole, or when the
- * upload is the same archive (the same size and mod.json); otherwise the upload replaces it: an
- * unclaimed build is replaced by any later archive that passes the checks (so an archive that
- * names a hash it is not cannot hold that hash against the real one), and a claimed build whose
- * objects went missing is repaired. Any registration restarts the upload window of a build
- * nothing claims. Returns { created, replaced, discard: [objects the caller deletes now] }. */
-export function registerBuild(storage, b, now) {
-  const { hash, size, salt, scripts, sliceOf = null, archive, skeleton, modjson, entries } = b;
-  if (!HEX64.test(hash) || !Number.isSafeInteger(size) || size < 1 || typeof salt !== 'string' || !SALT.test(salt) ||
-      !Number.isSafeInteger(scripts) || scripts < 0 || (sliceOf !== null && !HEX64.test(sliceOf)) || !HEX64.test(modjson) ||
-      !Number.isSafeInteger(entries) || entries < 1) {
-    throw new Error('bad build');
+/* Deletes the blob rows of `shas` that no unit names any more. Returns the objects queued. */
+function dropUnnamedBlobs(storage, shas, now) {
+  const queued = [];
+  for (const sha of new Set(shas)) {
+    if (one(storage, 'SELECT 1 AS hit FROM unit_blob WHERE sha = ? LIMIT 1', sha)) continue;
+    const blob = one(storage, 'SELECT id, pack, size FROM blob WHERE sha = ?', sha);
+    if (!blob) continue;
+    storage.sql.exec('DELETE FROM blob WHERE id = ?', blob.id);
+    queued.push(...unlinkFromPack(storage, blob.pack, blob.size, now));
   }
-  checkObject(archive);
-  checkObject(skeleton);
-  return storage.transactionSync(() => {
-    const kept = one(storage, 'SELECT id, size, claims, vrefs, archive, skeleton, modjson, broken FROM build WHERE hash = ?', hash);
-    if (kept) {
-      const same = kept.size === size && kept.modjson === modjson;
-      if (!kept.broken && (kept.claims > 0 || kept.vrefs > 0 || same)) {
-        if (kept.claims <= 0 && kept.vrefs <= 0) storage.sql.exec('UPDATE build SET created = max(created, ?) WHERE id = ?', now, kept.id);
-        return { created: false, replaced: false, discard: bury(storage, [archive, skeleton], now) };
+  return queued;
+}
+
+/* The SHA-256s a unit names that the store does not hold whole. */
+function missingOf(storage, unitId) {
+  return rows(storage, 'SELECT x.sha AS sha FROM unit_blob x LEFT JOIN blob b ON b.sha = x.sha AND b.broken = 0 ' +
+    'WHERE x.unit = ? AND b.id IS NULL ORDER BY x.sha', unitId).map(r => r.sha);
+}
+
+/* Pending units naming any of `shas` that now have every blob: held. */
+function promote(storage, shas, now) {
+  const held = [];
+  const seen = new Set();
+  for (const sha of new Set(shas)) {
+    for (const r of rows(storage, "SELECT u.id AS id, u.hash AS hash FROM unit_blob x JOIN unit u ON u.id = x.unit WHERE x.sha = ? AND u.state = 'pending'", sha)) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      if (!missingOf(storage, r.id).length) {
+        storage.sql.exec("UPDATE unit SET state = 'held' WHERE id = ?", r.id);
+        held.push(r.hash);
       }
     }
-    const discard = kept ? dropBuild(storage, kept, now) : [];
-    /* The claims and the mod versions name the hash, so they stay with it. */
-    storage.sql.exec('INSERT INTO build (hash, size, salt, created, claims, vrefs, scripts, slice_of, state, archive, skeleton, modjson, entries) ' +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?, ?, ?, ?)",
-      hash, size, salt, now, kept ? kept.claims : 0, kept ? kept.vrefs : 0, scripts, sliceOf, archive, skeleton, modjson, entries);
-    return { created: true, replaced: !!kept, discard };
-  });
+  }
+  void now;
+  return held;
 }
 
-/* An idempotent re-upload of a stored build: restarts its upload window. */
-export function touchBuild(storage, hash, now) {
-  if (!HEX64.test(hash)) throw new Error('bad build');
-  storage.sql.exec('UPDATE build SET created = max(created, ?) WHERE hash = ? AND claims <= 0 AND vrefs <= 0', now, hash);
-  return true;
+/* Records `object` (`size` bytes) as a pack holding `blobs` ([{ sha, size, crc, at, hlen, hdr }]: each
+ * blob's header offset in the object). A blob the store holds whole already is dead space here; a
+ * broken blob is repaired by this copy (its old pack loses it); a new blob is added. A pack that holds
+ * no live blob goes to the delete queue. Inside a transaction. Returns { packId, discard, added }. */
+function recordPack(storage, object, size, blobs, now) {
+  storage.sql.exec('INSERT INTO pack (object, size, live, live_bytes, created) VALUES (?, ?, 0, 0, ?)', object, size, now);
+  const packId = one(storage, 'SELECT id FROM pack WHERE object = ?', object).id;
+  let live = 0, liveBytes = 0;
+  const discard = [];
+  const added = [];
+  for (const b of blobs) {
+    if (!HEX64.test(b.sha) || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.at) || !Number.isSafeInteger(b.hlen) ||
+        !Number.isSafeInteger(b.crc) || typeof b.hdr !== 'string') throw new Error('bad blob');
+    const blob = one(storage, 'SELECT id, broken, pack, size FROM blob WHERE sha = ?', b.sha);
+    if (blob && !blob.broken) continue;
+    if (blob) {
+      storage.sql.exec('UPDATE blob SET size = ?, crc = ?, pack = ?, at = ?, hlen = ?, hdr = ?, broken = 0 WHERE id = ?',
+        b.size, b.crc, packId, b.at, b.hlen, b.hdr, blob.id);
+      discard.push(...unlinkFromPack(storage, blob.pack, blob.size, now));
+    } else {
+      storage.sql.exec('INSERT INTO blob (sha, size, crc, pack, at, hlen, hdr) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        b.sha, b.size, b.crc, packId, b.at, b.hlen, b.hdr);
+    }
+    live++; liveBytes += b.size;
+    added.push(b.sha);
+  }
+  if (live) storage.sql.exec('UPDATE pack SET live = ?, live_bytes = ? WHERE id = ?', live, liveBytes, packId);
+  else { storage.sql.exec('DELETE FROM pack WHERE id = ?', packId); discard.push(...bury(storage, [object], now)); }
+  return { packId, discard, added };
 }
 
-/* What serving a build needs, or null when it is not served (unknown, broken, being planned
- * again, or unclaimed past its hour): { size, scripts, state, archive, skeleton, sliceOf, plan }.
- * A staged build is served from its archive; a packed one by its plan (mods_pack.js), read from
- * one row. */
-export function buildServed(storage, hash, now) {
-  if (!HEX64.test(hash)) return null;
-  const row = one(storage, 'SELECT size, created, claims, vrefs, scripts, state, archive, skeleton, broken, slice_of, plan FROM build WHERE hash = ?', hash);
-  if (!row || row.broken || !(row.claims > 0 || row.vrefs > 0 || now - row.created < CLAIM_WINDOW_MS)) return null;
-  if (row.state === 'packed' && !row.plan) return null;
-  return { size: row.size, scripts: row.scripts, state: row.state, archive: row.archive, skeleton: row.skeleton, sliceOf: row.slice_of,
-    plan: row.state === 'packed' ? JSON.parse(row.plan) : null };
-}
-
-/* Where each blob of a build is: sha -> { object, at, hlen, hdr }. */
-function locationsOf(storage, id) {
-  return new Map(rows(storage, 'SELECT b.sha AS sha, p.object AS object, b.at AS at, b.hlen AS hlen, b.hdr AS hdr FROM build_blob x ' +
-    'JOIN blob b ON b.id = x.blob JOIN pack p ON p.id = b.pack WHERE x.build = ? AND b.broken = 0', id)
-    .map(r => [r.sha, { object: r.object, at: r.at, hlen: r.hlen, hdr: r.hdr }]));
-}
-
-/* The build's plan from its skeleton and where its blobs are now, or null (a blob is missing). */
-function planFor(storage, id, skel) {
-  const made = planOf(skel, locationsOf(storage, id));
-  return made && made.size === skel.size ? made.plan : null;
-}
-
-/* A request found an object a build needs missing from R2. The build is not served from now
- * on, nor is any other build that needs that object, until an upload of it repairs it; a blob
- * in a missing pack is rewritten by the next packed upload that carries it. */
-export function markBroken(storage, hash, object, now) {
+/* A request found a pack missing from R2: its blobs are broken (not served, and missing to every
+ * unit that names them) until an upload of them repairs them. */
+export function markBroken(storage, object, now) {
   checkObject(object);
   return storage.transactionSync(() => {
-    const broken = new Set();
     const pack = one(storage, 'SELECT id FROM pack WHERE object = ?', object);
-    if (pack) {
-      storage.sql.exec('UPDATE blob SET broken = 1 WHERE pack = ?', pack.id);
-      for (const r of rows(storage, 'SELECT DISTINCT x.build AS build FROM build_blob x JOIN blob b ON b.id = x.blob WHERE b.pack = ?', pack.id)) {
-        broken.add(r.build);
-      }
-    }
-    for (const r of rows(storage, 'SELECT id FROM build WHERE archive = ? OR skeleton = ?', object, object)) broken.add(r.id);
-    for (const id of broken) storage.sql.exec('UPDATE build SET broken = 1 WHERE id = ?', id);
-    console.log('mods: ' + object + ' is missing (found serving ' + hash.slice(0, 16) + '); ' + broken.size + ' build(s) wait for a repair');
+    if (!pack) return { blobs: 0 };
+    storage.sql.exec('UPDATE blob SET broken = 1 WHERE pack = ?', pack.id);
+    const n = one(storage, 'SELECT count(*) AS n FROM blob WHERE pack = ?', pack.id).n;
+    console.log('mods: ' + object + ' is missing; ' + n + ' blob(s) wait for a repair');
     void now;
-    return { builds: broken.size };
+    return { blobs: n };
   });
 }
 
-/* ---------------- packing (mods_pack.js) ---------------- */
-
-/* A packed build whose blobs a repair moved, or null: { id, hash, skeleton }. */
-export function nextReplan(storage) {
-  return one(storage, 'SELECT id, hash, skeleton FROM build WHERE replan = 1 LIMIT 1');
+/* Where a blob's bytes are, for GET /mods/blob/<sha>: { object, at, size, crc }, or null when it is
+ * not held or no held unit names it. */
+export function blobLocation(storage, sha) {
+  if (!HEX64.test(sha)) return null;
+  const r = one(storage, "SELECT b.size AS size, b.crc AS crc, b.at AS at, b.hlen AS hlen, p.object AS object FROM blob b JOIN pack p ON p.id = b.pack " +
+    "WHERE b.sha = ? AND b.broken = 0 AND EXISTS (SELECT 1 FROM unit_blob x JOIN unit u ON u.id = x.unit WHERE x.sha = b.sha AND u.state = 'held')", sha);
+  return r ? { object: r.object, at: r.at + r.hlen, size: r.size, crc: r.crc } : null;
 }
 
-/* Plans a build again from its skeleton (decoded): served again when nothing of it is missing. */
-export function replanBuild(storage, id, skeleton, skel) {
+/* ---------------- units ---------------- */
+
+function isBlocked(storage, hash) {
+  return !!one(storage, 'SELECT 1 AS hit FROM blocked WHERE hash = ?', hash);
+}
+
+/* The status of each unit (SPEC 10.2 POST /mods/units): held (served now: every blob held), removed
+ * (moderation blocked it), else missing. */
+export function unitStatus(storage, hashes) {
+  const out = {};
+  for (const hash of hashList(hashes)) {
+    if (isBlocked(storage, hash)) { out[hash] = 'removed'; continue; }
+    const u = one(storage, 'SELECT id, state FROM unit WHERE hash = ?', hash);
+    out[hash] = u && u.state === 'held' && !missingOf(storage, u.id).length ? 'held' : 'missing';
+  }
+  return out;
+}
+
+/* One unit's row, or null. */
+export function unitRow(storage, hash) {
+  if (!HEX64.test(hash)) throw new Error('bad unit');
+  return one(storage, 'SELECT id, hash, manifest, manifest_object, mlen, size, files, spelled, root_kind, root_name, created, claims, ' +
+    'unclaimed_at, state, uploaded_by FROM unit WHERE hash = ?', hash);
+}
+
+/* What serving a unit needs, or null when it is not served (unknown, pending, a blob not held):
+ * { manifest | manifestObject, mlen, blobs: { sha -> { object, at, size, crc } } (with `withBlobs`) }. */
+export function unitServed(storage, hash, withBlobs = false) {
+  if (!HEX64.test(hash) || isBlocked(storage, hash)) return null;
+  const u = one(storage, "SELECT id, manifest, manifest_object, mlen, size FROM unit WHERE hash = ? AND state = 'held'", hash);
+  if (!u || missingOf(storage, u.id).length) return null;
+  const out = { manifest: u.manifest, manifestObject: u.manifest_object, mlen: u.mlen, size: u.size };
+  if (withBlobs) {
+    out.blobs = {};
+    for (const r of rows(storage, 'SELECT b.sha AS sha, b.size AS size, b.crc AS crc, b.at AS at, b.hlen AS hlen, p.object AS object ' +
+      'FROM unit_blob x JOIN blob b ON b.sha = x.sha JOIN pack p ON p.id = b.pack WHERE x.unit = ?', u.id)) {
+      out.blobs[r.sha] = { object: r.object, at: r.at + r.hlen, size: r.size, crc: r.crc };
+    }
+  }
+  return out;
+}
+
+/* The begin of a unit's upload (SPEC 10.2 POST /mods/unit/<hash>/begin): the Worker checked the
+ * manifest (its hash, its shape) and gives what it says: { hash, manifest (text) or manifestObject,
+ * mlen, size, files: [[sha, size], ...] (one per distinct blob), spelled, rootKind, rootName, key }.
+ * A blocked hash: { blocked }. A held unit: { held: true } (its deletion delay restarts while nothing
+ * claims it, so a publish in progress never meets a purge), or the blobs a repair needs. A new or
+ * pending unit is recorded pending, its blobs linked, and { missing } answered; { held: true } when
+ * the store already holds every blob. A blob the store holds at another size than the manifest
+ * gives: { conflict: sha } (the manifest is wrong: a SHA-256 names one content). Returns, too, the
+ * objects the caller deletes (a manifest object of a unit that already had one). */
+export function beginUnit(storage, u, now) {
+  const { hash, manifest = null, manifestObject = null, mlen, size, files, spelled = null, rootKind, rootName, key = null } = u;
+  if (!HEX64.test(hash) || !Number.isSafeInteger(mlen) || mlen < 1 || !Number.isSafeInteger(size) || size < 0 ||
+      !Array.isArray(files) || typeof rootKind !== 'string' || typeof rootName !== 'string' ||
+      (manifest === null) === (manifestObject === null)) throw new Error('bad unit');
+  if (manifestObject !== null) checkObject(manifestObject);
+  for (const f of files) if (!Array.isArray(f) || !HEX64.test(f[0]) || !Number.isSafeInteger(f[1]) || f[1] < 0) throw new Error('bad unit');
   return storage.transactionSync(() => {
-    const row = one(storage, "SELECT id FROM build WHERE id = ? AND skeleton = ? AND state = 'packed'", id, skeleton);
-    if (!row) return { replanned: false };
-    const plan = planFor(storage, id, skel);
-    storage.sql.exec('UPDATE build SET plan = ?, replan = 0, broken = ? WHERE id = ?', plan ? JSON.stringify(plan) : null, plan ? 0 : 1, id);
-    return { replanned: true, served: !!plan };
+    const discard = manifestObject ? [manifestObject] : [];
+    if (isBlocked(storage, hash)) return { blocked: true, discard: bury(storage, discard, now) };
+    for (const [sha, n] of files) {
+      const blob = one(storage, 'SELECT size FROM blob WHERE sha = ?', sha);
+      if (blob && blob.size !== n) return { conflict: sha, discard: bury(storage, discard, now) };
+    }
+    let row = one(storage, 'SELECT id, state, claims FROM unit WHERE hash = ?', hash);
+    if (row) {
+      if (row.claims <= 0) storage.sql.exec('UPDATE unit SET unclaimed_at = ? WHERE id = ?', now, row.id);
+    } else {
+      storage.sql.exec('INSERT INTO unit (hash, manifest, manifest_object, mlen, size, files, spelled, root_kind, root_name, created, ' +
+        "claims, unclaimed_at, state, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'pending', ?)",
+        hash, manifest, manifestObject, mlen, size, files.length, spelled, rootKind, rootName, now, now, key);
+      row = one(storage, 'SELECT id, state, claims FROM unit WHERE hash = ?', hash);
+      for (const [sha, n] of files) {
+        storage.sql.exec('INSERT INTO unit_blob (unit, sha, size) VALUES (?, ?, ?) ON CONFLICT DO NOTHING', row.id, sha, n);
+      }
+      discard.length = 0;
+    }
+    const missing = missingOf(storage, row.id);
+    if (!missing.length && row.state !== 'held') storage.sql.exec("UPDATE unit SET state = 'held' WHERE id = ?", row.id);
+    return missing.length ? { missing, discard: bury(storage, discard, now) } : { held: true, discard: bury(storage, discard, now) };
   });
 }
 
-/* The oldest staged build, or null: { id, hash, archive, skeleton }. */
-export function nextStaged(storage) {
-  return one(storage, "SELECT id, hash, archive, skeleton FROM build WHERE state = 'staged' AND broken = 0 ORDER BY created LIMIT 1");
+/* The blobs a begun unit names: { sha -> size }, or null when the store has no such unit. */
+export function unitBlobs(storage, hash) {
+  const u = one(storage, 'SELECT id FROM unit WHERE hash = ?', hash);
+  if (!u) return null;
+  return Object.fromEntries(rows(storage, 'SELECT sha, size FROM unit_blob WHERE unit = ?', u.id).map(r => [r.sha, r.size]));
 }
 
-export function stagedCount(storage) {
-  return one(storage, "SELECT count(*) AS n FROM build WHERE state = 'staged' AND broken = 0").n;
-}
-
-/* The first step of packing a staged build: every blob of `shas` the store already holds
- * whole is referenced by the build now (so it cannot go while the build is packed); the rest
- * are returned to be written. Null when the build is no longer that staged upload. */
-export function reserveBlobs(storage, id, skeleton, shas) {
-  if (!Array.isArray(shas) || !shas.every(s => HEX64.test(s))) throw new Error('bad blobs');
+/* A checked archive of a unit's files, stored as `object`: kept as a pack (recordPack). Every pending
+ * unit that now has all its blobs is held. Returns { held, missing, discard } for `hash`, or
+ * { gone } (with the object queued for deletion) when the unit was purged since its begin. */
+export function commitUnitArchive(storage, hash, object, size, blobs, now) {
+  checkObject(object);
   return storage.transactionSync(() => {
-    const row = one(storage, "SELECT id FROM build WHERE id = ? AND skeleton = ? AND state = 'staged'", id, skeleton);
-    if (!row) return null;
-    const needed = [];
-    for (const sha of new Set(shas)) {
-      const blob = one(storage, 'SELECT id, broken FROM blob WHERE sha = ?', sha);
-      if (!blob || blob.broken) { needed.push(sha); continue; }
-      const linked = one(storage, 'SELECT 1 AS hit FROM build_blob WHERE build = ? AND blob = ?', id, blob.id);
-      if (!linked) {
-        storage.sql.exec('INSERT INTO build_blob (build, blob) VALUES (?, ?)', id, blob.id);
-        storage.sql.exec('UPDATE blob SET refs = refs + 1 WHERE id = ?', blob.id);
-      }
-    }
-    return { needed };
+    const u = one(storage, 'SELECT id FROM unit WHERE hash = ?', hash);
+    if (!u) return { gone: true, discard: bury(storage, [object], now) };
+    const { discard, added } = recordPack(storage, object, size, blobs, now);
+    promote(storage, added, now);
+    const missing = missingOf(storage, u.id);
+    if (!missing.length) storage.sql.exec("UPDATE unit SET state = 'held' WHERE id = ?", u.id);
+    return { held: !missing.length, missing, discard };
   });
 }
 
-/* The last step: the packs written for the build's new blobs ({ object, size, blobs: [{ sha,
- * size, at, hlen, hdr }] }) are recorded, the build's plan is made from its skeleton (`skel`,
- * decoded), the build is packed and its archive goes to the delete queue. A blob another build
- * packed meanwhile keeps that copy (this pack's copy is dead space); a broken blob is repaired
- * by this copy, and the builds it had broken are planned again (the packer's next step) and
- * served once nothing of theirs is missing. When the build is no longer that staged upload,
- * nothing is recorded and the packs go to the delete queue. Returns { packed, discard }. */
-export function commitPacks(storage, id, skeleton, packs, now, skel) {
-  for (const p of packs) checkObject(p.object);
+/* POST /mods/unit/<hash>/complete: { held: true }, { missing }, or { notFound }. */
+export function completeUnit(storage, hash, now) {
   return storage.transactionSync(() => {
-    const row = one(storage, "SELECT id, archive FROM build WHERE id = ? AND skeleton = ? AND state = 'staged'", id, skeleton);
-    if (!row) return { packed: false, discard: bury(storage, packs.map(p => p.object), now) };
-    const repaired = new Set();
-    const empty = [];
-    for (const p of packs) {
-      storage.sql.exec('INSERT INTO pack (object, size, live, live_bytes, created) VALUES (?, ?, 0, 0, ?)', p.object, p.size, now);
-      const packId = one(storage, 'SELECT id FROM pack WHERE object = ?', p.object).id;
-      let live = 0, liveBytes = 0;
-      for (const b of p.blobs) {
-        if (!HEX64.test(b.sha) || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.at)) throw new Error('bad blob');
-        let blob = one(storage, 'SELECT id, broken, pack, size FROM blob WHERE sha = ?', b.sha);
-        if (blob && blob.broken) {
-          const old = blob.pack;
-          storage.sql.exec('UPDATE blob SET pack = ?, at = ?, hlen = ?, hdr = ?, broken = 0 WHERE id = ?', packId, b.at, b.hlen, b.hdr, blob.id);
-          live++; liveBytes += b.size;
-          empty.push(...unlinkFromPack(storage, old, blob.size, now));
-          repaired.add(blob.id);
-        } else if (!blob) {
-          storage.sql.exec('INSERT INTO blob (sha, size, pack, at, hlen, hdr, refs) VALUES (?, ?, ?, ?, ?, ?, 0)', b.sha, b.size, packId, b.at, b.hlen, b.hdr);
-          blob = one(storage, 'SELECT id FROM blob WHERE sha = ?', b.sha);
-          live++; liveBytes += b.size;
-        }
-        if (!one(storage, 'SELECT 1 AS hit FROM build_blob WHERE build = ? AND blob = ?', id, blob.id)) {
-          storage.sql.exec('INSERT INTO build_blob (build, blob) VALUES (?, ?)', id, blob.id);
-          storage.sql.exec('UPDATE blob SET refs = refs + 1 WHERE id = ?', blob.id);
-        }
-      }
-      if (live) storage.sql.exec('UPDATE pack SET live = ?, live_bytes = ? WHERE id = ?', live, liveBytes, packId);
-      else { storage.sql.exec('DELETE FROM pack WHERE id = ?', packId); empty.push(...bury(storage, [p.object], now)); }
-    }
-    const plan = planFor(storage, id, skel);
-    if (!plan) throw new Error('a packed build has a blob without a location');
-    storage.sql.exec("UPDATE build SET state = 'packed', archive = NULL, packed = ?, plan = ? WHERE id = ?", now, JSON.stringify(plan), id);
-    /* Builds a repaired blob had broken: planned again, then served when nothing is missing. */
-    for (const blob of repaired) {
-      for (const r of rows(storage, 'SELECT build FROM build_blob WHERE blob = ? AND build <> ?', blob, id)) {
-        const still = one(storage, 'SELECT 1 AS hit FROM build_blob x JOIN blob b ON b.id = x.blob WHERE x.build = ? AND b.broken = 1', r.build);
-        if (!still) storage.sql.exec("UPDATE build SET replan = 1 WHERE id = ? AND state = 'packed'", r.build);
-      }
-    }
-    return { packed: true, discard: [...bury(storage, [row.archive], now), ...empty] };
+    const u = one(storage, 'SELECT id FROM unit WHERE hash = ?', hash);
+    if (!u) return { notFound: true };
+    const missing = missingOf(storage, u.id);
+    if (missing.length) return { missing };
+    storage.sql.exec("UPDATE unit SET state = 'held' WHERE id = ?", u.id);
+    void now;
+    return { held: true };
+  });
+}
+
+/* 1 when an upload in parts of this blob at this size is wanted: some begun unit names it at that
+ * size and the store does not hold it whole. */
+export function blobWanted(storage, sha, size) {
+  if (!HEX64.test(sha) || !Number.isSafeInteger(size)) return false;
+  return !goodBlob(storage, sha) && !!one(storage, 'SELECT 1 AS hit FROM unit_blob WHERE sha = ? AND size = ? LIMIT 1', sha, size);
+}
+
+/* A blob uploaded in parts and checked (its SHA-256, size and CRC-32), stored as `object` with no
+ * header: a pack of one. Returns { held: [units now held], discard }. */
+export function commitBlob(storage, sha, size, crc, object, now) {
+  checkObject(object);
+  return storage.transactionSync(() => {
+    if (!one(storage, 'SELECT 1 AS hit FROM unit_blob WHERE sha = ? LIMIT 1', sha)) return { held: [], discard: bury(storage, [object], now) };
+    const { discard, added } = recordPack(storage, object, size, [{ sha, size, crc, at: 0, hlen: 0, hdr: '' }], now);
+    return { held: promote(storage, added, now), discard };
+  });
+}
+
+/* Drops one unit's row and what only it named. Inside a transaction. Returns the objects queued. */
+function dropUnit(storage, u, now) {
+  const shas = rows(storage, 'SELECT sha FROM unit_blob WHERE unit = ?', u.id).map(r => r.sha);
+  storage.sql.exec('DELETE FROM unit_blob WHERE unit = ?', u.id);
+  storage.sql.exec('DELETE FROM unit WHERE id = ?', u.id);
+  storage.sql.exec('DELETE FROM asked WHERE unit = ?', u.hash);
+  return [...dropUnnamedBlobs(storage, shas, now), ...bury(storage, [u.manifest_object], now)];
+}
+
+/* Deletes the units no claim has named for DELETE_DELAY_MS (held, or pending since their begin).
+ * Rows go first, so they stop being served before their objects are deleted. Returns
+ * { units, objects }. */
+export function purgeUnits(storage, now, limit) {
+  return storage.transactionSync(() => {
+    const doomed = rows(storage, 'SELECT id, hash, manifest_object FROM unit WHERE claims <= 0 AND unclaimed_at IS NOT NULL AND unclaimed_at <= ? ' +
+      'ORDER BY unclaimed_at LIMIT ?', now - DELETE_DELAY_MS, limit);
+    const objects = [];
+    for (const u of doomed) objects.push(...dropUnit(storage, u, now));
+    return { units: doomed.length, objects };
   });
 }
 
 /* ---------------- claims ---------------- */
 
-function claimedBuilds(storage, id) {
-  return rows(storage, 'SELECT build FROM claim_build WHERE claim = ?', id).map(row => row.build);
+function claimedUnits(storage, id) {
+  return rows(storage, 'SELECT unit FROM map_claim_unit WHERE claim = ?', id).map(r => r.unit);
 }
 
-/* Drops every listed build no claim names any more, so its objects go the moment its last
- * claim goes instead of waiting for the purge. Returns the objects queued; the caller deletes
- * them. */
-function dropUnclaimed(storage, hashes, now) {
-  const queued = [];
-  for (const hash of new Set(hashes)) {
-    const row = one(storage, 'SELECT id, claims, vrefs, archive, skeleton FROM build WHERE hash = ?', hash);
-    if (!row || row.claims > 0 || row.vrefs > 0) continue;
-    queued.push(...dropBuild(storage, row, now));
-    storage.sql.exec('DELETE FROM asked WHERE build = ?', hash);
-  }
-  return queued;
+function loseClaim(storage, hash, now) {
+  storage.sql.exec('UPDATE unit SET claims = claims - 1 WHERE hash = ?', hash);
+  storage.sql.exec('UPDATE unit SET unclaimed_at = ? WHERE hash = ? AND claims <= 0', now, hash);
 }
 
-/* Creates a claim, or replaces the build set of a published map's claim (one claim per published
- * item, its ref). A claim signed by the map's author (`author`, whose key the caller checked)
- * replaces the claim that author holds for the ref; a claim made with its secret alone replaces
- * the claim matching ref and secret. A ref another author's signed claim holds is forbidden to
- * anyone else. Secrets are stored and compared only as SHA-256 digests. A build that is not
- * stored, or is broken, is missing: the client uploads it again. */
-export function claimBuilds(storage, { ref, builds, id, secretHash, presentedHash, author = null }, now) {
-  const list = hashList(builds);
-  if (typeof ref !== 'string' || ref.length < 1) throw new Error('bad ref');
-  if (!HEX32.test(id) || !HEX64.test(secretHash) || (presentedHash !== null && !HEX64.test(presentedHash))) throw new Error('bad claim');
+function gainClaim(storage, hash) {
+  storage.sql.exec('UPDATE unit SET claims = claims + 1, unclaimed_at = NULL WHERE hash = ?', hash);
+}
+
+/* A published map's claim (SPEC 10.2 POST /mods/map/claim): { ref, units, secretHash, rev, key, id }.
+ * The claim of (ref, secret) is replaced when rev is its stored rev + 1; a new one needs rev 1
+ * (D33). Every unit must be held: { missing } otherwise, and nothing changes. A removed (blocked)
+ * unit is left out and named in `removed`; the claim holds the rest. A stale rev: { stale: stored
+ * rev, 0 for none }. Units only the old set named lose the claim and start their deletion delay. */
+export function claimUnits(storage, { ref, units, secretHash, rev, key = null, id }, now) {
+  const list = hashList(units);
+  if (typeof ref !== 'string' || !ref.length || !HEX64.test(secretHash) || !Number.isSafeInteger(rev) || !HEX32.test(id)) throw new Error('bad claim');
   return storage.transactionSync(() => {
-    let existing = null;
-    const owned = one(storage, 'SELECT id, author FROM claim WHERE ref = ? AND author IS NOT NULL LIMIT 1', ref);
-    if (owned && owned.author !== author) return { forbidden: true };
-    if (author !== null && owned) existing = owned.id;
-    else if (presentedHash !== null) {
-      const found = one(storage, 'SELECT id FROM claim WHERE ref = ? AND secret = ?', ref, presentedHash);
-      if (!found) return { forbidden: true };
-      existing = found.id;
-    }
-    const missing = list.filter(hash => !one(storage, 'SELECT 1 AS hit FROM build WHERE hash = ? AND broken = 0', hash));
+    const found = one(storage, 'SELECT id, rev FROM map_claim WHERE ref = ? AND secret = ?', ref, secretHash);
+    if (rev !== (found ? found.rev + 1 : 1)) return { stale: found ? found.rev : 0 };
+    const removed = list.filter(hash => isBlocked(storage, hash));
+    const kept = list.filter(hash => !removed.includes(hash));
+    const missing = kept.filter(hash => {
+      const u = one(storage, "SELECT id FROM unit WHERE hash = ? AND state = 'held'", hash);
+      return !u || missingOf(storage, u.id).length > 0;
+    });
     if (missing.length) return { missing };
-    const claim = existing || id;
-    const before = new Set(existing ? claimedBuilds(storage, existing) : []);
-    const after = new Set(list);
-    if (existing) storage.sql.exec('UPDATE claim SET updated = ? WHERE id = ?', now, claim);
-    else storage.sql.exec('INSERT INTO claim (id, ref, secret, created, updated, author) VALUES (?, ?, ?, ?, ?, ?)', claim, ref, secretHash, now, now, author);
-    const released = [];
-    for (const build of before) {
-      if (after.has(build)) continue;
-      storage.sql.exec('DELETE FROM claim_build WHERE claim = ? AND build = ?', claim, build);
-      storage.sql.exec('UPDATE build SET claims = claims - 1 WHERE hash = ?', build);
-      released.push(build);
+    const claim = found ? found.id : id;
+    const before = new Set(found ? claimedUnits(storage, claim) : []);
+    const after = new Set(kept);
+    if (found) storage.sql.exec('UPDATE map_claim SET rev = ?, key = ?, updated = ? WHERE id = ?', rev, key, now, claim);
+    else storage.sql.exec('INSERT INTO map_claim (id, ref, secret, key, rev, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?)', claim, ref, secretHash, key, rev, now, now);
+    for (const hash of before) {
+      if (after.has(hash)) continue;
+      storage.sql.exec('DELETE FROM map_claim_unit WHERE claim = ? AND unit = ?', claim, hash);
+      loseClaim(storage, hash, now);
     }
-    for (const build of after) {
-      if (before.has(build)) continue;
-      storage.sql.exec('INSERT INTO claim_build (claim, build) VALUES (?, ?)', claim, build);
-      storage.sql.exec('UPDATE build SET claims = claims + 1 WHERE hash = ?', build);
+    for (const hash of after) {
+      if (before.has(hash)) continue;
+      storage.sql.exec('INSERT INTO map_claim_unit (claim, unit) VALUES (?, ?)', claim, hash);
+      gainClaim(storage, hash);
     }
-    return { claim, created: !existing, deleted: dropUnclaimed(storage, released, now) };
+    return { claim, rev, created: !found, removed };
   });
 }
 
-/* Removes a claim: with its secret, or signed by its author (presentedHash null, `author` checked
- * by the caller). */
-export function releaseClaim(storage, id, presentedHash, now = 0, author = null) {
-  if (!HEX32.test(id) || (presentedHash !== null && !HEX64.test(presentedHash)) || (presentedHash === null && author === null)) throw new Error('bad claim');
+/* Removes the claim of (ref, secret) when rev is its rev + 1: { ok }, { notFound }, { stale }. Its
+ * units start their deletion delay when nothing else claims them. */
+export function releaseClaim(storage, { ref, secretHash, rev }, now) {
+  if (typeof ref !== 'string' || !ref.length || !HEX64.test(secretHash) || !Number.isSafeInteger(rev)) throw new Error('bad claim');
   return storage.transactionSync(() => {
-    const found = one(storage, 'SELECT secret, author FROM claim WHERE id = ?', id);
+    const found = one(storage, 'SELECT id, rev FROM map_claim WHERE ref = ? AND secret = ?', ref, secretHash);
     if (!found) return { notFound: true };
-    if (presentedHash !== null ? found.secret !== presentedHash : found.author !== author) return { forbidden: true };
-    const held = claimedBuilds(storage, id);
-    for (const build of held) storage.sql.exec('UPDATE build SET claims = claims - 1 WHERE hash = ?', build);
-    storage.sql.exec('DELETE FROM claim_build WHERE claim = ?', id);
-    storage.sql.exec('DELETE FROM claim WHERE id = ?', id);
-    return { ok: true, deleted: dropUnclaimed(storage, held, now) };
+    if (rev !== found.rev + 1) return { stale: found.rev };
+    dropClaim(storage, found.id, now);
+    return { ok: true };
   });
 }
 
-/* Drops unclaimed builds past the upload window. Their rows go first, so they stop being
- * served and cannot be claimed before their objects are deleted. Returns { builds, objects }. */
-export function purgeBuilds(storage, now, limit) {
+function dropClaim(storage, id, now) {
+  for (const hash of claimedUnits(storage, id)) loseClaim(storage, hash, now);
+  storage.sql.exec('DELETE FROM map_claim_unit WHERE claim = ?', id);
+  storage.sql.exec('DELETE FROM map_claim WHERE id = ?', id);
+}
+
+/* The rev of the claim of (ref, secret), or null: what a client that lost count asks after a stale. */
+export function claimRev(storage, ref, secretHash) {
+  const found = one(storage, 'SELECT rev FROM map_claim WHERE ref = ? AND secret = ?', ref, secretHash);
+  return found ? found.rev : null;
+}
+
+/* Moderation (D42): releases every claim of one published item. Returns { claims }. */
+export function releaseRef(storage, ref, now) {
   return storage.transactionSync(() => {
-    const doomed = rows(storage, 'SELECT id, hash, archive, skeleton, claims FROM build WHERE claims <= 0 AND vrefs <= 0 AND created < ? ORDER BY created LIMIT ?',
-      now - CLAIM_WINDOW_MS, limit);
-    const objects = [];
-    for (const row of doomed) {
-      objects.push(...dropBuild(storage, row, now));
-      storage.sql.exec('DELETE FROM asked WHERE build = ?', row.hash);
-    }
-    return { builds: doomed.length, objects };
+    const ids = rows(storage, 'SELECT id FROM map_claim WHERE ref = ?', ref).map(r => r.id);
+    for (const id of ids) dropClaim(storage, id, now);
+    return { claims: ids.length };
   });
 }
 
 /* ---------------- what players asked for ---------------- */
 
-/* A player's game asked a stored part of a build for `request`, which it lacks. `known`
- * (decided by the caller from the build's own source.json and files) is whether the request is
- * a file of the build it was cut from that the part does not carry. Kept once per build and
- * request (the first asker named). Returns { notFound } for a build the store does not hold,
- * { whole } for a whole build, { foreign } for a request that is not a file the part left out,
- * else { added } (false when it was known). */
-export function reportAsked(storage, hash, request, asker, now, known = true) {
-  if (!HEX64.test(hash) || typeof request !== 'string' || !request || typeof asker !== 'string') throw new Error('bad report');
+/* A player's game asked unit `hash` for `path`, which it lacks (the Worker checked the path is well
+ * formed and absent from the unit's manifest). Kept once, at most ASKED_MAX paths per unit:
+ * { added }, { full }, { notFound }. */
+export function reportAsked(storage, hash, path, now) {
+  if (!HEX64.test(hash) || typeof path !== 'string' || !path) throw new Error('bad report');
   return storage.transactionSync(() => {
-    const found = one(storage, 'SELECT salt, slice_of FROM build WHERE hash = ?', hash);
-    if (!found) return { notFound: true };
-    if (!found.slice_of) return { whole: true };
-    if (!known) return { foreign: true };
-    const had = one(storage, 'SELECT 1 AS hit FROM asked WHERE build = ? AND request = ?', hash, request);
-    if (!had) storage.sql.exec('INSERT INTO asked (build, request, asker, created) VALUES (?, ?, ?, ?)', hash, request, asker, now);
-    return { added: !had };
+    if (!one(storage, 'SELECT 1 AS hit FROM unit WHERE hash = ?', hash)) return { notFound: true };
+    if (one(storage, 'SELECT 1 AS hit FROM asked WHERE unit = ? AND path = ?', hash, path)) return { added: false };
+    if (one(storage, 'SELECT count(*) AS n FROM asked WHERE unit = ?', hash).n >= ASKED_MAX) return { full: true };
+    storage.sql.exec('INSERT INTO asked (unit, path, created) VALUES (?, ?, ?)', hash, path, now);
+    return { added: true };
   });
 }
 
-/* What players asked for of the builds a claim names, for the claim's holder: { forbidden },
- * { notFound }, or { asked: [{ build, salt, request, by }] }. */
-export function listAsked(storage, id, presentedHash) {
-  if (!HEX32.test(id) || !HEX64.test(presentedHash)) throw new Error('bad claim');
-  const found = one(storage, 'SELECT secret FROM claim WHERE id = ?', id);
-  if (!found) return { notFound: true };
-  if (found.secret !== presentedHash) return { forbidden: true };
-  const asked = rows(storage, 'SELECT a.build AS build, b.salt AS salt, a.request AS request, a.asker AS asker FROM asked a ' +
-    'JOIN claim_build c ON c.build = a.build JOIN build b ON b.hash = a.build WHERE c.claim = ? ORDER BY a.created, a.request', id);
-  return { asked: asked.map(row => ({ build: row.build, salt: row.salt, request: row.request, by: row.asker })) };
+/* What players asked of the units the given claims ([{ ref, secretHash }]) name, for their
+ * publisher: { asked: [{ unit, root, path }] }. A claim that does not match is skipped. */
+export function listAsked(storage, claims) {
+  const units = new Set();
+  for (const c of claims) {
+    const found = one(storage, 'SELECT id FROM map_claim WHERE ref = ? AND secret = ?', c.ref, c.secretHash);
+    if (found) for (const hash of claimedUnits(storage, found.id)) units.add(hash);
+  }
+  const asked = [];
+  for (const hash of [...units].sort()) {
+    const root = one(storage, 'SELECT root_name FROM unit WHERE hash = ?', hash);
+    for (const r of rows(storage, 'SELECT path FROM asked WHERE unit = ? ORDER BY created, path', hash)) {
+      asked.push({ unit: hash, root: root ? root.root_name : '', path: r.path });
+    }
+  }
+  return { asked };
+}
+
+/* ---------------- publishers ---------------- */
+
+/* A signed request of `key` presenting the account name `name` ('' when signed out) (D31): the key
+ * is recorded; a name no key holds binds to it (releasing the key's earlier name); a name another
+ * key holds is not bound and the request goes on. `folded` is the name compared (NFC, case-folded,
+ * by the caller). Returns { bound: 'new' | 'same' | 'taken' | 'none' }. */
+export function publisherSeen(storage, key, name, folded, now) {
+  if (typeof key !== 'string' || !KEY_RE.test(key)) throw new Error('bad key');
+  return storage.transactionSync(() => {
+    storage.sql.exec('INSERT INTO publisher (key, first_seen) VALUES (?, ?) ON CONFLICT(key) DO NOTHING', key, now);
+    if (!folded) return { bound: 'none' };
+    const held = one(storage, 'SELECT key FROM publisher_name WHERE name = ?', folded);
+    if (held) {
+      if (held.key !== key) return { bound: 'taken' };
+      storage.sql.exec('UPDATE publisher_name SET display = ? WHERE name = ?', name, folded);
+      return { bound: 'same' };
+    }
+    storage.sql.exec('DELETE FROM publisher_name WHERE key = ?', key);
+    storage.sql.exec('INSERT INTO publisher_name (name, display, key, bound) VALUES (?, ?, ?, ?)', folded, name, key, now);
+    return { bound: 'new' };
+  });
+}
+
+/* The admin forget-key action (4.4): the key's row and its name binding go; its claims stay, since
+ * their secrets authorise them. Returns { forgotten, name } (the freed name's display, or null). */
+export function forgetKey(storage, key) {
+  if (typeof key !== 'string' || !KEY_RE.test(key)) throw new Error('bad key');
+  return storage.transactionSync(() => {
+    const had = one(storage, 'SELECT 1 AS hit FROM publisher WHERE key = ?', key);
+    const name = one(storage, 'SELECT display FROM publisher_name WHERE key = ?', key);
+    storage.sql.exec('DELETE FROM publisher_name WHERE key = ?', key);
+    storage.sql.exec('DELETE FROM publisher WHERE key = ?', key);
+    return { forgotten: !!had, name: name ? name.display : null };
+  });
+}
+
+export function publisherRow(storage, key) {
+  const p = one(storage, 'SELECT key, first_seen FROM publisher WHERE key = ?', key);
+  if (!p) return null;
+  const n = one(storage, 'SELECT name, display, bound FROM publisher_name WHERE key = ?', key);
+  return { key: p.key, firstSeen: p.first_seen, name: n ? n.display : null };
+}
+
+/* ---------------- moderation ---------------- */
+
+/* Removes a unit (5.19): it is no longer served, its blobs no other unit names are deleted, claims
+ * stop naming it, and its hash is blocked so no upload can put it back. Returns { removed, objects }. */
+export function blockUnit(storage, hash, reason, now) {
+  if (!HEX64.test(hash) || typeof reason !== 'string') throw new Error('bad block');
+  return storage.transactionSync(() => {
+    storage.sql.exec('INSERT INTO blocked (hash, reason, created) VALUES (?, ?, ?) ON CONFLICT(hash) DO UPDATE SET reason = excluded.reason', hash, reason, now);
+    storage.sql.exec('DELETE FROM map_claim_unit WHERE unit = ?', hash);
+    const u = one(storage, 'SELECT id, hash, manifest_object FROM unit WHERE hash = ?', hash);
+    return { removed: !!u, objects: u ? dropUnit(storage, u, now) : [] };
+  });
+}
+
+export function unblockUnit(storage, hash) {
+  if (!HEX64.test(hash)) throw new Error('bad block');
+  const had = !!one(storage, 'SELECT 1 AS hit FROM blocked WHERE hash = ?', hash);
+  storage.sql.exec('DELETE FROM blocked WHERE hash = ?', hash);
+  return { unblocked: had };
 }
 
 /* ---------------- uploads in parts ---------------- */
@@ -514,118 +608,78 @@ function uploadRow(row) {
   return row ? { object: row.object, upload: row.upload, partSize: row.part_size, parts: row.parts, etags: JSON.parse(row.etags) } : null;
 }
 
-/* The upload in parts of this build at this size, or null. */
-export function uploadSession(storage, hash, size) {
-  if (!HEX64.test(hash) || !Number.isSafeInteger(size)) throw new Error('bad upload');
-  return uploadRow(one(storage, 'SELECT * FROM upload WHERE hash = ? AND size = ?', hash, size));
+export function uploadSession(storage, sha, size) {
+  if (!HEX64.test(sha) || !Number.isSafeInteger(size)) throw new Error('bad upload');
+  return uploadRow(one(storage, 'SELECT * FROM upload WHERE sha = ? AND size = ?', sha, size));
 }
 
-/* Records a new upload in parts. When another start of the same build and size won the
- * race, its session is returned with { existing: true } and the caller aborts its own. */
-export function openUpload(storage, { hash, size, object, upload, partSize, parts }, now) {
+export function openUpload(storage, { sha, size, object, upload, partSize, parts }, now) {
   checkObject(object);
-  if (!HEX64.test(hash) || !Number.isSafeInteger(size) || size < 1 || typeof upload !== 'string' || !upload ||
+  if (!HEX64.test(sha) || !Number.isSafeInteger(size) || size < 1 || typeof upload !== 'string' || !upload ||
       !Number.isSafeInteger(partSize) || partSize < 1 || !Number.isSafeInteger(parts) || parts < 1) {
     throw new Error('bad upload');
   }
   return storage.transactionSync(() => {
-    const found = one(storage, 'SELECT * FROM upload WHERE hash = ? AND size = ?', hash, size);
+    const found = one(storage, 'SELECT * FROM upload WHERE sha = ? AND size = ?', sha, size);
     if (found) return { ...uploadRow(found), existing: true };
-    storage.sql.exec('INSERT INTO upload (hash, size, object, upload, part_size, parts, etags, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      hash, size, object, upload, partSize, parts, JSON.stringify(Array(parts).fill(null)), now, now);
+    storage.sql.exec('INSERT INTO upload (sha, size, object, upload, part_size, parts, etags, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      sha, size, object, upload, partSize, parts, JSON.stringify(Array(parts).fill(null)), now, now);
     return { object, upload, partSize, parts, etags: Array(parts).fill(null), existing: false };
   });
 }
 
-/* Records a stored part's etag. Returns the session, or null when it is gone (completed,
- * abandoned or replaced meanwhile). */
-export function recordPart(storage, hash, size, upload, part, etag, now) {
+export function recordPart(storage, sha, size, upload, part, etag, now) {
   if (typeof etag !== 'string' || !etag) throw new Error('bad etag');
   return storage.transactionSync(() => {
-    const found = one(storage, 'SELECT * FROM upload WHERE hash = ? AND size = ? AND upload = ?', hash, size, upload);
+    const found = one(storage, 'SELECT * FROM upload WHERE sha = ? AND size = ? AND upload = ?', sha, size, upload);
     if (!found || !Number.isSafeInteger(part) || part < 1 || part > found.parts) return null;
     const etags = JSON.parse(found.etags);
     etags[part - 1] = etag;
-    storage.sql.exec('UPDATE upload SET etags = ?, updated = ? WHERE hash = ? AND size = ?', JSON.stringify(etags), now, hash, size);
+    storage.sql.exec('UPDATE upload SET etags = ?, updated = ? WHERE sha = ? AND size = ?', JSON.stringify(etags), now, sha, size);
     return uploadRow({ ...found, etags: JSON.stringify(etags) });
   });
 }
 
-/* Forgets an upload in parts whose object a build row now names (or the caller deletes).
- * Returns 1 when it was there. */
-export function closeUpload(storage, hash, size, upload) {
-  const found = one(storage, 'SELECT 1 AS hit FROM upload WHERE hash = ? AND size = ? AND upload = ?', hash, size, upload) ? 1 : 0;
-  storage.sql.exec('DELETE FROM upload WHERE hash = ? AND size = ? AND upload = ?', hash, size, upload);
+export function closeUpload(storage, sha, size, upload) {
+  const found = one(storage, 'SELECT 1 AS hit FROM upload WHERE sha = ? AND size = ? AND upload = ?', sha, size, upload) ? 1 : 0;
+  storage.sql.exec('DELETE FROM upload WHERE sha = ? AND size = ? AND upload = ?', sha, size, upload);
   return found;
 }
 
-/* Drops uploads in parts nobody touched for UPLOAD_IDLE_MS (every one when `all`, for the
- * reset). Returns [{ object, upload }]; the caller aborts each multipart upload and deletes
- * its object (an upload completed but never registered left one). */
 export function abandonUploads(storage, now, limit, all = false) {
   return storage.transactionSync(() => {
-    const doomed = rows(storage, 'SELECT hash, size, object, upload FROM upload WHERE updated <= ? ORDER BY updated LIMIT ?',
+    const doomed = rows(storage, 'SELECT sha, size, object, upload FROM upload WHERE updated <= ? ORDER BY updated LIMIT ?',
       all ? Number.MAX_SAFE_INTEGER : now - UPLOAD_IDLE_MS - 1, limit);
-    for (const { hash, size } of doomed) storage.sql.exec('DELETE FROM upload WHERE hash = ? AND size = ?', hash, size);
+    for (const { sha, size } of doomed) storage.sql.exec('DELETE FROM upload WHERE sha = ? AND size = ?', sha, size);
     return doomed.map(({ object, upload }) => ({ object, upload }));
   });
 }
 
 /* ---------------- accounting and reset ---------------- */
 
-/* What the store holds: builds by state, blobs, packs, bytes stored and bytes the builds
- * would take one archive each (the saving of content addressing). */
+/* What the store holds. `unclaimed` counts units in their deletion delay. */
 export function storeStats(storage) {
-  const b = one(storage, "SELECT count(*) AS builds, coalesce(sum(size), 0) AS archived, coalesce(sum(state = 'staged'), 0) AS staged, " +
-    'coalesce(sum(broken), 0) AS broken, coalesce(sum(claims > 0 OR vrefs > 0), 0) AS claimed FROM build');
-  const blobs = one(storage, 'SELECT count(*) AS blobs, coalesce(sum(size), 0) AS bytes FROM blob');
+  const u = one(storage, "SELECT count(*) AS units, coalesce(sum(state = 'held'), 0) AS held, coalesce(sum(state = 'pending'), 0) AS pending, " +
+    'coalesce(sum(claims > 0), 0) AS claimed, coalesce(sum(claims <= 0), 0) AS unclaimed, coalesce(sum(size), 0) AS unitBytes FROM unit');
+  const blobs = one(storage, 'SELECT count(*) AS blobs, coalesce(sum(size), 0) AS bytes, coalesce(sum(broken), 0) AS broken FROM blob');
   const packs = one(storage, 'SELECT count(*) AS packs, coalesce(sum(size), 0) AS bytes, coalesce(sum(live_bytes), 0) AS live FROM pack');
-  const staged = one(storage, "SELECT coalesce(sum(size), 0) AS bytes FROM build WHERE state = 'staged'");
-  return { builds: b.builds, claimed: b.claimed, staged: b.staged, broken: b.broken, archiveBytes: b.archived,
-    blobs: blobs.blobs, blobBytes: blobs.bytes, packs: packs.packs, packBytes: packs.bytes, stagedBytes: staged.bytes,
-    claims: one(storage, 'SELECT count(*) AS n FROM claim').n, dead: one(storage, 'SELECT count(*) AS n FROM dead').n,
-    authors: one(storage, 'SELECT count(*) AS n FROM author').n };
+  return { units: u.units, held: u.held, pending: u.pending, claimed: u.claimed, unclaimed: u.unclaimed, unitBytes: u.unitBytes,
+    blobs: blobs.blobs, blobBytes: blobs.bytes, brokenBlobs: blobs.broken, packs: packs.packs, packBytes: packs.bytes, liveBytes: packs.live,
+    claims: one(storage, 'SELECT count(*) AS n FROM map_claim').n, publishers: one(storage, 'SELECT count(*) AS n FROM publisher').n,
+    names: one(storage, 'SELECT count(*) AS n FROM publisher_name').n, blocked: one(storage, 'SELECT count(*) AS n FROM blocked').n,
+    asked: one(storage, 'SELECT count(*) AS n FROM asked').n, uploads: one(storage, 'SELECT count(*) AS n FROM upload').n,
+    dead: one(storage, 'SELECT count(*) AS n FROM dead').n };
 }
 
-/* Empties the whole index. Only the maintainer's reset route calls it, after deleting
- * every stored object. */
+/* Empties the whole index (the maintainer's reset, after deleting every stored object). */
 export function resetRegistry(storage) {
   return storage.transactionSync(() => {
     const counts = {};
-    for (const table of ['claim_build', 'claim', 'build_blob', 'blob', 'pack', 'build', 'upload', 'asked', 'dead',
-      'author']) {
+    for (const table of ['map_claim_unit', 'map_claim', 'unit_blob', 'unit', 'blob', 'pack', 'upload', 'asked', 'dead',
+      'publisher_name', 'publisher', 'blocked']) {
       counts[table] = one(storage, 'SELECT count(*) AS n FROM ' + table).n;
       storage.sql.exec('DELETE FROM ' + table);
     }
     return counts;
-  });
-}
-
-
-/* ---------------- authors ---------------- */
-
-/* A published map's claim is made by its author: the SnapMap author ID with an Ed25519 key the
- * product creates and the store binds on first use (mods_dist.js). The store is internal to map
- * publishing: mods reach it only as the units published maps claim. A build's vrefs column is
- * kept for a later feature (mod listings for installing, which would claim units as maps do);
- * nothing sets it today. */
-export function authorRow(storage, id) {
-  return one(storage, 'SELECT id, key, bound, updated FROM author WHERE id = ?', id);
-}
-
-/* Binds `key` to the author ID. The caller has checked the request is signed by `key` and, for
- * `rotate`, also by the key already bound. A wiped or new ID binds at once. Returns { bound:
- * 'new' | 'same' | 'rotated' } or { conflict: true } (another key holds the ID). */
-export function bindAuthor(storage, id, key, rotate, now) {
-  return storage.transactionSync(() => {
-    const row = authorRow(storage, id);
-    if (!row) {
-      storage.sql.exec('INSERT INTO author (id, key, bound, updated) VALUES (?, ?, ?, ?)', id, key, now, now);
-      return { bound: 'new' };
-    }
-    if (row.key === key) return { bound: 'same' };
-    if (!rotate) return { conflict: true };
-    storage.sql.exec('UPDATE author SET key = ?, updated = ? WHERE id = ?', key, now, id);
-    return { bound: 'rotated' };
   });
 }
