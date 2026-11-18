@@ -9,7 +9,7 @@ Serves the website's Community pages through GitHub Discussions on this reposito
 - `worker.js` defines the HTTP API, authentication, discussion operations and media handling.
 - `quota.js` and `quota_store.js` coordinate write limits across a user's sessions, and mod store limits per hashed client address.
 - `mods_store.js` defines the `/mods/*` routes, uploads in parts, the check of each build archive and the scheduled purge.
-- `mods_dist.js` defines the distribution routes: authors' signing keys and mods' listings.
+- `mods_dist.js` defines authors' signing keys and the check of a signed request.
 - `mods_pack.js` holds the content-addressed storage: skeletons, packs, serving plans and the packer.
 - `mods_registry.js` and `mods_registry_store.js` hold the mod store index (builds, blobs, packs, anonymous claims, uploads in parts) and the per-build checker.
 - `wrangler.toml` binds `SESSIONS` KV, `MEDIA` and `MODS` R2, the SQLite `WRITE_QUOTAS`, `MOD_REGISTRY` and `MOD_CHECKER` Durable Objects, the `MODS_BLOCKED` variable and the daily purge trigger; `wrangler.staging.toml` is the same Worker on its own resources.
@@ -61,9 +61,8 @@ read back a generated build of that size in parts through the runtime.
 | `POST /mods/build/:hash/parts`, `PUT /mods/build/:hash/parts/:n`, `POST /mods/build/:hash/complete` | Upload an archive larger than one request in parts. |
 | `POST /mods/claim`, `/mods/release` | Hold or drop an anonymous claim that keeps builds served. |
 | `POST /mods/build/:hash/asked`, `POST /mods/asked` | Report a file a published map's part of a mod lacked, or list those reports for a claim's holder. |
-| `POST /mods/author/:id/key`, `GET /mods/author/:id` | Bind or read a mod author's signing key. |
-| `GET /mods/mod/:id`, `POST /mods/mod/:id/publish`, `/mods/mod/:id/delete` | Read, publish (signed) or withdraw (signed) a mod's listing. |
-| `POST /mods/admin/reset`, `/mods/admin/stats`, `/mods/admin/remove-mod` | Empty the mod store, say what it holds, or remove a listing (maintainer only, hidden without its secret). |
+| `POST /mods/author/:id/key`, `GET /mods/author/:id` | Bind or read a map author's signing key, which signs claims. |
+| `POST /mods/admin/reset`, `/mods/admin/stats` | Empty the mod store, or say what it holds (maintainer only, hidden without its secret). |
 
 Community write routes require a session; `/mods/*` routes are anonymous. Read `worker.js` for payloads, limits and the
 additional ownership or moderator checks on editing and deletion.
@@ -98,10 +97,11 @@ platform and the archive form fix, stated here as theirs:
 - CPU time: a Worker request has 10 ms on the Workers Free plan (30 s by default on Paid,
   configurable to 5 minutes), a Durable Object request 30 s on either. So the Worker never
   touches an archive's bytes: an upload is piped to R2 by the runtime, the check runs in the
-  build's own `MOD_CHECKER` Durable Object, which walks the archive and has its files hashed by
-  further checker objects, 512 MiB each and four at a time (hashing is about 6 ms of CPU a
-  megabyte), the packer runs on the registry's alarm, and a download pipes ranges of R2 objects
-  to the response. One file of a mod up to about 4.5 GB is hashed in one request; memory grows with the number of entries and
+  build's own `MOD_CHECKER` Durable Object: an archive over 256 MiB is walked and hashed in parts
+  of about 512 MiB by further checker objects, four at a time, each a request of its own, and its
+  central directory is checked against them; the packer runs on the registry's alarm, and a download
+  pipes ranges of R2 objects to the response. Reading and hashing cost about 3 to 4 ms of CPU a
+  megabyte, so one file of a mod up to about 7 GB fits a request on Free; memory grows with the number of entries and
   the size of `mod.json` (about 5 MB for 20,000 files), never with the archive's size.
 
 ### Storage: every file once
@@ -309,44 +309,36 @@ Before the first deployment of this configuration, create the bucket with
 provisions `ModRegistry` and `v3-mod-checker` provisions `ModChecker`; the index makes its
 tables itself when the object starts. Deploy the bindings and code together.
 
-### Units, listings and authors
+### Units, published maps and their authors
 
-The distribution design (2026-11-17) is built on this storage. A published map names, for each
-mod it uses, the units it places: a unit is the content-addressed closure of one placed object
-(its files and pointers), uploaded, checked, packed and served exactly as a build, at
-`/mods/unit/:hash` (the same routes as `/mods/build/:hash`). Any publisher may upload a unit the
-store lacks; the check proves every file is the bytes its `mod.json` names. A map's claim
-(`POST /mods/claim`, one per map, `builds` naming its units) keeps them until the map's own author
-republishes (the claim's units replaced) or unpublishes it (`POST /mods/release`). A mod's listing
-is what installing the mod gives: its current version only, its units by placed object, published
-by the mod's author; it claims its units as a map does. A unit no map and no listing claims is
-deleted at once. Keys govern listings only.
+The store is internal to map publishing (the owner's distribution design, 2026-11-17): content
+arrives when a map is published and leaves when no published map claims it; authors never touch
+the store directly. A published map names, for each mod it uses, the units it places: a unit is
+the content-addressed closure of one placed object (its files and pointers), uploaded, checked,
+packed and served exactly as a build, at `/mods/unit/:hash` (the same routes as
+`/mods/build/:hash`). Any publisher may upload a unit the store lacks; the check proves every file
+is the bytes its `mod.json` names. Units that hold the same files share them, so a unit used by
+many maps, or by many units, is stored once. A map's claim (`POST /mods/claim`, one per map,
+`builds` naming its units) keeps them until the map's own author republishes it (the claim's units
+replaced) or unpublishes it (`POST /mods/release`); a unit no map claims is deleted at once.
+
+A claim is signed by the map's author: the SnapMap author ID with an Ed25519 key the product
+creates.
 
 - `POST /mods/author/:id/key` `{"author","key","time"}` binds an Ed25519 public key (32 bytes,
-  base64url) to the SnapMap author ID. The body is signed by that key, its signature in
-  `X-Mod-Signature` (base64url). A new or unknown ID binds at once (201); the same key again is
-  200; another key for a bound ID also needs `X-Mod-Previous-Signature`, the bound key's signature
-  of the same body, else 409. `GET /mods/author/:id` returns `{"author","key","bound"}`.
-- `POST /mods/mod/:id/publish` `{"author","mod","seq","name","time","objects":{"<object>":"<unit
-  hash>"},"check"?}`, signed by the author's bound key: the listing's next version (`seq` one after
-  the current one, so a replayed request changes nothing; `time` within 15 minutes). Every unit must
-  be stored (409 `{"missing"}` otherwise). With `"check": true` nothing changes and the answer is
-  `{"seq","size","newBytes"}`, the size to show before the publish. 201 for a new mod, 200 for an
-  update, `{"seq","size","newBytes"}`; 403 for another author's mod or a bad signature, 409
-  `{"seq"}` for a stale version, 410 for a removed mod, 429 past the author's hourly limits (256
-  publishes, 256 GiB of units new to the store, soft). The units only the old version named lose
-  the listing's claim; published maps never change with a listing.
-- `GET /mods/mod/:id` returns the listing `{"mod","author","name","seq","size","objects"}`; 410
-  for a withdrawn or removed one.
-- `POST /mods/mod/:id/delete` `{"author","mod","time"}`, signed: withdraws the listing. Published
-  maps keep every unit they claim; the author may publish the ID again.
-- `POST /mods/admin/remove-mod` `{"mod"}` (maintainer token): moderation removes a listing. Maps
-  that claim its units keep them; a unit itself is taken down with `MODS_BLOCKED`.
+  base64url) to the author ID. The body is signed by that key, its signature in `X-Mod-Signature`
+  (base64url). A new or unknown ID binds at once (201); the same key again is 200; another key for a
+  bound ID also needs `X-Mod-Previous-Signature`, the bound key's signature of the same body, else
+  409. `GET /mods/author/:id` returns `{"author","key","bound"}`.
+- `POST /mods/claim` and `POST /mods/release` signed: the same bodies with `"author"` and `"time"`
+  (milliseconds, within 15 minutes) added and `X-Mod-Signature` over the body; no secret is needed.
+  A map's signed claim can be replaced or released only by a request its author signed (403
+  otherwise), and no secret-only request can change it. A claim made with its secret alone (today's
+  client) works as before.
 
-The registry keeps `author` (ID, key), `listing` (mod ID, author, name, version, size) and
-`listing_unit` (mod, object, unit); a build's `vrefs` counts the listings naming it as a unit.
-These shapes are the store's first form of the design; the product's client of them is not
-written yet.
+Mod listings (installing a mod from the store, the current version only) are a later feature: a
+build's `vrefs` column is kept for them, so a listing can later claim units the way a map does
+without a change to how units are stored.
 ### Emptying the mod store, and what it holds
 
 `POST /mods/admin/reset` aborts every upload in parts, deletes every object in the `MODS`

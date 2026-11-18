@@ -7,6 +7,13 @@ name = "snapmap-plus-community-staging"
 main = "worker.js"
 compatibility_date = "2026-07-01"
 workers_dev = true
+# Workers plan. The store runs on Workers Free and on Workers Paid from the same code: the Worker
+# only moves bytes, and the work that reads every byte runs in Durable Objects, which have 30 s of
+# CPU a request on either plan. After subscribing to Workers Paid, uncomment these two lines and
+# deploy: they give each request (Worker or Durable Object) up to 5 minutes of CPU. Nothing else
+# changes. docs/services.md, "Switching to Workers Paid", says how to check it.
+# [limits]
+# cpu_ms = 300000
 
 [[kv_namespaces]]
 binding = "SESSIONS"

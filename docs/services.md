@@ -4,9 +4,8 @@ The services behind the website and its API, who holds their credentials, and
 what a fork must provision. None of them is billed today; hosting charges depend
 on the account plan and usage. The mod store is the first service whose cost grows
 with community use; at Cloudflare's listed R2 prices it is expected to cost dollars
-per month at plausible scale. The account is on the Workers Free plan; the mod store runs on it
-(its heavy work is in Durable Objects, which have 30 s of CPU a request there), within the Free
-plan's daily request and Durable Object allowances, and Workers Paid (5 USD a month) lifts them.
+per month at plausible scale. The account is on the Workers Free plan, and the API runs on Free and
+on Workers Paid from the same code (below).
 
 | Service | Purpose | Credentials or bindings | Without it |
 |---|---|---|---|
@@ -49,3 +48,44 @@ A fork must provision its own zone, KV namespace, R2 bucket and GitHub App, set
 the App callback URL to its Worker's `/auth/callback`, and replace the
 account-specific IDs and origin constants in `api/worker.js` and
 `site/assets/community.js`.
+
+## Workers plan
+
+The account is on Workers Free (owner, 2026-11-17). The API, the mod store included, runs on Free
+and on Workers Paid from the same code, and nothing in it depends on Free's limits being there.
+The Worker only moves bytes; the work that reads every byte of a mod upload runs in Durable
+Objects, which have 30 s of CPU a request on either plan, and a large upload is checked in parts of
+about 512 MiB, each a request of its own.
+
+### What Free limits, and what a player sees when a daily allowance runs out
+
+| Free allowance (per day) | What reaches it | What the store answers | What the product does today |
+|---|---|---|---|
+| 100,000 Worker requests, for the whole account (staging and workers.dev included), reset at 00:00 UTC | every API call, the Community pages too; a mod publish is about 20, a download 2 | Cloudflare answers before the Worker with its error 1027 page (the HTTP status is not documented) and the whole API is down until 00:00 UTC | for a 429 or 5xx a publish says "The map was not published" with the reason, keeps the map and leaves the upload in the retry queue (retried at the next launch and after the next store call that works); another status is an unexpected answer and the publish is refused the same way; a download asks again later. The site's Community pages stop too. |
+| 100,000 Durable Object requests, 5 million rows read, 100,000 rows written, 5 GB stored | every mod-store call is one or two; packing a 1,250-file upload writes about 4,000 rows | 503, "The mod store is unavailable right now; try again later.", with `Retry-After` until the next UTC day | the same as a 429: nothing is lost, the upload stays queued, the map stays on the author's machine |
+| 10 ms of CPU a Worker request | the Worker's own work (3 to 6 ms an upload request, up to about 70 ms piping a 4 GB download, which Free has let through) | | |
+
+The store never leaves half a state behind at a cap: an upload in parts keeps its parts for a day
+and resumes, a claim is one transaction, a staged upload is packed later. The product should, and
+does not yet, honour `Retry-After`, finish a refused publish by itself once the store answers again,
+and say "the mod store is busy" rather than "could not be reached" for a 429 or 503 (the product's
+own work, not this repository's).
+
+### Switching to Workers Paid
+
+One step, after subscribing to Workers Paid (5 USD a month) in the Cloudflare dashboard:
+
+1. In `api/wrangler.toml` (and `api/wrangler.staging.toml` for staging), uncomment the two lines
+   `[limits]` and `cpu_ms = 300000`, and deploy from `api/` with `npx wrangler deploy`.
+
+What changes: every request (Worker or Durable Object) may use up to 5 minutes of CPU, and the
+daily allowances become monthly included amounts with usage billing (10 million Worker requests,
+1 million Durable Object requests, 50 million rows written, 25 billion rows read and 5 GB stored a
+month included). Nothing in the code changes. On Free the same deploy is refused by Cloudflare
+("CPU limits are not supported for the Free plan", code 100328) and the running version keeps
+serving, so the line cannot be switched on by mistake.
+
+How to verify: `npx wrangler deploy` succeeds and lists the limit; `npx wrangler deployments list`
+shows the new version at 100%; `curl https://api.snapmapplus.com/` answers
+"snapmap-plus community service: OK"; a mod publish from the product goes through. Rolling back
+is commenting the two lines again and deploying (before leaving Paid).

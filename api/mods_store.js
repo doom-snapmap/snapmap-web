@@ -21,7 +21,7 @@
 
 import { RequestError, readJsonObject } from './request_body.js';
 import { encodeSkeleton, readSkeleton, readSkeletonBytes, skeletonRaw, planStream } from './mods_pack.js';
-import { routeDist } from './mods_dist.js';
+import { routeDist, readSigned, authorSigned } from './mods_dist.js';
 
 /* The largest archive one PUT takes, and one part of a larger one. The platform refuses a
  * request body over 100 MB (100,000,000 bytes) on the Free and Pro plans (200 MB Business,
@@ -39,9 +39,9 @@ const SWEEP_PAGES = 200;                  // 200,000 objects listed per daily ru
 const ORPHAN_AGE_MS = 86400000;          // an object no row names is deleted once it is a day old
 const ASKER_SHOWN = 256;
 const READ_CHUNK = 1024 * 1024;               // the check reads an archive back this much at a time
-const HASH_JOB = 512 * 1024 * 1024;            // the bytes one checker hashes (a larger file alone)
-const HASH_WORKERS = 4;                        // checkers hashing one archive at once
-const EMPTY_SHA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';                 // what asked for a missing file, as its author is shown it
+const PARTS_FROM = 256 * 1024 * 1024;          // an archive larger than this is checked in parts
+const PART_BYTES = 512 * 1024 * 1024;          // the bytes one checker walks and hashes (a larger file alone)
+const PART_WORKERS = 4;                        // checkers at work on one archive at once                 // what asked for a missing file, as its author is shown it
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
@@ -237,9 +237,22 @@ async function registry(env, method, ...args) {
   try {
     const stub = env.MOD_REGISTRY.get(env.MOD_REGISTRY.idFromName('registry'));
     return await stub[method](...args);
-  } catch {
-    throw new RequestError(UNAVAILABLE, 503);
+  } catch (error) {
+    const refusal = new RequestError(UNAVAILABLE, 503);
+    refusal.retryAfter = retryAfterFor(error);
+    console.log('mods: the registry failed (' + method + '):', String(error && error.message).slice(0, 200));
+    throw refusal;
   }
+}
+
+/* How long a client should wait after a failure of the platform: until the next UTC day when it
+ * is a daily allowance of the Workers Free plan running out (the account's plan, docs/services.md),
+ * else a minute. */
+const RETRY_SOON = 60;
+function retryAfterFor(error) {
+  const text = String(error && error.message || '');
+  if (/limit|exceeded|quota|allowance/i.test(text)) return Math.max(RETRY_SOON, Math.ceil((86400000 - (Date.now() % 86400000)) / 1000));
+  return RETRY_SOON;
 }
 
 /* ---------------- request paths ---------------- */
@@ -416,12 +429,16 @@ class ScriptCheck {
  * its marker, so there is no bound on an entry's size, the archive's size or the number of
  * entries. error is the first refusal; once set, later bytes are ignored. */
 export class ArchiveWalker {
-  /* options.hash false: entries are not hashed as they pass (the check hashes them elsewhere,
-   * hashParts); mod.json and source.json are captured either way. */
+  /* options: hash false, entries are not hashed as they pass; base, the archive offset the
+   * stream starts at; segmentEnd, a part of the archive (whole entries, ending there, before its
+   * central directory: walkSegment); tail, the central directory and end records only, against
+   * the entries already walked (options.entries). length is the offset the stream ends at. */
   constructor(length, options = {}) {
     this.hashEntries = options.hash !== false;
     this.length = length;
-    this.at = 0;                     // bytes consumed
+    this.at = options.base || 0;     // the archive offset reached
+    this.segmentEnd = options.segmentEnd ?? null;
+    this.tailOnly = !!options.tail;
     this.state = 'sig';              // sig, local, localVar, data, central, centralVar, end, endComment, trail
     this.buf = new Uint8Array(64);
     this.need = 4;
@@ -430,8 +447,8 @@ export class ArchiveWalker {
     this.current = null;
     this.pending = null;             // a central record's fixed fields, until its name is read
     this.remaining = 0;
-    this.entries = [];
-    this.names = new Set();
+    this.entries = options.entries || [];
+    this.names = new Set(this.entries.map(e => e.name));
     this.modjson = null;
     this.source = null;              // source.json: the canonical manifest of the build a part was cut from
     this.scripts = 0;
@@ -544,7 +561,8 @@ export class ArchiveWalker {
         this.expect(56);
         return;
       }
-      if (sig === SIG_LOCAL && this.cdStart < 0) { this.state = 'local'; this.expect(30); return; }
+      if (this.segmentEnd !== null && sig !== SIG_LOCAL) return this.fail('The archive has unexpected bytes after an entry.');
+      if (sig === SIG_LOCAL && this.cdStart < 0 && !this.tailOnly) { this.state = 'local'; this.expect(30); return; }
       if (sig === SIG_CENTRAL) {
         if (this.cdStart < 0) this.cdStart = this.recordStart;
         if (this.central >= this.entries.length) return this.fail('The archive\'s central directory lists an entry the archive does not hold.');
@@ -707,6 +725,10 @@ export class ArchiveWalker {
   finish() {
     if (this.error) return;
     if (this.at !== this.length) return this.fail('The archive is shorter than its Content-Length.');
+    if (this.segmentEnd !== null) {
+      if (this.state !== 'sig' || this.have) this.fail('The archive ends inside an entry.');
+      return;
+    }
     if (this.done) {
       if (this.tailBytes !== this.length - this.cdStart) this.fail('The archive\'s central directory could not be read whole.');
       return;
@@ -1014,27 +1036,28 @@ async function register(env, hash, size, verdict, object, walker) {
  * mods_registry.js), which has the CPU time a large archive needs whatever the account's plan;
  * the Worker only moves bytes. */
 export async function checkArchive(env, hash, object, size) {
-  const obj = await env.MODS.get(object);
+  const obj = await env.MODS.head(object);
   if (!obj || obj.size !== size) {
     await deleteObjects(env, [object]);
     return { status: 400, body: { error: 'The upload ended before the whole archive arrived; try again.' } };
   }
-  /* The walk judges the form and keeps mod.json; the bytes of the files are hashed by a few
-   * checkers at once, each a part of the archive (hashParts), so no one request spends more CPU
-   * than the platform gives it, whatever the archive's size. */
-  const walker = await walkStream(obj.body, size, { hash: false });
+  /* A large archive is walked and hashed in parts by several checkers at once (walkInParts), so
+   * no one request spends more CPU than the platform gives it, whatever the archive's size; one
+   * that does not add up is walked again in one piece, which names the first fault. */
+  let walker = null;
+  /* MODS_PARTS_FROM and MODS_PART_BYTES move the thresholds (the unit tests check small archives in parts). */
+  if (size > (Number(env.MODS_PARTS_FROM) || PARTS_FROM)) {
+    try { walker = await walkInParts(env, hash, object, size); }
+    catch (error) { console.log('mods: the check in parts failed:', String(error && error.message).slice(0, 200)); walker = null; }
+  }
+  if (!walker) {
+    const whole = await env.MODS.get(object);
+    walker = whole ? await walkStream(whole.body, size) : null;
+  }
   if (!walker) {
     await deleteObjects(env, [object]);
     console.log('mods: an archive could not be read back');
     return { status: 503, body: { error: UNAVAILABLE } };
-  }
-  if (!walker.error) {
-    try { await hashEntries(env, hash, object, walker.entries); }
-    catch (error) {
-      await deleteObjects(env, [object]);
-      console.log('mods: hashing an archive failed:', String(error && error.message).slice(0, 200));
-      return { status: 503, body: { error: UNAVAILABLE } };
-    }
   }
   const verdict = await verdictOf(walker, hash);
   if (verdict.refusal) {
@@ -1045,82 +1068,108 @@ export async function checkArchive(env, hash, object, size) {
   return register(env, hash, size, verdict, object, walker);
 }
 
-/* Every entry's SHA-256: mod.json and source.json from the bytes the walk kept, the rest in jobs
- * of up to HASH_JOB bytes of the archive (a larger file alone), HASH_WORKERS at a time, each in a
- * checker Durable Object of its own when the binding is there. */
-async function hashEntries(env, hash, object, entries) {
-  const jobs = [];
-  let job = null;
-  for (const e of entries) {
-    if (e.data) { e.sha = await sha256Hex(e.data); continue; }
-    const at = e.offset + e.header.byteLength;
-    if (!job || (job.bytes > 0 && job.bytes + e.size > HASH_JOB)) { job = { start: at, end: at, bytes: 0, entries: [] }; jobs.push(job); }
-    job.entries.push(e);
-    job.bytes += e.size;
-    job.end = at + e.size;
+/* ---------------- the check of a large archive, in parts ---------------- */
+
+/* Where an archive's central directory starts and what it says: { cdOffset, offsets: [the local
+ * header offset of each entry, in central order] }, or null when the tail is not what the product
+ * writes (the sequential check then says why). Reads only the archive's last bytes and its
+ * central directory. */
+async function centralOf(env, object, size) {
+  const window = Math.min(size, 22 + 65535 + 20 + 56);
+  const lastObj = await env.MODS.get(object, { range: { offset: size - window, length: window } });
+  if (!lastObj) return null;
+  const last = new Uint8Array(await lastObj.arrayBuffer());
+  let endAt = -1;
+  for (let i = last.byteLength - 22; i >= 0; i--) {
+    if (u32(last, i) === SIG_END && i + 22 + u16(last, i + 20) === last.byteLength) { endAt = i; break; }
   }
+  if (endAt < 0) return null;
+  let cdOffset = u32(last, endAt + 16), total = u16(last, endAt + 10);
+  if (cdOffset === M32 || total === M16 || u32(last, endAt + 12) === M32) {
+    if (endAt < 20 || u32(last, endAt - 20) !== SIG_ZIP64_LOCATOR) return null;
+    const at64 = u64(last, endAt - 20 + 8);
+    if (at64 === null || at64 + 56 > size) return null;
+    const recObj = await env.MODS.get(object, { range: { offset: at64, length: 56 } });
+    const rec = recObj && new Uint8Array(await recObj.arrayBuffer());
+    if (!rec || u32(rec, 0) !== SIG_ZIP64_END) return null;
+    cdOffset = u64(rec, 48);
+    total = u64(rec, 32);
+    if (cdOffset === null || total === null) return null;
+  }
+  if (cdOffset < 0 || cdOffset >= size) return null;
+  const cdObj = await env.MODS.get(object, { range: { offset: cdOffset, length: size - cdOffset } });
+  if (!cdObj) return null;
+  const tail = new Uint8Array(await cdObj.arrayBuffer());
+  const offsets = [];
+  let at = 0;
+  while (at + 46 <= tail.byteLength && u32(tail, at) === SIG_CENTRAL && offsets.length < total) {
+    const csize = u32(tail, at + 20), usize = u32(tail, at + 24), nameLength = u16(tail, at + 28), extraLength = u16(tail, at + 30);
+    let offset = u32(tail, at + 42);
+    const mo = offset === M32;
+    if (mo) {
+      const extra = zip64Values(tail.subarray(at + 46 + nameLength, at + 46 + nameLength + extraLength), (usize === M32 ? 1 : 0) + (csize === M32 ? 1 : 0) + 1);
+      if (extra.error) return null;
+      offset = extra.values[extra.values.length - 1];
+    }
+    offsets.push(offset);
+    at += 46 + nameLength + extraLength + u16(tail, at + 32);
+  }
+  if (offsets.length !== total || !offsets.length) return null;
+  for (let i = 0; i < offsets.length; i++) if (offsets[i] !== (i ? offsets[i] : 0) || (i && offsets[i] <= offsets[i - 1])) return null;
+  return { cdOffset, offsets, tail };
+}
+
+/* The entries of [start, end) of an archive: local headers and bytes walked as the sequential
+ * check walks them, every entry hashed. Returns { entries } or { error }. Runs in a checker
+ * Durable Object of its own. */
+export async function walkSegment(env, object, start, end) {
+  const obj = await env.MODS.get(object, { range: { offset: start, length: end - start } });
+  if (!obj) return { error: 'gone' };
+  const walker = await walkStream(obj.body, end, { base: start, segmentEnd: end });
+  if (!walker) return { error: 'unreadable' };
+  if (walker.error) return { error: walker.error };
+  await walker.digests();
+  return { entries: walker.entries.map(e => ({ name: e.name, flags: e.flags, crc: e.crc, size: e.size, offset: e.offset,
+    nameLength: e.nameLength, extraLength: e.extraLength, header: e.header, sha: e.sha, scriptFault: e.scriptFault ?? null,
+    data: e.data || null })) };
+}
+
+/* The check of a large archive by parts: its entries walked and hashed by up to PART_WORKERS
+ * checkers at once, about PART_BYTES each, then the central directory and end records walked
+ * against them here. Returns a walker (as walkStream's, entries hashed) or null when anything does
+ * not add up, and the sequential check then runs and says why. */
+async function walkInParts(env, hash, object, size) {
+  const central = await centralOf(env, object, size);
+  if (!central) return null;
+  const { cdOffset, offsets, tail } = central;
+  const jobs = [];
+  let begin = 0;
+  for (let i = 1; i <= offsets.length; i++) {
+    const at = i < offsets.length ? offsets[i] : cdOffset;
+    if (i === offsets.length || at - begin >= (Number(env.MODS_PART_BYTES) || PART_BYTES)) { jobs.push([begin, at]); begin = at; }
+  }
+  const results = new Array(jobs.length);
   let next = 0;
   const run = async () => {
     for (let k; (k = next++) < jobs.length;) {
-      const j = jobs[k];
-      const parts = j.entries.map(e => [e.offset + e.header.byteLength - j.start, e.size]);
-      const shas = env.MOD_CHECKER
-        ? await env.MOD_CHECKER.get(env.MOD_CHECKER.idFromName('hash:' + hash + ':' + k)).hashParts(object, j.start, j.end - j.start, parts)
-        : await hashParts(env, object, j.start, j.end - j.start, parts);
-      j.entries.forEach((e, i) => { e.sha = shas[i]; });
+      const [a, b] = jobs[k];
+      results[k] = env.MOD_CHECKER
+        ? await env.MOD_CHECKER.get(env.MOD_CHECKER.idFromName('walk:' + hash + ':' + k)).walkSegment(object, a, b)
+        : await walkSegment(env, object, a, b);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(HASH_WORKERS, jobs.length) }, run));
-}
-
-/* The SHA-256 of each part ([offset, length], sorted, within [start, start + length)) of an
- * object, read once, a megabyte at a time. */
-export async function hashParts(env, object, start, length, parts) {
-  const out = [];
-  let k = 0, pos = 0, h = null;
-  const begin = () => {
-    while (k < parts.length && parts[k][1] === 0) { out.push(EMPTY_SHA); k++; }
-    h = k < parts.length ? new StreamHash() : null;
-  };
-  begin();
-  if (!h) return out;
-  const obj = await env.MODS.get(object, { range: { offset: start, length } });
-  if (!obj) throw new Error('the archive is gone');
-  const feed = async chunk => {
-    let i = 0;
-    while (i < chunk.byteLength && k < parts.length) {
-      const [off, len] = parts[k];
-      if (pos + i < off) { i = Math.min(chunk.byteLength, off - pos); continue; }
-      const take = Math.min(chunk.byteLength - i, off + len - (pos + i));
-      await h.write(chunk.subarray(i, i + take));
-      i += take;
-      if (pos + i === off + len) { out.push(await h.end()); k++; begin(); }
-    }
-    pos += chunk.byteLength;
-  };
-  let reader, byob = true;
-  try { reader = obj.body.getReader({ mode: 'byob' }); } catch { byob = false; reader = obj.body.getReader(); }
-  try {
-    for (;;) {
-      if (!byob) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        await feed(value);
-        continue;
-      }
-      let buf = new Uint8Array(READ_CHUNK), filled = 0, done = false;
-      while (filled < buf.byteLength) {
-        const r = await reader.read(new Uint8Array(buf.buffer, filled, buf.byteLength - filled));
-        if (r.done) { done = true; if (r.value) buf = new Uint8Array(r.value.buffer); break; }
-        buf = new Uint8Array(r.value.buffer);
-        filled += r.value.byteLength;
-      }
-      if (filled) await feed(buf.subarray(0, filled));
-      if (done) break;
-    }
-  } finally { reader.releaseLock(); }
-  if (out.length !== parts.length) throw new Error('the archive ended before its last file');
-  return out;
+  await Promise.all(Array.from({ length: Math.min(PART_WORKERS, jobs.length) }, run));
+  if (results.some(r => !r || r.error)) return null;
+  const entries = results.flatMap(r => r.entries);
+  const names = new Set(entries.map(e => e.name));
+  if (names.size !== entries.length || entries.length !== offsets.length) return null;
+  const walker = new ArchiveWalker(size, { base: cdOffset, tail: true, entries });
+  walker.push(tail);
+  walker.finish();
+  if (walker.error) return null;
+  walker.modjson = entries.find(e => e.name === 'mod.json')?.data || null;
+  walker.source = entries.find(e => e.name === SOURCE_JSON)?.data || null;
+  return walker;
 }
 
 /* The requests of the build a part was cut from that the part does not carry. */
@@ -1396,9 +1445,20 @@ function hashArray(value) {
   return [...new Set(value)];
 }
 
+/* The body of a claim or release: signed by the map's author (X-Mod-Signature; the body names
+ * "author" and "time"), or made with the claim's secret alone (today's client). Returns
+ * { body, author } or { refusal }. */
+async function claimBody(req, env) {
+  if (!req.headers.get('X-Mod-Signature')) return { body: await readRequestJson(req), author: null };
+  const { bytes, body } = await readSigned(req);
+  const refusal = await authorSigned(req, env, bytes, body);
+  return refusal ? { refusal } : { body, author: body.author };
+}
+
 async function postClaim(req, env) {
   if (!(await admit(req, env, [['mod_claim', 1]], false))) { await discard(req); return rateLimited(); }
-  const body = await readRequestJson(req);
+  const { body, author, refusal } = await claimBody(req, env);
+  if (refusal) return refusal;
   if (!displayText(body.ref) || !body.ref.length) return refuse('The claim names no published item.', 400);
   const builds = hashArray(body.builds);
   if (!builds.length) return refuse('The claim names no builds.', 400);
@@ -1408,9 +1468,11 @@ async function postClaim(req, env) {
   const secret = body.secret === undefined ? randomHex(32) : body.secret;
   const result = await registry(env, 'claim', {
     ref: body.ref, builds, id: randomHex(16), secretHash: await sha256Hex(secret),
-    presentedHash: body.secret === undefined ? null : await sha256Hex(body.secret),
+    presentedHash: body.secret === undefined ? null : await sha256Hex(body.secret), author,
   });
-  if (result.forbidden) return refuse('No claim on the mod store matches this item and secret.', 403);
+  if (result.forbidden) {
+    return refuse(author ? 'Another author published this map; only its author can change what it claims.' : 'No claim on the mod store matches this item and secret.', 403);
+  }
   if (result.missing) return refuse('The mod store does not hold every build the claim names; upload them again.', 409, { missing: result.missing });
   await deleteQueued(env, result.deleted);
   return reply({ claim: result.claim, secret }, result.created ? 201 : 200);
@@ -1418,12 +1480,13 @@ async function postClaim(req, env) {
 
 async function postRelease(req, env) {
   if (!(await admit(req, env, [['mod_claim', 1]], false))) { await discard(req); return rateLimited(); }
-  const body = await readRequestJson(req);
+  const { body, author, refusal } = await claimBody(req, env);
+  if (refusal) return refusal;
   if (typeof body.claim !== 'string' || !HEX32.test(body.claim)) return refuse('The release names no claim.', 400);
-  if (typeof body.secret !== 'string' || !HEX64.test(body.secret)) return refuse(BAD_SECRET, 400);
-  const result = await registry(env, 'release', body.claim, await sha256Hex(body.secret));
+  if (!author && !(typeof body.secret === 'string' && HEX64.test(body.secret))) return refuse(BAD_SECRET, 400);
+  const result = await registry(env, 'release', body.claim, author ? null : await sha256Hex(body.secret), author);
   if (result.notFound) return refuse('The mod store has no such claim.', 404);
-  if (result.forbidden) return refuse('The secret does not match this claim.', 403);
+  if (result.forbidden) return refuse(author ? 'Another author published this map; only its author can unpublish it.' : 'The secret does not match this claim.', 403);
   await deleteQueued(env, result.deleted);
   return new Response(null, { status: 204 });
 }
@@ -1546,9 +1609,11 @@ function notAllowed(req, allow) {
 export async function handleMods(req, env, path) {
   try { return await routeMods(req, env, path); }
   catch (error) {
-    if (error instanceof RequestError) return refuse(error.message, error.status);
+    if (error instanceof RequestError) {
+      return refuse(error.message, error.status, {}, error.status === 503 ? { 'Retry-After': String(error.retryAfter || RETRY_SOON) } : undefined);
+    }
     console.log('mods: unexpected failure:', String(error && error.message).slice(0, 200));
-    return refuse(UNAVAILABLE, 503);
+    return refuse(UNAVAILABLE, 503, {}, { 'Retry-After': String(retryAfterFor(error)) });
   }
 }
 
@@ -1572,10 +1637,7 @@ async function routeMods(req, env, path) {
   const action = { '/mods/claim': postClaim, '/mods/release': postRelease, '/mods/asked': postAskedList,
     '/mods/admin/reset': postReset, '/mods/admin/stats': postStats }[path];
   if (action) return req.method === 'POST' ? action(req, env) : notAllowed(req, 'POST');
-  const dist = await routeDist(req, env, path, {
-    maintainer: r => maintainerDenied(r, env),
-    deleteQueued,
-  });
+  const dist = await routeDist(req, env, path);
   if (dist) return dist;
   await discard(req);
   return refuse(NOT_FOUND, 404);

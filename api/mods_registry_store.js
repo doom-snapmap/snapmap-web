@@ -41,7 +41,7 @@ const SCHEMA = [
     'salt TEXT NOT NULL, created INTEGER NOT NULL, claims INTEGER NOT NULL DEFAULT 0, scripts INTEGER NOT NULL DEFAULT 0, ' +
     'slice_of TEXT, state TEXT NOT NULL, archive TEXT, skeleton TEXT NOT NULL, modjson TEXT NOT NULL, ' +
     'entries INTEGER NOT NULL, broken INTEGER NOT NULL DEFAULT 0, packed INTEGER, plan TEXT, replan INTEGER NOT NULL DEFAULT 0, ' +
-    'vrefs INTEGER NOT NULL DEFAULT 0)',   // vrefs: the mod listings naming the build as a unit
+    'vrefs INTEGER NOT NULL DEFAULT 0)',   // vrefs: reserved for mod listings (a later feature); 0 today
   'CREATE INDEX IF NOT EXISTS build_unclaimed ON build (claims, created)',
   'CREATE INDEX IF NOT EXISTS build_state ON build (state, created)',
   /* A blob: one file's bytes, once, after the ZIP local header (hdr, hlen bytes) it had in the
@@ -56,7 +56,8 @@ const SCHEMA = [
     'live INTEGER NOT NULL, live_bytes INTEGER NOT NULL, created INTEGER NOT NULL)',
   'CREATE TABLE IF NOT EXISTS build_blob (build INTEGER NOT NULL, blob INTEGER NOT NULL, PRIMARY KEY (build, blob)) WITHOUT ROWID',
   'CREATE INDEX IF NOT EXISTS build_blob_by_blob ON build_blob (blob)',
-  'CREATE TABLE IF NOT EXISTS claim (id TEXT PRIMARY KEY, ref TEXT NOT NULL, secret TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL)',
+  /* author: the SnapMap author whose key signed the claim; null for a claim made with its secret alone. */
+  'CREATE TABLE IF NOT EXISTS claim (id TEXT PRIMARY KEY, ref TEXT NOT NULL, secret TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, author TEXT)',
   'CREATE UNIQUE INDEX IF NOT EXISTS claim_by_secret ON claim (ref, secret)',
   /* By hash: a claim names a build (or unit) by its hash, whichever upload of it is stored. */
   'CREATE TABLE IF NOT EXISTS claim_build (claim TEXT NOT NULL, build TEXT NOT NULL, PRIMARY KEY (claim, build)) WITHOUT ROWID',
@@ -73,12 +74,7 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS dead (object TEXT PRIMARY KEY, queued INTEGER NOT NULL)',
   /* Distribution (mods_dist.js): an author's signing key, bound to the SnapMap author ID. */
   'CREATE TABLE IF NOT EXISTS author (id TEXT PRIMARY KEY, key TEXT NOT NULL, bound INTEGER NOT NULL, updated INTEGER NOT NULL)',
-  /* A mod's listing: a permanent ID owned by one author, its current version only (seq), what
-   * installing the mod gives; it claims its units (build.vrefs) as a published map does. removed:
-   * 1 by moderation, 2 by its author. */
-  'CREATE TABLE IF NOT EXISTS listing (id TEXT PRIMARY KEY, author TEXT NOT NULL, name TEXT NOT NULL, seq INTEGER NOT NULL, ' +
-    'size INTEGER NOT NULL, removed INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, updated INTEGER NOT NULL)',
-  'CREATE TABLE IF NOT EXISTS listing_unit (mod TEXT NOT NULL, object TEXT NOT NULL, unit TEXT NOT NULL, PRIMARY KEY (mod, object)) WITHOUT ROWID',];
+];
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
@@ -109,7 +105,7 @@ export function initializeRegistry(storage) {
   for (const statement of SCHEMA) storage.sql.exec(statement);
   /* Columns added after a table was first made (an index from an earlier form of this store). */
   for (const [table, column, type] of [['build', 'plan', 'TEXT'], ['build', 'replan', 'INTEGER NOT NULL DEFAULT 0'],
-    ['build', 'vrefs', 'INTEGER NOT NULL DEFAULT 0']]) {
+    ['build', 'vrefs', 'INTEGER NOT NULL DEFAULT 0'], ['claim', 'author', 'TEXT']]) {
     const have = new Set(rows(storage, 'PRAGMA table_info(' + table + ')').map(r => r.name));
     if (!have.has(column)) storage.sql.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + type);
   }
@@ -405,16 +401,22 @@ function dropUnclaimed(storage, hashes, now) {
   return queued;
 }
 
-/* Creates a claim, or replaces the build set of the claim matching ref and the presented
- * secret (one claim per published item). Secrets are stored and compared only as SHA-256
- * digests. A build that is not stored, or is broken, is missing: the client uploads it again. */
-export function claimBuilds(storage, { ref, builds, id, secretHash, presentedHash }, now) {
+/* Creates a claim, or replaces the build set of a published map's claim (one claim per published
+ * item, its ref). A claim signed by the map's author (`author`, whose key the caller checked)
+ * replaces the claim that author holds for the ref; a claim made with its secret alone replaces
+ * the claim matching ref and secret. A ref another author's signed claim holds is forbidden to
+ * anyone else. Secrets are stored and compared only as SHA-256 digests. A build that is not
+ * stored, or is broken, is missing: the client uploads it again. */
+export function claimBuilds(storage, { ref, builds, id, secretHash, presentedHash, author = null }, now) {
   const list = hashList(builds);
   if (typeof ref !== 'string' || ref.length < 1) throw new Error('bad ref');
   if (!HEX32.test(id) || !HEX64.test(secretHash) || (presentedHash !== null && !HEX64.test(presentedHash))) throw new Error('bad claim');
   return storage.transactionSync(() => {
     let existing = null;
-    if (presentedHash !== null) {
+    const owned = one(storage, 'SELECT id, author FROM claim WHERE ref = ? AND author IS NOT NULL LIMIT 1', ref);
+    if (owned && owned.author !== author) return { forbidden: true };
+    if (author !== null && owned) existing = owned.id;
+    else if (presentedHash !== null) {
       const found = one(storage, 'SELECT id FROM claim WHERE ref = ? AND secret = ?', ref, presentedHash);
       if (!found) return { forbidden: true };
       existing = found.id;
@@ -425,7 +427,7 @@ export function claimBuilds(storage, { ref, builds, id, secretHash, presentedHas
     const before = new Set(existing ? claimedBuilds(storage, existing) : []);
     const after = new Set(list);
     if (existing) storage.sql.exec('UPDATE claim SET updated = ? WHERE id = ?', now, claim);
-    else storage.sql.exec('INSERT INTO claim (id, ref, secret, created, updated) VALUES (?, ?, ?, ?, ?)', claim, ref, secretHash, now, now);
+    else storage.sql.exec('INSERT INTO claim (id, ref, secret, created, updated, author) VALUES (?, ?, ?, ?, ?, ?)', claim, ref, secretHash, now, now, author);
     const released = [];
     for (const build of before) {
       if (after.has(build)) continue;
@@ -442,12 +444,14 @@ export function claimBuilds(storage, { ref, builds, id, secretHash, presentedHas
   });
 }
 
-export function releaseClaim(storage, id, presentedHash, now = 0) {
-  if (!HEX32.test(id) || !HEX64.test(presentedHash)) throw new Error('bad claim');
+/* Removes a claim: with its secret, or signed by its author (presentedHash null, `author` checked
+ * by the caller). */
+export function releaseClaim(storage, id, presentedHash, now = 0, author = null) {
+  if (!HEX32.test(id) || (presentedHash !== null && !HEX64.test(presentedHash)) || (presentedHash === null && author === null)) throw new Error('bad claim');
   return storage.transactionSync(() => {
-    const found = one(storage, 'SELECT secret FROM claim WHERE id = ?', id);
+    const found = one(storage, 'SELECT secret, author FROM claim WHERE id = ?', id);
     if (!found) return { notFound: true };
-    if (found.secret !== presentedHash) return { forbidden: true };
+    if (presentedHash !== null ? found.secret !== presentedHash : found.author !== author) return { forbidden: true };
     const held = claimedBuilds(storage, id);
     for (const build of held) storage.sql.exec('UPDATE build SET claims = claims - 1 WHERE hash = ?', build);
     storage.sql.exec('DELETE FROM claim_build WHERE claim = ?', id);
@@ -580,7 +584,7 @@ export function storeStats(storage) {
   return { builds: b.builds, claimed: b.claimed, staged: b.staged, broken: b.broken, archiveBytes: b.archived,
     blobs: blobs.blobs, blobBytes: blobs.bytes, packs: packs.packs, packBytes: packs.bytes, stagedBytes: staged.bytes,
     claims: one(storage, 'SELECT count(*) AS n FROM claim').n, dead: one(storage, 'SELECT count(*) AS n FROM dead').n,
-    authors: one(storage, 'SELECT count(*) AS n FROM author').n, listings: one(storage, 'SELECT count(*) AS n FROM listing WHERE removed = 0').n };
+    authors: one(storage, 'SELECT count(*) AS n FROM author').n };
 }
 
 /* Empties the whole index. Only the maintainer's reset route calls it, after deleting
@@ -589,7 +593,7 @@ export function resetRegistry(storage) {
   return storage.transactionSync(() => {
     const counts = {};
     for (const table of ['claim_build', 'claim', 'build_blob', 'blob', 'pack', 'build', 'upload', 'asked', 'dead',
-      'listing_unit', 'listing', 'author']) {
+      'author']) {
       counts[table] = one(storage, 'SELECT count(*) AS n FROM ' + table).n;
       storage.sql.exec('DELETE FROM ' + table);
     }
@@ -598,15 +602,13 @@ export function resetRegistry(storage) {
 }
 
 
-/* ---------------- distribution: authors and mod listings ---------------- */
+/* ---------------- authors ---------------- */
 
-/* The design the owner set (2026-11-17): a published map claims the units it places by hash
- * (claimBuilds above: a claim per map, naming units) and keeps them until its own author
- * republishes; a mod's listing is what installing the mod gives, its current version only,
- * published by the mod's author with a signed request, and it claims its version's units too.
- * A unit is kept while any map or listing claims it and deleted when none does. */
-const OBJECT_TEXT = /^[^\u0000-\u001f\u007f]+$/;
-
+/* A published map's claim is made by its author: the SnapMap author ID with an Ed25519 key the
+ * product creates and the store binds on first use (mods_dist.js). The store is internal to map
+ * publishing: mods reach it only as the units published maps claim. A build's vrefs column is
+ * kept for a later feature (mod listings for installing, which would claim units as maps do);
+ * nothing sets it today. */
 export function authorRow(storage, id) {
   return one(storage, 'SELECT id, key, bound, updated FROM author WHERE id = ?', id);
 }
@@ -625,78 +627,5 @@ export function bindAuthor(storage, id, key, rotate, now) {
     if (!rotate) return { conflict: true };
     storage.sql.exec('UPDATE author SET key = ?, updated = ? WHERE id = ?', key, now, id);
     return { bound: 'rotated' };
-  });
-}
-
-function listingUnits(storage, mod) {
-  return rows(storage, 'SELECT object, unit FROM listing_unit WHERE mod = ? ORDER BY object', mod);
-}
-
-/* The listing stops claiming its units; units nothing claims any more are dropped. Returns the
- * objects queued. */
-function endListing(storage, mod, now) {
-  const units = [...new Set(listingUnits(storage, mod).map(r => r.unit))];
-  for (const unit of units) storage.sql.exec('UPDATE build SET vrefs = vrefs - 1 WHERE hash = ?', unit);
-  storage.sql.exec('DELETE FROM listing_unit WHERE mod = ?', mod);
-  return dropUnclaimed(storage, units, now);
-}
-
-/* A mod's listing as the product reads it to install the mod: its author, name, version number,
- * size and its units by placed object. Null when unknown. */
-export function listingOf(storage, id) {
-  const mod = one(storage, 'SELECT id, author, name, seq, size, removed, updated FROM listing WHERE id = ?', id);
-  if (!mod) return null;
-  return { mod: mod.id, author: mod.author, name: mod.name, seq: mod.seq, size: mod.size, removed: mod.removed, updated: mod.updated,
-    objects: Object.fromEntries(listingUnits(storage, id).map(r => [r.object, r.unit])) };
-}
-
-/* What publishing `objects` (placed object -> unit hash) as version `seq` of the listing `mod`
- * would do, and (unless `check`) does it: the listing moves to the new version and claims its
- * units; the units only the old version named lose that claim. The caller has checked the
- * request is signed by `author`'s bound key. Returns { forbidden } (another author's mod),
- * { removed } (moderation), { stale: current seq }, { missing: [units the store lacks] }, or
- * { seq, size, newBytes, created, discard }. */
-export function publishListing(storage, { mod, author, name, seq, objects, check = false }, now) {
-  const entries = Object.entries(objects || {});
-  if (!entries.length || !entries.every(([o, u]) => OBJECT_TEXT.test(o) && HEX64.test(u)) || !Number.isSafeInteger(seq) || seq < 1) {
-    throw new Error('bad listing');
-  }
-  return storage.transactionSync(() => {
-    const row = one(storage, 'SELECT author, seq, removed FROM listing WHERE id = ?', mod);
-    if (row && row.author !== author) return { forbidden: true };
-    if (row && row.removed === 1) return { removed: 1 };
-    const expected = row ? row.seq + 1 : 1;
-    if (seq !== expected) return { stale: row ? row.seq : 0 };
-    const units = [...new Set(entries.map(([, u]) => u))];
-    const missing = [];
-    let size = 0, newBytes = 0;
-    for (const unit of units) {
-      const b = one(storage, 'SELECT size, claims, vrefs, broken FROM build WHERE hash = ?', unit);
-      if (!b || b.broken) { missing.push(unit); continue; }
-      size += b.size;
-      if (b.claims <= 0 && b.vrefs <= 0) newBytes += b.size;
-    }
-    if (missing.length) return { missing };
-    if (check) return { seq, size, newBytes, check: true };
-    for (const unit of units) storage.sql.exec('UPDATE build SET vrefs = vrefs + 1 WHERE hash = ?', unit);
-    const discard = row ? endListing(storage, mod, now) : [];
-    if (row) storage.sql.exec('UPDATE listing SET seq = ?, name = ?, size = ?, removed = 0, updated = ? WHERE id = ?', seq, name, size, now, mod);
-    else storage.sql.exec('INSERT INTO listing (id, author, name, seq, size, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?)', mod, author, name, seq, size, now, now);
-    for (const [object, unit] of entries) storage.sql.exec('INSERT INTO listing_unit (mod, object, unit) VALUES (?, ?, ?)', mod, object, unit);
-    return { seq, size, newBytes, created: !row, discard };
-  });
-}
-
-/* The author deletes the listing (installing the mod is no longer offered; published maps keep
- * their units), or moderation removes it (`force`). The ID stays its author's: an author's own
- * deletion may publish again. Returns { deleted, discard }. */
-export function deleteListing(storage, mod, author, now, force = false) {
-  return storage.transactionSync(() => {
-    const row = one(storage, 'SELECT author FROM listing WHERE id = ?', mod);
-    if (!row) return { notFound: true };
-    if (!force && row.author !== author) return { forbidden: true };
-    const discard = endListing(storage, mod, now);
-    storage.sql.exec('UPDATE listing SET removed = ?, size = 0, updated = ? WHERE id = ?', force ? 1 : 2, now, mod);
-    return { deleted: true, discard };
   });
 }

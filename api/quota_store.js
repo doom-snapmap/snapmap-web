@@ -7,10 +7,8 @@ export const LIMITS = Object.freeze({ post: 10, comment: 60, reaction: 120, uplo
  * store already holds, a resumed upload and its parts count nothing. */
 export const MOD_LIMITS = Object.freeze({
   mod_build_put: 1024, mod_bytes: 64 * 1024 * 1024 * 1024, mod_get: 20000, mod_claim: 256,
-  /* Per author (mods_dist.js): mod publishes, and bytes of units new to the store, per UTC hour. */
-  mod_publish: 256, mod_author_bytes: 256 * 1024 * 1024 * 1024,
 });
-export const SOFT_MOD_LIMITS = new Set(['mod_bytes', 'mod_author_bytes']);
+export const SOFT_MOD_LIMITS = new Set(['mod_bytes']);
 const HOUR_MS = 3600000;
 
 export function initializeQuota(storage) {

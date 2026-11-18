@@ -5,10 +5,10 @@ import {
   uploadSession, openUpload, recordPart, closeUpload, abandonUploads,
   nextStaged, stagedCount, reserveBlobs, commitPacks, deadObjects, forgetDead, unnamedObjects, storeStats,
   nextReplan, replanBuild,
-  authorRow, bindAuthor, listingOf, publishListing, deleteListing,
+  authorRow, bindAuthor,
 } from './mods_registry_store.js';
 import { packStaged } from './mods_pack.js';
-import { checkArchive, hashParts, leftOutIn } from './mods_store.js';
+import { checkArchive, walkSegment, leftOutIn } from './mods_store.js';
 
 const ALARM_BUDGET_MS = 10 * 60 * 1000;   // one alarm packs for at most this long (the platform allows 15 minutes)
 
@@ -61,7 +61,7 @@ export class ModRegistry extends DurableObject {
   buildServed(hash) { return buildServed(this.ctx.storage, hash, Date.now()); }
   markBroken(hash, object) { return markBroken(this.ctx.storage, hash, object, Date.now()); }
   claim(request) { return claimBuilds(this.ctx.storage, request, Date.now()); }
-  release(id, presentedHash) { return releaseClaim(this.ctx.storage, id, presentedHash, Date.now()); }
+  release(id, presentedHash, author) { return releaseClaim(this.ctx.storage, id, presentedHash, Date.now(), author ?? null); }
   purgeBuilds(limit) { return purgeBuilds(this.ctx.storage, Date.now(), limit); }
   uploadSession(hash, size) { return uploadSession(this.ctx.storage, hash, size); }
   openUpload(request) { return openUpload(this.ctx.storage, request, Date.now()); }
@@ -83,21 +83,18 @@ export class ModRegistry extends DurableObject {
   }
   reset() { return resetRegistry(this.ctx.storage); }
 
-  /* Distribution (mods_dist.js): authors' keys and mods' listings. */
+  /* Authors' keys (mods_dist.js), which sign published maps' claims. */
   author(id) { return authorRow(this.ctx.storage, id); }
   bindAuthor(id, key, rotate) { return bindAuthor(this.ctx.storage, id, key, rotate, Date.now()); }
-  listing(id) { return listingOf(this.ctx.storage, id); }
-  publishListing(request) { return publishListing(this.ctx.storage, request, Date.now()); }
-  deleteListing(mod, author, force) { return deleteListing(this.ctx.storage, mod, author, Date.now(), force); }
 }
 
 /* The check of one build's uploads (named "check:<hash>"): reads an uploaded archive back from R2,
  * hashes every byte and judges it (mods_store.js checkArchive), so the Worker that took the
  * upload only moved its bytes. A Durable Object has the CPU time a large archive needs on any
  * plan; one per build keeps the checks of different builds apart, and the hashing of a large archive
- * is shared among several, named "hash:<hash>:<n>". It keeps no state. */
+ * is shared among several, named "walk:<hash>:<n>". It keeps no state. */
 export class ModChecker extends DurableObject {
   check(hash, object, size) { return checkArchive(this.env, hash, object, size); }
-  hashParts(object, start, length, parts) { return hashParts(this.env, object, start, length, parts); }
+  walkSegment(object, start, end) { return walkSegment(this.env, object, start, end); }
   leftOut(skeleton, request) { return leftOutIn(this.env, skeleton, request); }
 }
