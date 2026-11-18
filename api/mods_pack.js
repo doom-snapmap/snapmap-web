@@ -243,8 +243,10 @@ export async function packOne(env, reg, staged) {
     const key = newPackKey();
     let at = 0;
     const blobs = plan.blobs.map(b => { const row = { sha: b.sha, size: b.size, at, hlen: b.hlen, hdr: b.hdr }; at += b.length; return row; });
-    await env.MODS.put(key, obj.body.pipeThrough(keeper(plan.blobs.map(b => [b.at - plan.start, b.length]))).pipeThrough(new FixedLengthStream(at)),
-      { httpMetadata: { contentType: 'application/octet-stream' } });
+    /* The bytes it keeps, end to end; when they are the whole range read (no blob the store holds
+     * lies between them) the runtime pipes them straight into the pack. */
+    const body = at === plan.end - plan.start ? obj.body : obj.body.pipeThrough(keeper(plan.blobs.map(b => [b.at - plan.start, b.length])));
+    await env.MODS.put(key, body.pipeThrough(new FixedLengthStream(at)), { httpMetadata: { contentType: 'application/octet-stream' } });
     written.push({ object: key, size: at, blobs });
   }
   const done = reg.commitPacks(staged.id, staged.skeleton, written, skel);

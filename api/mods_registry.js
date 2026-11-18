@@ -5,6 +5,7 @@ import {
   uploadSession, openUpload, recordPart, closeUpload, abandonUploads,
   nextStaged, stagedCount, reserveBlobs, commitPacks, deadObjects, forgetDead, unnamedObjects, storeStats,
   nextReplan, replanBuild,
+  authorRow, bindAuthor, listingOf, publishListing, deleteListing,
 } from './mods_registry_store.js';
 import { packStaged } from './mods_pack.js';
 import { checkArchive, leftOutIn } from './mods_store.js';
@@ -81,6 +82,13 @@ export class ModRegistry extends DurableObject {
     return this.ctx.storage.sql.exec('SELECT value FROM store_meta WHERE key = ?', key).toArray()[0]?.value ?? null;
   }
   reset() { return resetRegistry(this.ctx.storage); }
+
+  /* Distribution (mods_dist.js): authors' keys and mods' listings. */
+  author(id) { return authorRow(this.ctx.storage, id); }
+  bindAuthor(id, key, rotate) { return bindAuthor(this.ctx.storage, id, key, rotate, Date.now()); }
+  listing(id) { return listingOf(this.ctx.storage, id); }
+  publishListing(request) { return publishListing(this.ctx.storage, request, Date.now()); }
+  deleteListing(mod, author, force) { return deleteListing(this.ctx.storage, mod, author, Date.now(), force); }
 }
 
 /* The check of one build's uploads (named "check:<hash>"): reads an uploaded archive back from R2,

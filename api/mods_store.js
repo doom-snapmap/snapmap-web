@@ -21,6 +21,7 @@
 
 import { RequestError, readJsonObject } from './request_body.js';
 import { encodeSkeleton, readSkeleton, readSkeletonBytes, skeletonRaw, planStream } from './mods_pack.js';
+import { routeDist } from './mods_dist.js';
 
 /* The largest archive one PUT takes, and one part of a larger one. The platform refuses a
  * request body over 100 MB (100,000,000 bytes) on the Free and Pro plans (200 MB Business,
@@ -36,7 +37,8 @@ const PURGE_BATCH = 500;
 const PURGE_ROUNDS = 20;
 const SWEEP_PAGES = 200;                  // 200,000 objects listed per daily run
 const ORPHAN_AGE_MS = 86400000;          // an object no row names is deleted once it is a day old
-const ASKER_SHOWN = 256;                 // what asked for a missing file, as its author is shown it
+const ASKER_SHOWN = 256;
+const READ_CHUNK = 1024 * 1024;               // the check reads an archive back this much at a time                 // what asked for a missing file, as its author is shown it
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
@@ -925,20 +927,34 @@ function requirementsOk(req) {
  * the archive is refused, or null when the stream broke off. */
 async function walkStream(stream, length) {
   const walker = new ArchiveWalker(length);
-  const reader = stream.getReader();
+  let reader, byob = true;
+  /* A byte stream (R2's) is read a megabyte at a time: the check's own work is per chunk, so a
+   * gigabyte costs a thousand steps, not hundreds of thousands. */
+  try { reader = stream.getReader({ mode: 'byob' }); } catch { byob = false; reader = stream.getReader(); }
   try {
     for (;;) {
-      const { value, done } = await reader.read();
+      if (!byob) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        walker.push(value);
+        await walker.settled();
+        continue;
+      }
+      let buf = new Uint8Array(READ_CHUNK), filled = 0, done = false;
+      while (filled < buf.byteLength) {
+        const r = await reader.read(new Uint8Array(buf.buffer, filled, buf.byteLength - filled));
+        if (r.done) { done = true; if (r.value) buf = new Uint8Array(r.value.buffer); break; }
+        buf = new Uint8Array(r.value.buffer);
+        filled += r.value.byteLength;
+      }
+      if (filled) { walker.push(buf.subarray(0, filled)); await walker.settled(); }
       if (done) break;
-      walker.push(value);
-      await walker.settled();
     }
   } catch { return null; }
   finally { reader.releaseLock(); }
   walker.finish();
   return walker;
 }
-
 async function verdictOf(walker, hash) {
   if (walker.error) return { refusal: walker.error };
   await walker.digests();
@@ -1044,7 +1060,7 @@ async function runCheck(env, hash, object, size) {
  * against the real one. */
 async function heldAlready(env, hash) {
   const row = await registry(env, 'buildRow', hash);
-  return row && row.claims > 0 && !row.broken ? row : null;
+  return row && (row.claims > 0 || row.vrefs > 0) && !row.broken ? row : null;
 }
 /* ---------------- build routes ---------------- */
 
@@ -1402,12 +1418,19 @@ async function postReset(req, env) {
 /* POST /mods/admin/stats: what the store holds (builds, blobs, packs, bytes), for the
  * maintainer. The same token as the reset; hidden without it. */
 async function postStats(req, env) {
-  const expected = env.MODS_ADMIN_TOKEN === undefined ? '' : String(env.MODS_ADMIN_TOKEN).trim();
-  if (!expected) { await discard(req); return refuse(NOT_FOUND, 404); }
-  const given = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
-  if (!given || !(await sameToken(given, expected))) { await discard(req); return refuse('This request needs the maintainer token.', 403); }
+  const denied = await maintainerDenied(req, env);
+  if (denied) { await discard(req); return denied; }
   await discard(req);
   return reply(await registry(env, 'stats'));
+}
+
+/* A refusal unless the request carries the maintainer token (404 while none is set). */
+async function maintainerDenied(req, env) {
+  const expected = env.MODS_ADMIN_TOKEN === undefined ? '' : String(env.MODS_ADMIN_TOKEN).trim();
+  if (!expected) return refuse(NOT_FOUND, 404);
+  const given = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  if (!given || !(await sameToken(given, expected))) return refuse('This request needs the maintainer token.', 403);
+  return null;
 }
 
 async function sameToken(given, expected) {
@@ -1436,7 +1459,8 @@ export async function handleMods(req, env, path) {
 
 async function routeMods(req, env, path) {
   if (!env.MODS || !env.MOD_REGISTRY || !env.WRITE_QUOTAS) { await discard(req); return refuse(UNAVAILABLE, 503); }
-  const build = path.match(/^\/mods\/build\/([0-9a-fA-F]{64})(?:\/(parts|complete|asked)(?:\/(\d{1,9}))?)?$/);
+  /* A unit (a placed object's closure, the distribution design) is stored and served like a build. */
+  const build = path.match(/^\/mods\/(?:build|unit)\/([0-9a-fA-F]{64})(?:\/(parts|complete|asked)(?:\/(\d{1,9}))?)?$/);
   if (build) {
     const [, raw, kind, part] = build;
     if (raw !== raw.toLowerCase()) { await discard(req); return refuse('A build hash must be written in lowercase hex.', 400); }
@@ -1453,6 +1477,11 @@ async function routeMods(req, env, path) {
   const action = { '/mods/claim': postClaim, '/mods/release': postRelease, '/mods/asked': postAskedList,
     '/mods/admin/reset': postReset, '/mods/admin/stats': postStats }[path];
   if (action) return req.method === 'POST' ? action(req, env) : notAllowed(req, 'POST');
+  const dist = await routeDist(req, env, path, {
+    maintainer: r => maintainerDenied(r, env),
+    deleteQueued,
+  });
+  if (dist) return dist;
   await discard(req);
   return refuse(NOT_FOUND, 404);
 }
@@ -1488,6 +1517,7 @@ export async function purgeMods(env, { batch = PURGE_BATCH, rounds = PURGE_ROUND
     if (doomed.builds < batch) break;
   }
   const uploads = await abortUploads(env, rounds);
+
   let queued = 0;
   for (let i = 0; i < rounds; i++) {
     const dead = await registry(env, 'deadObjects', 1000);

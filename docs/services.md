@@ -4,7 +4,9 @@ The services behind the website and its API, who holds their credentials, and
 what a fork must provision. None of them is billed today; hosting charges depend
 on the account plan and usage. The mod store is the first service whose cost grows
 with community use; at Cloudflare's listed R2 prices it is expected to cost dollars
-per month at plausible scale.
+per month at plausible scale. The account is on the Workers Free plan; the mod store runs on it
+(its heavy work is in Durable Objects, which have 30 s of CPU a request there), within the Free
+plan's daily request and Durable Object allowances, and Workers Paid (5 USD a month) lifts them.
 
 | Service | Purpose | Credentials or bindings | Without it |
 |---|---|---|---|
@@ -16,9 +18,9 @@ per month at plausible scale.
 | Workers KV | Sessions and OAuth state | `SESSIONS` binding | Sign-in and authenticated routes fail. |
 | SQLite Durable Objects | Per-account write quotas | `WRITE_QUOTAS` binding and its migration | Authenticated writes fail closed with HTTP 503. |
 | R2 | Screenshot uploads | `MEDIA` binding | Uploads and media retrieval fail. |
-| R2 (mod store) | Anonymous Snapmap+ mod build archives, one per build, bucket `snapmap-plus-mods`; billed per use for storage, Class A writes and Class B reads, with free egress | `MODS` binding | Players cannot fetch the mods a map needs; installed mods and vanilla maps are unaffected. |
-| SQLite Durable Object (mod index) | Index of stored mod objects and their anonymous claims; per-address limits use `WRITE_QUOTAS` (a publish in parts counts as one upload) | `MOD_REGISTRY` binding and its `v2-mod-registry` migration; optional secret `MODS_ADDRESS_KEY` | Mod store routes fail closed with HTTP 503. |
-| Workers Cron Trigger | Daily purge of mod objects nothing ever claimed (released bundles are deleted at release) | `[triggers]` in `api/wrangler.toml` | Unclaimed objects stay stored and unserved. |
+| R2 (mod store) | Anonymous Snapmap+ mod store, bucket `snapmap-plus-mods`: each file stored once by its SHA-256 in packs, with each build's skeleton; billed per use for storage, Class A writes and Class B reads, with free egress | `MODS` binding | Players cannot fetch the mods a map needs; installed mods and vanilla maps are unaffected. |
+| SQLite Durable Objects (mod index and checker) | Index of builds, blobs, packs and their anonymous claims, and the packer on its alarm (`MOD_REGISTRY`); the check of each upload, one object per build (`MOD_CHECKER`); per-address limits use `WRITE_QUOTAS` | `MOD_REGISTRY` and `MOD_CHECKER` bindings and their `v2-mod-registry` and `v3-mod-checker` migrations; optional secrets `MODS_ADDRESS_KEY` and `MODS_ADMIN_TOKEN` | Mod store routes fail closed with HTTP 503. |
+| Workers Cron Trigger | Daily purge of builds nothing ever claimed, abandoned uploads in parts and objects no row names (released builds are deleted at release) | `[triggers]` in `api/wrangler.toml` | Unclaimed objects stay stored and unserved. |
 | Turnstile | Optional write challenge | Worker secret `TURNSTILE_SECRET` and matching site setup | The Worker skips the challenge when the secret is absent. |
 
 ## DNS

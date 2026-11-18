@@ -11,7 +11,8 @@ const dataURL = source => 'data:text/javascript;base64,' + Buffer.from(source).t
 const read = name => fs.readFileSync(path.join(root, 'api', name), 'utf8');
 const bodyURL = dataURL(read('request_body.js'));
 const packURL = dataURL(read('mods_pack.js'));
-const modsURL = dataURL(read('mods_store.js').replace('./request_body.js', bodyURL).replace('./mods_pack.js', packURL));
+const distURL = dataURL(read('mods_dist.js').replace('./request_body.js', bodyURL));
+const modsURL = dataURL(read('mods_store.js').replace('./request_body.js', bodyURL).replace('./mods_pack.js', packURL).replace('./mods_dist.js', distURL));
 const workerURL = dataURL(read('worker.js').replace('./request_body.js', bodyURL).replace('./mods_store.js', modsURL)
   .replace("export { CommunityQuota } from './quota.js';", '').replace("export { ModRegistry, ModChecker } from './mods_registry.js';", ''));
 const modsModule = import(modsURL);
@@ -231,6 +232,11 @@ async function modsEnv(extra = {}) {
           reportAsked: async (hash, request, asker, known) => registry.reportAsked(storage, hash, request, asker, clock.now(), known),
           listAsked: async (id, hash) => registry.listAsked(storage, id, hash),
           reset: async () => registry.resetRegistry(storage),
+          author: async id => registry.authorRow(storage, id),
+          bindAuthor: async (id, key, rotate) => registry.bindAuthor(storage, id, key, rotate, clock.now()),
+          listing: async id => registry.listingOf(storage, id),
+          publishListing: async request => registry.publishListing(storage, request, clock.now()),
+          deleteListing: async (mod, author, force) => registry.deleteListing(storage, mod, author, clock.now(), force),
         };
       },
     },
@@ -1009,11 +1015,11 @@ test('the byte quota admits any single upload while the hour is under it, then w
 
 test('mod quota admits each limit exactly and all-or-nothing across kinds', async () => {
   const { initializeQuota, consumeModQuota, MOD_LIMITS } = await quotaModule;
-  assert.deepEqual({ ...MOD_LIMITS }, { mod_build_put: 1024, mod_bytes: 64 * 1024 ** 3, mod_get: 20000, mod_claim: 256 });
+  assert.deepEqual({ ...MOD_LIMITS }, { mod_build_put: 1024, mod_bytes: 64 * 1024 ** 3, mod_get: 20000, mod_claim: 256, mod_publish: 256, mod_author_bytes: 256 * 1024 ** 3 });
   const storage = sqliteStorage();
   initializeQuota(storage);
   const hour = 3600000 * 10;
-  for (const kind of ['mod_build_put', 'mod_claim', 'mod_get']) {
+  for (const kind of ['mod_build_put', 'mod_claim', 'mod_get', 'mod_publish']) {
     for (let i = 0; i < MOD_LIMITS[kind]; i++) assert.equal(consumeModQuota(storage, [[kind, 1]], hour).allowed, true);
     assert.equal(consumeModQuota(storage, [[kind, 1]], hour + 3599999).allowed, false, kind);
     assert.equal(consumeModQuota(storage, [[kind, 1]], hour + 3600000).allowed, true, kind);
@@ -1171,7 +1177,8 @@ test('purge deletes unclaimed builds past the hour and keeps claimed ones', asyn
 
 test('the registry drops the tables of the blob and bundle store and of one archive per build', async () => {
   const registry = await registryModule;
-  const current = ['asked', 'blob', 'build', 'build_blob', 'claim', 'claim_build', 'dead', 'pack', 'store_meta', 'upload'];
+  const current = ['asked', 'author', 'blob', 'build', 'build_blob', 'claim', 'claim_build', 'dead', 'listing', 'listing_unit',
+    'pack', 'store_meta', 'upload'];
   const storage = sqliteStorage();
   for (const statement of ['CREATE TABLE mod_blob (hash TEXT PRIMARY KEY)', 'CREATE TABLE mod_bundle (hash TEXT PRIMARY KEY)',
     'CREATE TABLE mod_bundle_blob (bundle TEXT, blob TEXT)', 'CREATE TABLE mod_claim_bundle (claim TEXT, bundle TEXT)',
@@ -1195,6 +1202,12 @@ test('the registry drops the tables of the blob and bundle store and of one arch
   registry.initializeRegistry(old);
   assert.deepEqual(tables(old), current);
   assert.equal(registry.buildRow(old, 'a'.repeat(64)), null);
+  /* An index of this store from before units were named by listings gains the column. */
+  const earlier = sqliteStorage();
+  earlier.sql.exec("CREATE TABLE build (id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, salt TEXT NOT NULL, created INTEGER NOT NULL, claims INTEGER NOT NULL DEFAULT 0, scripts INTEGER NOT NULL DEFAULT 0, slice_of TEXT, state TEXT NOT NULL, archive TEXT, skeleton TEXT NOT NULL, modjson TEXT NOT NULL, entries INTEGER NOT NULL, broken INTEGER NOT NULL DEFAULT 0, packed INTEGER)");
+  registry.initializeRegistry(earlier);
+  const cols = earlier.sql.exec('PRAGMA table_info(build)').toArray().map(r => r.name);
+  for (const c of ['plan', 'replan', 'vrefs']) assert.ok(cols.includes(c), c);
 });
 
 /* ---------------- uploads in parts, no limits, the release race ---------------- */
@@ -1527,9 +1540,10 @@ test('the maintainer reset route is hidden without the secret and empties the st
   const response = await fetchWorker(env, call('POST', '/mods/admin/reset', auth));
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { deleted: { builds: 4, other: 2 },
-    index: { claim_build: 1, claim: 1, build_blob: 6, blob: 4, pack: 2, build: 2, upload: 0, asked: 0, dead: 0 } });
+    index: { claim_build: 1, claim: 1, build_blob: 6, blob: 4, pack: 2, build: 2, upload: 0, asked: 0, dead: 0,
+      listing_unit: 0, listing: 0, author: 0 } });
   assert.equal(env.MODS.objects.size, 0);
-  for (const table of ['build', 'blob', 'pack', 'build_blob', 'claim', 'claim_build', 'upload', 'asked', 'dead']) {
+  for (const table of ['build', 'blob', 'pack', 'build_blob', 'claim', 'claim_build', 'upload', 'asked', 'dead', 'author', 'listing', 'listing_unit']) {
     assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM ' + table).toArray()[0].n, 0, table);
   }
   assert.equal((await fetchWorker(env, call('POST', '/mods/admin/stats'))).status, 403);
@@ -1808,4 +1822,118 @@ test('a pack plan keeps a large file alone and starts a new read past a large ga
   assert.deepEqual(plans.map(p => p.blobs.map(b => b.sha).join('')), ['ab', 'c', 'd', 'e']);
   assert.deepEqual(plans.map(p => [p.start, p.end]), [[0, 20], [20, PACK_TARGET + 20], [PACK_TARGET + 20, PACK_TARGET + 25],
     [PACK_TARGET + 20 + 9 * MIB, PACK_TARGET + 25 + 9 * MIB]]);
+});
+/* ---------------- distribution: authors, current versions, claims per object ---------------- */
+
+async function authorKeys() {
+  const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+  const raw = Buffer.from(await crypto.subtle.exportKey('raw', pair.publicKey)).toString('base64url');
+  const sign = async bytes => Buffer.from(await crypto.subtle.sign({ name: 'Ed25519' }, pair.privateKey, bytes)).toString('base64url');
+  return { key: raw, sign };
+}
+
+async function signed(env, keys, route, body, extra = {}) {
+  const bytes = Buffer.from(JSON.stringify(body));
+  return fetchWorker(env, call('POST', route, { body: bytes, headers: { 'Content-Type': 'application/json', 'X-Mod-Signature': await keys.sign(bytes), ...extra } }));
+}
+
+test('an author binds a key once; only that key, or a signature by it, can replace it', async () => {
+  const env = await modsEnv();
+  const a = await authorKeys(), b = await authorKeys();
+  const bind = (keys, id, extra) => signed(env, keys, '/mods/author/' + id + '/key', { author: id, key: keys.key, time: Date.now() }, extra);
+  assert.equal((await bind(a, 'author-1')).status, 201);
+  assert.equal((await bind(a, 'author-1')).status, 200, 'the same key again');
+  const taken = await bind(b, 'author-1');
+  assert.equal(taken.status, 409);
+  assertSentence((await taken.json()).error, 'bound');
+  /* Rotation: the new key's request, also signed by the bound key. */
+  const body = Buffer.from(JSON.stringify({ author: 'author-1', key: b.key, time: Date.now() }));
+  const rotated = await fetchWorker(env, call('POST', '/mods/author/author-1/key', { body, headers: { 'Content-Type': 'application/json',
+    'X-Mod-Signature': await b.sign(body), 'X-Mod-Previous-Signature': await a.sign(body) } }));
+  assert.equal(rotated.status, 201);
+  assert.equal((await (await fetchWorker(env, call('GET', '/mods/author/author-1'))).json()).key, b.key);
+  const unsigned = await fetchWorker(env, postJson('/mods/author/author-2/key', { author: 'author-2', key: a.key, time: Date.now() }));
+  assert.equal(unsigned.status, 403, 'a key is bound only by a request it signed');
+  assert.equal((await signed(env, a, '/mods/author/author-3/key', { author: 'author-3', key: a.key, time: Date.now() - 3600000 })).status, 400, 'an old request');
+  assert.equal((await fetchWorker(env, call('GET', '/mods/author/nobody'))).status, 404);
+});
+
+test('a listing is a mod\'s current version; maps claim units by hash and keep them whatever the listing does', async () => {
+  const env = await modsEnv();
+  const author = await authorKeys(), other = await authorKeys();
+  assert.equal((await signed(env, author, '/mods/author/me/key', { author: 'me', key: author.key, time: Date.now() })).status, 201);
+  assert.equal((await signed(env, other, '/mods/author/them/key', { author: 'them', key: other.key, time: Date.now() })).status, 201);
+  const unit = (name, data) => build({ files: [{ request: 'generated/decls/entitydef/mods/' + SALT + '/' + name + '.decl', data }] });
+  const tyrant = unit('tyrant', 'entityDef tyrant {}\n'), marauder = unit('marauder', 'entityDef marauder {}\n'), imp = unit('imp', 'entityDef imp {}\n');
+  const upload = u => fetchWorker(env, call('PUT', '/mods/unit/' + u.hash, { body: u.bytes, headers: { 'Content-Type': 'application/zip', 'Content-Length': String(u.bytes.length) } }));
+  for (const u of [tyrant, marauder, imp]) assert.equal((await upload(u)).status, 201, 'any publisher uploads a unit by its hash');
+  const head = u => fetchWorker(env, call('HEAD', '/mods/unit/' + u.hash)).then(r => r.status);
+  const publish = (keys, body) => signed(env, keys, '/mods/mod/' + SALT + '/publish', { author: 'me', mod: SALT, name: 'Eternal demons', time: Date.now(), ...body });
+
+  const preview = await publish(author, { seq: 1, objects: { tyrant: tyrant.hash, marauder: marauder.hash }, check: true });
+  assert.equal(preview.status, 200);
+  const p = await preview.json();
+  assert.equal(p.size, tyrant.bytes.length + marauder.bytes.length, 'the size is shown before a publish');
+  assert.equal(p.newBytes, p.size);
+  assert.equal((await fetchWorker(env, call('GET', '/mods/mod/' + SALT))).status, 404, 'a check changes nothing');
+  assert.equal((await publish(author, { seq: 1, objects: { tyrant: tyrant.hash, marauder: marauder.hash } })).status, 201);
+  assert.equal((await publish(author, { seq: 1, objects: { tyrant: tyrant.hash } })).status, 409, 'a replayed or stale publish');
+  assert.equal((await publish(other, { author: 'them', seq: 2, objects: { tyrant: tyrant.hash } })).status, 403, 'another author\'s mod');
+  assert.equal((await publish(other, { seq: 2, objects: { tyrant: tyrant.hash } })).status, 403, 'not signed by the author it names');
+  const missing = await publish(author, { seq: 2, objects: { tyrant: 'e'.repeat(64) } });
+  assert.equal(missing.status, 409);
+  assert.deepEqual((await missing.json()).missing, ['e'.repeat(64)]);
+  const listing = await (await fetchWorker(env, call('GET', '/mods/mod/' + SALT))).json();
+  assert.deepEqual({ seq: listing.seq, author: listing.author, objects: listing.objects }, { seq: 1, author: 'me', objects: { marauder: marauder.hash, tyrant: tyrant.hash } });
+
+  /* The author's own map places the Marauder; another player's map places the Tyrant and an imp. */
+  const claim = body => fetchWorker(env, postJson('/mods/claim', body)).then(r => r.json());
+  const mine = await claim({ ref: 'map-mine', builds: [marauder.hash] });
+  const theirs = await claim({ ref: 'map-theirs', builds: [tyrant.hash, imp.hash] });
+  env.clock.offset = 2 * HOUR;
+  for (const u of [tyrant, marauder, imp]) assert.equal(await head(u), 200, 'claimed units outlive the upload hour');
+
+  /* The listing drops the Marauder: the author's own published map keeps it. */
+  assert.equal((await publish(author, { seq: 2, objects: { tyrant: tyrant.hash } })).status, 200);
+  assert.equal(await head(marauder), 200, 'a published map keeps the content it was published with');
+  /* Republishing that map from a revision without the Marauder: the unit goes, nothing else uses it. */
+  await claim({ ref: 'map-mine', builds: [tyrant.hash], secret: mine.secret });
+  assert.equal(await head(marauder), 404);
+  /* A player who kept a copy with the Marauder publishes it as a remix: the unit uploads again from their cache. */
+  assert.equal((await upload(marauder)).status, 201);
+  const remix = await claim({ ref: 'map-remix', builds: [marauder.hash] });
+  assert.ok(remix.claim);
+  env.clock.offset = 4 * HOUR;
+  assert.equal(await head(marauder), 200);
+
+  /* Withdrawing the listing changes no published map. */
+  assert.equal((await signed(env, author, '/mods/mod/' + SALT + '/delete', { author: 'me', mod: SALT, time: Date.now() })).status, 200);
+  assert.equal((await fetchWorker(env, call('GET', '/mods/mod/' + SALT))).status, 410);
+  for (const u of [tyrant, imp, marauder]) assert.equal(await head(u), 200);
+  /* Unpublishing removes only that map's claims. */
+  await fetchWorker(env, postJson('/mods/release', { claim: theirs.claim, secret: theirs.secret }));
+  assert.equal(await head(imp), 404);
+  assert.equal(await head(tyrant), 200, 'the author\'s own map still claims it');
+  await fetchWorker(env, postJson('/mods/release', { claim: mine.claim, secret: mine.secret }));
+  assert.equal(await head(tyrant), 404, 'a unit no map and no listing claims is deleted');
+  /* The author may publish the ID again. */
+  assert.equal((await upload(tyrant)).status, 201);
+  assert.equal((await publish(author, { seq: 3, objects: { tyrant: tyrant.hash } })).status, 200);
+});
+
+test('moderation removes a listing; maps that claim its units keep them', async () => {
+  const env = await modsEnv({ MODS_ADMIN_TOKEN: 'mod-token' });
+  const author = await authorKeys();
+  await signed(env, author, '/mods/author/me/key', { author: 'me', key: author.key, time: Date.now() });
+  const u = build(), w = build();
+  for (const x of [u, w]) await fetchWorker(env, call('PUT', '/mods/unit/' + x.hash, { body: x.bytes, headers: { 'Content-Type': 'application/zip', 'Content-Length': String(x.bytes.length) } }));
+  await signed(env, author, '/mods/mod/' + SALT + '/publish', { author: 'me', mod: SALT, name: 'X', seq: 1, time: Date.now(), objects: { x: u.hash, y: w.hash } });
+  await fetchWorker(env, postJson('/mods/claim', { ref: 'm', builds: [u.hash] }));
+  assert.equal((await fetchWorker(env, postJson('/mods/admin/remove-mod', { mod: SALT }))).status, 403);
+  assert.equal((await fetchWorker(env, postJson('/mods/admin/remove-mod', { mod: SALT }, { Authorization: 'Bearer mod-token' }))).status, 200);
+  assert.equal((await fetchWorker(env, call('GET', '/mods/mod/' + SALT))).status, 410);
+  env.clock.offset = 2 * HOUR;
+  assert.equal((await fetchWorker(env, call('HEAD', '/mods/unit/' + u.hash))).status, 200, 'a map claims it');
+  assert.equal((await fetchWorker(env, call('HEAD', '/mods/unit/' + w.hash))).status, 404);
+  assert.equal((await signed(env, author, '/mods/mod/' + SALT + '/publish', { author: 'me', mod: SALT, name: 'X', seq: 2, time: Date.now(), objects: { x: u.hash } })).status, 410);
 });

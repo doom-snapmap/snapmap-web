@@ -23,7 +23,8 @@ function streamed(chunks, declared) {
 }
 
 const packURL = 'data:text/javascript;base64,' + Buffer.from(fs.readFileSync(path.join(root, 'api/mods_pack.js'), 'utf8')).toString('base64');
-const modsSource = fs.readFileSync(path.join(root, 'api/mods_store.js'), 'utf8').replace('./request_body.js', bodyURL).replace('./mods_pack.js', packURL);
+const distURL = 'data:text/javascript;base64,' + Buffer.from(fs.readFileSync(path.join(root, 'api/mods_dist.js'), 'utf8').replace('./request_body.js', bodyURL)).toString('base64');
+const modsSource = fs.readFileSync(path.join(root, 'api/mods_store.js'), 'utf8').replace('./request_body.js', bodyURL).replace('./mods_pack.js', packURL).replace('./mods_dist.js', distURL);
 const modsURL = 'data:text/javascript;base64,' + Buffer.from(modsSource).toString('base64');
 
 async function loadWorker(name) {

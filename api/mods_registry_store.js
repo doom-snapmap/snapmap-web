@@ -10,7 +10,7 @@
  * as an archive, is checked (every file's SHA-256 against its mod.json), and is served from
  * that archive while it is staged; the packer (mods_pack.js, run by the Durable Object's alarm)
  * then moves the blobs it does not already hold into packs and deletes the archive. A published
- * map's part of a mod, and the per-object units a map will name (R-BA1 3.4), are builds like
+ * map's part of a mod, and the per-object units a map will name (each the closure of one placed object), are builds like
  * any other, so units that share files share their blobs.
  *
  * Every R2 object a row names has its own random key, written once. A row that stops naming an
@@ -40,7 +40,8 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS build (id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, ' +
     'salt TEXT NOT NULL, created INTEGER NOT NULL, claims INTEGER NOT NULL DEFAULT 0, scripts INTEGER NOT NULL DEFAULT 0, ' +
     'slice_of TEXT, state TEXT NOT NULL, archive TEXT, skeleton TEXT NOT NULL, modjson TEXT NOT NULL, ' +
-    'entries INTEGER NOT NULL, broken INTEGER NOT NULL DEFAULT 0, packed INTEGER, plan TEXT, replan INTEGER NOT NULL DEFAULT 0)',
+    'entries INTEGER NOT NULL, broken INTEGER NOT NULL DEFAULT 0, packed INTEGER, plan TEXT, replan INTEGER NOT NULL DEFAULT 0, ' +
+    'vrefs INTEGER NOT NULL DEFAULT 0)',   // vrefs: the mod listings naming the build as a unit
   'CREATE INDEX IF NOT EXISTS build_unclaimed ON build (claims, created)',
   'CREATE INDEX IF NOT EXISTS build_state ON build (state, created)',
   /* A blob: one file's bytes, once, after the ZIP local header (hdr, hlen bytes) it had in the
@@ -70,7 +71,14 @@ const SCHEMA = [
     'PRIMARY KEY (build, request))',
   /* R2 objects no row names any more, to delete. */
   'CREATE TABLE IF NOT EXISTS dead (object TEXT PRIMARY KEY, queued INTEGER NOT NULL)',
-];
+  /* Distribution (mods_dist.js): an author's signing key, bound to the SnapMap author ID. */
+  'CREATE TABLE IF NOT EXISTS author (id TEXT PRIMARY KEY, key TEXT NOT NULL, bound INTEGER NOT NULL, updated INTEGER NOT NULL)',
+  /* A mod's listing: a permanent ID owned by one author, its current version only (seq), what
+   * installing the mod gives; it claims its units (build.vrefs) as a published map does. removed:
+   * 1 by moderation, 2 by its author. */
+  'CREATE TABLE IF NOT EXISTS listing (id TEXT PRIMARY KEY, author TEXT NOT NULL, name TEXT NOT NULL, seq INTEGER NOT NULL, ' +
+    'size INTEGER NOT NULL, removed INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, updated INTEGER NOT NULL)',
+  'CREATE TABLE IF NOT EXISTS listing_unit (mod TEXT NOT NULL, object TEXT NOT NULL, unit TEXT NOT NULL, PRIMARY KEY (mod, object)) WITHOUT ROWID',];
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
@@ -99,6 +107,12 @@ export function initializeRegistry(storage) {
   const tables = new Set(rows(storage, "SELECT name FROM sqlite_master WHERE type = 'table'").map(row => row.name));
   for (const table of RETIRED_TABLES) if (tables.has(table)) storage.sql.exec('DROP TABLE IF EXISTS ' + table);
   for (const statement of SCHEMA) storage.sql.exec(statement);
+  /* Columns added after a table was first made (an index from an earlier form of this store). */
+  for (const [table, column, type] of [['build', 'plan', 'TEXT'], ['build', 'replan', 'INTEGER NOT NULL DEFAULT 0'],
+    ['build', 'vrefs', 'INTEGER NOT NULL DEFAULT 0']]) {
+    const have = new Set(rows(storage, 'PRAGMA table_info(' + table + ')').map(r => r.name));
+    if (!have.has(column)) storage.sql.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + type);
+  }
   storage.sql.exec("INSERT INTO store_meta (key, value) VALUES ('schema', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     String(SCHEMA_VERSION));
 }
@@ -141,7 +155,7 @@ export function unnamedObjects(storage, keys) {
 /* The row of one build, or null. */
 export function buildRow(storage, hash) {
   if (!HEX64.test(hash)) throw new Error('bad build');
-  return one(storage, 'SELECT id, size, salt, created, claims, scripts, slice_of, state, archive, skeleton, modjson, entries, broken ' +
+  return one(storage, 'SELECT id, size, salt, created, claims, vrefs, scripts, slice_of, state, archive, skeleton, modjson, entries, broken ' +
     'FROM build WHERE hash = ?', hash);
 }
 
@@ -196,19 +210,19 @@ export function registerBuild(storage, b, now) {
   checkObject(archive);
   checkObject(skeleton);
   return storage.transactionSync(() => {
-    const kept = one(storage, 'SELECT id, size, claims, archive, skeleton, modjson, broken FROM build WHERE hash = ?', hash);
+    const kept = one(storage, 'SELECT id, size, claims, vrefs, archive, skeleton, modjson, broken FROM build WHERE hash = ?', hash);
     if (kept) {
       const same = kept.size === size && kept.modjson === modjson;
-      if (!kept.broken && (kept.claims > 0 || same)) {
-        if (kept.claims <= 0) storage.sql.exec('UPDATE build SET created = max(created, ?) WHERE id = ?', now, kept.id);
+      if (!kept.broken && (kept.claims > 0 || kept.vrefs > 0 || same)) {
+        if (kept.claims <= 0 && kept.vrefs <= 0) storage.sql.exec('UPDATE build SET created = max(created, ?) WHERE id = ?', now, kept.id);
         return { created: false, replaced: false, discard: bury(storage, [archive, skeleton], now) };
       }
     }
     const discard = kept ? dropBuild(storage, kept, now) : [];
-    /* The claims name the hash, so they stay with it. */
-    storage.sql.exec('INSERT INTO build (hash, size, salt, created, claims, scripts, slice_of, state, archive, skeleton, modjson, entries) ' +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, 'staged', ?, ?, ?, ?)",
-      hash, size, salt, now, kept ? kept.claims : 0, scripts, sliceOf, archive, skeleton, modjson, entries);
+    /* The claims and the mod versions name the hash, so they stay with it. */
+    storage.sql.exec('INSERT INTO build (hash, size, salt, created, claims, vrefs, scripts, slice_of, state, archive, skeleton, modjson, entries) ' +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?, ?, ?, ?)",
+      hash, size, salt, now, kept ? kept.claims : 0, kept ? kept.vrefs : 0, scripts, sliceOf, archive, skeleton, modjson, entries);
     return { created: true, replaced: !!kept, discard };
   });
 }
@@ -216,7 +230,7 @@ export function registerBuild(storage, b, now) {
 /* An idempotent re-upload of a stored build: restarts its upload window. */
 export function touchBuild(storage, hash, now) {
   if (!HEX64.test(hash)) throw new Error('bad build');
-  storage.sql.exec('UPDATE build SET created = max(created, ?) WHERE hash = ? AND claims <= 0', now, hash);
+  storage.sql.exec('UPDATE build SET created = max(created, ?) WHERE hash = ? AND claims <= 0 AND vrefs <= 0', now, hash);
   return true;
 }
 
@@ -226,8 +240,8 @@ export function touchBuild(storage, hash, now) {
  * one row. */
 export function buildServed(storage, hash, now) {
   if (!HEX64.test(hash)) return null;
-  const row = one(storage, 'SELECT size, created, claims, scripts, state, archive, skeleton, broken, slice_of, plan FROM build WHERE hash = ?', hash);
-  if (!row || row.broken || !(row.claims > 0 || now - row.created < CLAIM_WINDOW_MS)) return null;
+  const row = one(storage, 'SELECT size, created, claims, vrefs, scripts, state, archive, skeleton, broken, slice_of, plan FROM build WHERE hash = ?', hash);
+  if (!row || row.broken || !(row.claims > 0 || row.vrefs > 0 || now - row.created < CLAIM_WINDOW_MS)) return null;
   if (row.state === 'packed' && !row.plan) return null;
   return { size: row.size, scripts: row.scripts, state: row.state, archive: row.archive, skeleton: row.skeleton, sliceOf: row.slice_of,
     plan: row.state === 'packed' ? JSON.parse(row.plan) : null };
@@ -383,8 +397,8 @@ function claimedBuilds(storage, id) {
 function dropUnclaimed(storage, hashes, now) {
   const queued = [];
   for (const hash of new Set(hashes)) {
-    const row = one(storage, 'SELECT id, claims, archive, skeleton FROM build WHERE hash = ?', hash);
-    if (!row || row.claims > 0) continue;
+    const row = one(storage, 'SELECT id, claims, vrefs, archive, skeleton FROM build WHERE hash = ?', hash);
+    if (!row || row.claims > 0 || row.vrefs > 0) continue;
     queued.push(...dropBuild(storage, row, now));
     storage.sql.exec('DELETE FROM asked WHERE build = ?', hash);
   }
@@ -446,7 +460,7 @@ export function releaseClaim(storage, id, presentedHash, now = 0) {
  * served and cannot be claimed before their objects are deleted. Returns { builds, objects }. */
 export function purgeBuilds(storage, now, limit) {
   return storage.transactionSync(() => {
-    const doomed = rows(storage, 'SELECT id, hash, archive, skeleton, claims FROM build WHERE claims <= 0 AND created < ? ORDER BY created LIMIT ?',
+    const doomed = rows(storage, 'SELECT id, hash, archive, skeleton, claims FROM build WHERE claims <= 0 AND vrefs <= 0 AND created < ? ORDER BY created LIMIT ?',
       now - CLAIM_WINDOW_MS, limit);
     const objects = [];
     for (const row of doomed) {
@@ -559,13 +573,14 @@ export function abandonUploads(storage, now, limit, all = false) {
  * would take one archive each (the saving of content addressing). */
 export function storeStats(storage) {
   const b = one(storage, "SELECT count(*) AS builds, coalesce(sum(size), 0) AS archived, coalesce(sum(state = 'staged'), 0) AS staged, " +
-    'coalesce(sum(broken), 0) AS broken, coalesce(sum(claims > 0), 0) AS claimed FROM build');
+    'coalesce(sum(broken), 0) AS broken, coalesce(sum(claims > 0 OR vrefs > 0), 0) AS claimed FROM build');
   const blobs = one(storage, 'SELECT count(*) AS blobs, coalesce(sum(size), 0) AS bytes FROM blob');
   const packs = one(storage, 'SELECT count(*) AS packs, coalesce(sum(size), 0) AS bytes, coalesce(sum(live_bytes), 0) AS live FROM pack');
   const staged = one(storage, "SELECT coalesce(sum(size), 0) AS bytes FROM build WHERE state = 'staged'");
   return { builds: b.builds, claimed: b.claimed, staged: b.staged, broken: b.broken, archiveBytes: b.archived,
     blobs: blobs.blobs, blobBytes: blobs.bytes, packs: packs.packs, packBytes: packs.bytes, stagedBytes: staged.bytes,
-    claims: one(storage, 'SELECT count(*) AS n FROM claim').n, dead: one(storage, 'SELECT count(*) AS n FROM dead').n };
+    claims: one(storage, 'SELECT count(*) AS n FROM claim').n, dead: one(storage, 'SELECT count(*) AS n FROM dead').n,
+    authors: one(storage, 'SELECT count(*) AS n FROM author').n, listings: one(storage, 'SELECT count(*) AS n FROM listing WHERE removed = 0').n };
 }
 
 /* Empties the whole index. Only the maintainer's reset route calls it, after deleting
@@ -573,10 +588,115 @@ export function storeStats(storage) {
 export function resetRegistry(storage) {
   return storage.transactionSync(() => {
     const counts = {};
-    for (const table of ['claim_build', 'claim', 'build_blob', 'blob', 'pack', 'build', 'upload', 'asked', 'dead']) {
+    for (const table of ['claim_build', 'claim', 'build_blob', 'blob', 'pack', 'build', 'upload', 'asked', 'dead',
+      'listing_unit', 'listing', 'author']) {
       counts[table] = one(storage, 'SELECT count(*) AS n FROM ' + table).n;
       storage.sql.exec('DELETE FROM ' + table);
     }
     return counts;
+  });
+}
+
+
+/* ---------------- distribution: authors and mod listings ---------------- */
+
+/* The design the owner set (2026-11-17): a published map claims the units it places by hash
+ * (claimBuilds above: a claim per map, naming units) and keeps them until its own author
+ * republishes; a mod's listing is what installing the mod gives, its current version only,
+ * published by the mod's author with a signed request, and it claims its version's units too.
+ * A unit is kept while any map or listing claims it and deleted when none does. */
+const OBJECT_TEXT = /^[^\u0000-\u001f\u007f]+$/;
+
+export function authorRow(storage, id) {
+  return one(storage, 'SELECT id, key, bound, updated FROM author WHERE id = ?', id);
+}
+
+/* Binds `key` to the author ID. The caller has checked the request is signed by `key` and, for
+ * `rotate`, also by the key already bound. A wiped or new ID binds at once. Returns { bound:
+ * 'new' | 'same' | 'rotated' } or { conflict: true } (another key holds the ID). */
+export function bindAuthor(storage, id, key, rotate, now) {
+  return storage.transactionSync(() => {
+    const row = authorRow(storage, id);
+    if (!row) {
+      storage.sql.exec('INSERT INTO author (id, key, bound, updated) VALUES (?, ?, ?, ?)', id, key, now, now);
+      return { bound: 'new' };
+    }
+    if (row.key === key) return { bound: 'same' };
+    if (!rotate) return { conflict: true };
+    storage.sql.exec('UPDATE author SET key = ?, updated = ? WHERE id = ?', key, now, id);
+    return { bound: 'rotated' };
+  });
+}
+
+function listingUnits(storage, mod) {
+  return rows(storage, 'SELECT object, unit FROM listing_unit WHERE mod = ? ORDER BY object', mod);
+}
+
+/* The listing stops claiming its units; units nothing claims any more are dropped. Returns the
+ * objects queued. */
+function endListing(storage, mod, now) {
+  const units = [...new Set(listingUnits(storage, mod).map(r => r.unit))];
+  for (const unit of units) storage.sql.exec('UPDATE build SET vrefs = vrefs - 1 WHERE hash = ?', unit);
+  storage.sql.exec('DELETE FROM listing_unit WHERE mod = ?', mod);
+  return dropUnclaimed(storage, units, now);
+}
+
+/* A mod's listing as the product reads it to install the mod: its author, name, version number,
+ * size and its units by placed object. Null when unknown. */
+export function listingOf(storage, id) {
+  const mod = one(storage, 'SELECT id, author, name, seq, size, removed, updated FROM listing WHERE id = ?', id);
+  if (!mod) return null;
+  return { mod: mod.id, author: mod.author, name: mod.name, seq: mod.seq, size: mod.size, removed: mod.removed, updated: mod.updated,
+    objects: Object.fromEntries(listingUnits(storage, id).map(r => [r.object, r.unit])) };
+}
+
+/* What publishing `objects` (placed object -> unit hash) as version `seq` of the listing `mod`
+ * would do, and (unless `check`) does it: the listing moves to the new version and claims its
+ * units; the units only the old version named lose that claim. The caller has checked the
+ * request is signed by `author`'s bound key. Returns { forbidden } (another author's mod),
+ * { removed } (moderation), { stale: current seq }, { missing: [units the store lacks] }, or
+ * { seq, size, newBytes, created, discard }. */
+export function publishListing(storage, { mod, author, name, seq, objects, check = false }, now) {
+  const entries = Object.entries(objects || {});
+  if (!entries.length || !entries.every(([o, u]) => OBJECT_TEXT.test(o) && HEX64.test(u)) || !Number.isSafeInteger(seq) || seq < 1) {
+    throw new Error('bad listing');
+  }
+  return storage.transactionSync(() => {
+    const row = one(storage, 'SELECT author, seq, removed FROM listing WHERE id = ?', mod);
+    if (row && row.author !== author) return { forbidden: true };
+    if (row && row.removed === 1) return { removed: 1 };
+    const expected = row ? row.seq + 1 : 1;
+    if (seq !== expected) return { stale: row ? row.seq : 0 };
+    const units = [...new Set(entries.map(([, u]) => u))];
+    const missing = [];
+    let size = 0, newBytes = 0;
+    for (const unit of units) {
+      const b = one(storage, 'SELECT size, claims, vrefs, broken FROM build WHERE hash = ?', unit);
+      if (!b || b.broken) { missing.push(unit); continue; }
+      size += b.size;
+      if (b.claims <= 0 && b.vrefs <= 0) newBytes += b.size;
+    }
+    if (missing.length) return { missing };
+    if (check) return { seq, size, newBytes, check: true };
+    for (const unit of units) storage.sql.exec('UPDATE build SET vrefs = vrefs + 1 WHERE hash = ?', unit);
+    const discard = row ? endListing(storage, mod, now) : [];
+    if (row) storage.sql.exec('UPDATE listing SET seq = ?, name = ?, size = ?, removed = 0, updated = ? WHERE id = ?', seq, name, size, now, mod);
+    else storage.sql.exec('INSERT INTO listing (id, author, name, seq, size, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?)', mod, author, name, seq, size, now, now);
+    for (const [object, unit] of entries) storage.sql.exec('INSERT INTO listing_unit (mod, object, unit) VALUES (?, ?, ?)', mod, object, unit);
+    return { seq, size, newBytes, created: !row, discard };
+  });
+}
+
+/* The author deletes the listing (installing the mod is no longer offered; published maps keep
+ * their units), or moderation removes it (`force`). The ID stays its author's: an author's own
+ * deletion may publish again. Returns { deleted, discard }. */
+export function deleteListing(storage, mod, author, now, force = false) {
+  return storage.transactionSync(() => {
+    const row = one(storage, 'SELECT author FROM listing WHERE id = ?', mod);
+    if (!row) return { notFound: true };
+    if (!force && row.author !== author) return { forbidden: true };
+    const discard = endListing(storage, mod, now);
+    storage.sql.exec('UPDATE listing SET removed = ?, size = 0, updated = ? WHERE id = ?', force ? 1 : 2, now, mod);
+    return { deleted: true, discard };
   });
 }
