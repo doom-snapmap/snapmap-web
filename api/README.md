@@ -57,310 +57,110 @@ read back a generated build of that size in parts through the runtime.
 | `PATCH` or `DELETE /community/comments/:id` | Edit or delete an owned comment. |
 | `POST /community/reactions`, `/community/preview` | React to content or preview Markdown. |
 | `POST /media/upload`, `GET /media/:key` | Store or retrieve a screenshot. |
-| `PUT`, `GET` or `HEAD /mods/build/:hash` | Store or fetch one mod build's archive by its build hash. |
-| `POST /mods/build/:hash/parts`, `PUT /mods/build/:hash/parts/:n`, `POST /mods/build/:hash/complete` | Upload an archive larger than one request in parts. |
-| `POST /mods/claim`, `/mods/release` | Hold or drop an anonymous claim that keeps builds served. |
-| `POST /mods/build/:hash/asked`, `POST /mods/asked` | Report a file a published map's part of a mod lacked, or list those reports for a claim's holder. |
-| `POST /mods/author/:id/key`, `GET /mods/author/:id` | Bind or read a map author's signing key, which signs claims. |
-| `POST /mods/admin/reset`, `/mods/admin/stats` | Empty the mod store, or say what it holds (maintainer only, hidden without its secret). |
+| `POST /mods/units` | Whether the store holds each of up to 4,096 units: held, missing or removed. |
+| `GET /mods/unit/:hash`, `/mods/unit/:hash/archive`, `/mods/blob/:sha` | A unit's manifest, a ZIP of the unit, or one file's bytes (ranges resume). |
+| `POST /mods/unit/:hash/begin`, `PUT /mods/unit/:hash/archive`, `POST /mods/unit/:hash/complete` | Upload a unit: its manifest, then the files the store lacks (signed). |
+| `POST /mods/blob/:sha/parts`, `PUT /mods/blob/:sha/parts/:n`, `POST /mods/blob/:sha/complete` | Upload one file larger than one request in parts. |
+| `POST /mods/map/claim`, `/mods/map/release` | Make, replace or release a published map's claim of units (signed, with its secret and rev). |
+| `POST /mods/unit/:hash/asked`, `POST /mods/asked` | Report a file a unit lacked, or list those reports for a publisher's claims. |
+| `POST /mods/admin/reset`, `/stats`, `/block`, `/unblock`, `/release-ref`, `/forget-key` | The maintainer's actions (hidden without their secret). |
 
-Community write routes require a session; `/mods/*` routes are anonymous. Read `worker.js` for payloads, limits and the
-additional ownership or moderator checks on editing and deletion.
+Community write routes require a session; `/mods/*` reads are anonymous and its writes are signed by a publishing key.
+Read `worker.js` for payloads, limits and the additional ownership or moderator checks on editing and deletion.
 
 ## Mod store
 
-The Snapmap+ product uploads one archive for each mod a published map declares and
-downloads it by its build hash when a player loads that map. Nothing is browsable and
-nothing needs an account, session, OAuth or Turnstile: an object is reachable only by
-its hash. Native clients send no `Origin`, so these routes need no CORS header; browser
-callers get the same allowlist as the rest of the API.
+The store is internal to map publishing (the product's `SPEC-distribution` section 10). It holds the units published
+maps claim and nothing else: no mod listings and no old versions. A unit is the closure of one placed object, named by
+the SHA-256 of its canonical manifest (`unit.json`, written by the product's `modunit.c`); its files are blobs, named
+by their SHA-256. Nothing is browsable: every object is reachable only by hash, and any player fetches any unit by hash
+with no account, session, OAuth or Turnstile. Native clients send no `Origin`, so these routes need no CORS header;
+browser callers get the same allowlist as the rest of the API.
 
-The store imposes no limit of its own (the owner's decision 26 of the 1.0 program): not
-on a build's size, its number of files, one file's size, its scripts, the builds one
-claim names, a published item's reference or the length of a name or path. The per-address
-hourly limits below are not limits on a mod: they protect the bucket and its bill from
-abuse, and a single upload of any size is always admitted. What remains is what the
-platform and the archive form fix, stated here as theirs:
+### Publishing a map
 
-- one request body: 100 MB (100,000,000 bytes) on the Free and Pro plans (200 MB
-  Business, 500 MB Enterprise). An archive up to `ONE_REQUEST_MAX`, 95 MiB
-  (99,614,720 bytes), may go in one `PUT`; a client sends a larger one, and any it wants
-  sent faster, in parts of `PART_SIZE`, 16 MiB, several at once and in any order (both in
-  `api/mods_store.js`). The product sends up to 32 MiB in one request and the rest in parts,
-  four at a time;
-- R2 multipart uploads: every part but the last of one size, at least 5 MiB, at most
-  10,000 parts, an object of at most 5 TiB;
-- none from the archive form: the product writes ZIP64 records exactly where a value does
-  not fit a classic field (an entry of 4 GiB or more, an offset past 4 GiB, 65,535 entries
-  or more), and the check reads them; a size past 2^53 bytes (about 9 PB) is past what a
-  JavaScript number counts exactly and is refused as the platform's;
-- CPU time: a Worker request has 10 ms on the Workers Free plan (30 s by default on Paid,
-  configurable to 5 minutes), a Durable Object request 30 s on either. So the Worker never
-  touches an archive's bytes: an upload is piped to R2 by the runtime, the check runs in the
-  build's own `MOD_CHECKER` Durable Object: an archive over 256 MiB is walked and hashed in parts
-  of about 512 MiB by further checker objects, four at a time, each a request of its own, and its
-  central directory is checked against them; the packer runs on the registry's alarm, and a download
-  pipes ranges of R2 objects to the response. Walking and hashing cost 1.3 to 7.8 ms of CPU a
-  megabyte on staging, so what a request's CPU bounds is one file of a mod, about 3.8 GB on Free at
-  the slowest rate measured and ten times that on Paid; memory grows with the number of entries and
-  the size of `mod.json` (about 5 MB for 20,000 files), never with the archive's size.
+The product (`modcache.c` `sh_cache_publish_unit`, `modnet.c`) publishes each unit the map's rows name that the store
+lacks: `POST /mods/unit/<hash>/begin` with the manifest's bytes answers `{held: true}` or the blobs the store lacks,
+`{missing, partSize, oneRequest}`; `PUT /mods/unit/<hash>/archive` sends them as stored ZIPs of `unit.json` and those
+files, each at most 95 MiB (several archives may carry one unit; the answer says `{held}` or what is still missing); a
+file larger than one request goes in parts of `PART_SIZE` (16 MiB) through `/mods/blob/<sha>/parts`; `complete` says
+whether the store now holds every file. Then `POST /mods/map/claim {ref, units, secret, rev}` names the map's units:
+`rev` 1 makes a claim, a known `(ref, secret)` is replaced only at its stored rev + 1 (409 `{rev}` otherwise), every unit
+must be held (409 `{missing}`), and a unit moderation removed is left out (451 `{removed}`; the claim holds the rest).
+`POST /mods/map/release {ref, secret, rev}` removes it. Whoever authored a mod, a publisher uploads the units the store
+lacks: every byte is checked, so authorship does not matter for map content.
 
-### Storage: every file once
+### Publishing keys and names
 
-Storage is content addressed (`api/mods_pack.js`, `api/mods_registry_store.js`). A file's
-bytes are a blob, named by their SHA-256 and stored once in the `MODS` bucket however many
-builds carry them: every revision of a mod, every map's part of it, and the per-object units a
-map will name (each the closure of one placed object, stored as a build of its own) share the
-blobs they have in common. Blobs live in packs, `pack/<32 hex>`, R2 objects of about 16 MiB holding blobs
-end to end, each after the ZIP local header it had in the archive that brought it; a large file
-is a pack of its own. A build is its skeleton, `skel/<hash>/<32 hex>` (the archive's own bytes
-that are not file contents: each entry's local header, the central directory and end
-records, which blob each entry holds, and for part of a build what it left out of its source)
-and the blobs it names. The store serves the uploaded archive byte for byte, its size, CRCs and
-offsets the uploader's own: a build whose entries have the headers its blobs were stored with
-(every later build of the same mod, every part of it) is a few long ranges of its packs; a build
-holding the same bytes under another name gets its own headers from its skeleton around them.
+Every write carries `X-Publisher-Key` (base64url of the 65-byte P-256 point, unpadded), `X-Publisher-Name` (the
+SnapMap account name, percent-encoded, absent when signed out) and `X-Publisher-Signature` (base64url of the 64-byte
+IEEE P1363 signature) over `"snapmap-plus/request/1\n" + method + "\n" + path + "\n" + name header + "\n"` and the
+lowercase hex SHA-256 of the body (`api/mods_publisher.js`). The key names the publisher for the limits and binds the
+account name first come, first served (NFC, case-folded): a free name binds to the presenting key, which releases its
+earlier name; a name another key holds is not bound and the request goes on. The key authorises nothing about content:
+claims are authorised by their secrets (the product derives each map's secret from the key, so a key backup restores
+them). An archive's signature is checked by the checker Durable Object over the archive's SHA-256 in the same pass that
+checks its files; a part of a blob carries none (it is bound to its signed session and checked whole at the signed
+completion). No clock takes part: claims are ordered by `rev`, and an upload is idempotent.
 
-An upload is stored as an archive, `build/<hash>/<32 hex>`, checked, and served from it at
-once (staged). The registry's alarm then packs it: the blobs the store does not hold yet are
-copied into new packs in a few ranged reads of the archive, the build's serving plan (the
-ranges, in order) is recorded in its row, and the archive is deleted. Two Tyrant revisions of
-232 MB and 237 MB uploaded on staging were stored in 265 MB of packs.
+### Storage and the deletion delay
 
-The single `ModRegistry` Durable Object (binding `MOD_REGISTRY`, object name `registry`)
-indexes builds (`build`: hash, size, salt, upload time, claim count, script count, `slice_of`
-for part of a build, staged or packed, its archive, skeleton and plan, whether it is broken),
-blobs (`blob`: SHA-256, size, pack, offset, header, the count of builds naming it), packs
-(`pack`: object, size, live blobs), which blobs each build names (`build_blob`), the claims
-(`claim`, `claim_build`, by build hash), what players asked of a part of a build (`asked`), the
-uploads in parts in progress (`upload`) and the objects to delete (`dead`), so claim counts,
-references, releases, purges and repairs are decided in one transaction. Every object a row
-names has its own random key, written once; a row that stops naming an object queues it on
-`dead` in the same transaction, so an object is never deleted while a row names it and never
-left behind when a request fails. The tables of the earlier stores (the blob and bundle store,
-then one archive per build) are dropped when the object starts.
+`api/mods_registry_store.js` holds the index in one `MOD_REGISTRY` Durable Object (SQLite): units (`pending` from their
+begin, `held` once every blob is), the blobs each names, blobs, packs, map claims and the units they name, publishers and
+their names, asked paths (at most 256 per unit), blocked units and the delete queue. A checked unit archive is kept as
+it is as a pack (`pack/<unit>/<32 hex>`): each file's bytes follow the local header it arrived with, so no bytes move
+again, and a file the store holds already is dead space in the later pack. A blob uploaded in parts is a pack of one
+(`blob/<sha>/<32 hex>`). The archive route writes `unit.json` and the unit's files in the order their bytes lie in the
+packs, reusing each stored header, so one answer reads a few long R2 ranges whatever the unit's file count
+(`api/mods_pack.js`).
 
-`ModChecker` (binding `MOD_CHECKER`, one object per build hash) holds nothing: it reads an
-uploaded archive back from R2 through the check, writes the skeleton and registers the build.
+A unit no claim names records the store-clock time it lost its last claim (or its begin) and is kept and served for
+24 hours (`DELETE_DELAY_MS`), so a download in flight never meets a delete; a claim within the delay clears it; the daily
+cron then deletes it, the blobs no other unit names, and packs no blob row points into. A begin of an unclaimed unit
+restarts its delay. An object found missing marks its blobs broken (missing to every unit) until an upload repairs
+them. The daily purge also aborts uploads in parts untouched for a day and deletes objects no row names once a day old.
 
-### The check
+### The checks
 
-An archive is the mod's folder as the product's `modsync.c` and `modzip.c` write it: a
-ZIP of stored entries (method 0) holding `mod.json`, the whole file, and
-`assets/<request>` for every carried file its builder block lists, nothing else (part of a
-build also carries `source.json`, below), where the request is the block's `path` below
-`assets/` in lower case. Stock pointers never upload: the player's own game holds them.
-There is no mod version anywhere: an author's `version` key is an unknown author key and is
-ignored, and no response or index row carries one. Every entry's bytes are hashed, and every
-carried file must have the SHA-256 and size its `mod.json` gives it, so a blob holds the bytes
-its name says before any build can name it. The Worker does not recompute the build hash (the
-canonical manifest the product derives from `mod.json`) or check what a file provides; the
-client checks both, and every file again, before it installs anything. Every other rule
-mirrors the product's own reader of a built `mod.json` and of a downloaded archive
-(`modbundle.c`, `modsync.c`), so the store refuses what the product would refuse and nothing it
-writes; `tests/contract/client.json` records what the product writes and the contract test
-checks the store against it.
+Every byte is checked in a `MOD_CHECKER` Durable Object, so the Worker only moves bytes: a begin's manifest against its
+hash and the shape of `SPEC-distribution` 3.4 (exact keys, format 1, paths lower case, relative, inside one of a mod's
+folders, files sorted and unique, one size per SHA-256); an archive's every entry stored, hashed and its CRC-32
+computed, `unit.json` equal to the begun manifest, every other entry a file the manifest lists with its SHA-256, size
+and CRC-32, nothing else, a Lua script source text; a blob in parts by its SHA-256. A refused upload is deleted. The
+store imposes no limit of its own on a unit (its size, its files, one file's size, the units one claim names); what
+remains is one request body (100 MB on the Free and Pro plans, hence 95 MiB archives and parts) and R2's multipart rules.
 
-The check, the same for one request and for parts, refuses with 422 and the first cause, one
-sentence: a body that is not a ZIP; bytes before, between or after the entries; a split
-archive; a ZIP64 marker without its value in a ZIP64 extra field, a ZIP64 extra field no marker
-asks for, or ZIP64 end records that disagree with the end record or each other; a compressed or
-encrypted entry; an entry without its sizes in the local header or without a name; two entries
-of one name; a central directory or end record that disagrees with the entries; a `mod.json`
-that is missing, not UTF-8 JSON, without a `snapmap-plus` block of `format` 2 holding only the
-keys the builder writes, without a valid `salt` (`[a-z][a-z0-9]{7}`), recording a failed build
-(`cause`), or whose `build` is not the path hash; an author part with a retired key (`id`,
-`key`, `shadows`, `stock`, `scope`, `player`, `extends`, `replaces`, `legacy`, `composes`,
-`schema`, `hud.schema`), `files`, `bundle` or `build` at its top level, no name, an author that
-is not text, `strings` or `hud` that is not an object, or `requirements` outside the builder's
-shape; a file entry other than `path`, `sha256`, `size` (at least 1 byte), `provides` and
-`needs`, or a pointer entry other than the builder's; two entries of one request; an entry
-outside `assets/` or not in lower case; a request path with a `..`, `.` or empty segment, a
-backslash, a segment starting with a space or ending in a dot or space, or a character outside
-`a-z 0-9 . _ - $ + @ ~ ( )` and space; an engine file (`decls/renderprogs/`, `generated/glsl/`,
-`generated/glslbinaries/`, `vulkan_pipelines.bin`); a type the builder does not carry (it
-carries `CARRIED_EXTENSIONS`, `.baas_<class>`, a `.bswf` only under `generated/swf/`, a `.mega2`
-only as `virtualtextures/mods/<salt>/<family>_sq<1..16>.mega2`, never a `_vmtr` family); an
-entry `files` does not list, a listed file the archive lacks, an entry whose size differs from
-`files`, or a file whose bytes are not the SHA-256 `files` gives it.
+### Limits
 
-Scripts: a build may carry Lua source at `assets/mods/<salt>/scripts/**/*.lua` (its own
-salt), any number and any size. These are safety rules, not limits, and stay: the upload
-is refused when a `.lua` file lies anywhere else, starts with the bytecode signature
-`ESC L u a`, holds a NUL byte or is not UTF-8. The block's `scripts` member must be
-present exactly when the archive carries scripts, with their count in `scripts.files`
-(every `.lua` entry, `lib/` included). The index records that count, every answer about
-a build says it, and the product asks before it downloads, so a player is told a map's
-mods include scripts before anything arrives.
+Per hour, every write counts against its publishing key (the SHA-256 of the key names its quota object) and against the
+client's hashed address (`WRITE_QUOTAS`): 1,024 begins, 64 GiB soft (an upload of any size is admitted while the hour is
+below it), 256 claim calls; reads count 20,000 per address and fail open. A refusal is 429 with `Retry-After`. The
+numbers are the owner's to set (D45).
 
-### Routes
+### Moderation and the maintainer
 
-- `PUT /mods/build/:hash` needs `Content-Type: application/zip` (else 415) and
-  `Content-Length` (else 411), at most one part (else 413, "An archive over 95 MiB goes
-  to the mod store in parts."). The body is piped to a new object and then checked; a refused
-  archive has that object deleted, and since no row names it, it is never served in between.
-  A new build answers 201 `{"build","size","scripts"}`. A build a claim names, whole, answers
-  200 with the stored size after the body is read and discarded. A build nothing claims is
-  taken again: the same archive (size and `mod.json`) answers 200 and restarts its upload
-  window, and any other archive that passes the check replaces it (201), so an archive that
-  names a hash it is not cannot hold that hash against the real one. A claimed build is never
-  replaced, unless an object it needs went missing (below).
-- Uploads in parts:
-  - `POST /mods/build/:hash/parts` `{"size"}` starts an upload of that build at that size
-    (an R2 multipart upload to a new object) and answers 201
-    `{"build","size","partSize","parts","have":[]}`; while one is in progress it answers
-    200 with the parts the store holds in `have`, so a client that lost its connection
-    resumes without sending a part again. A build a claim names, whole, answers 200
-    `{"build","size","scripts","stored":true}`, and the client sends nothing.
-  - `PUT /mods/build/:hash/parts/:n` with `Content-Type: application/octet-stream`,
-    `Content-Length` and `X-Build-Size: <archive size>` stores part n (1-based), exactly
-    `partSize` bytes but the last. 200 answers the session as above; 404 when no upload
-    of that build and size is in progress; 400 for a part number outside the upload or a
-    part of the wrong length. A part sent again replaces the earlier copy.
-  - `POST /mods/build/:hash/complete` `{"size"}` joins the parts into the archive's
-    object and checks it before anything is registered: 201 `{"build","size","scripts"}`
-    when it passes, 422 with the cause (the object deleted) when it does not, 409 with
-    `have` while parts are missing, 409 "upload the build again" when the parts did not
-    join (the upload is dropped), 404 when no upload is in progress. The answer waits for
-    the check, about fifteen seconds a gigabyte.
-  - An upload nobody touched for a day is aborted by the daily cron and what it stored
-    is deleted; R2's own lifecycle also aborts multipart uploads left for seven days.
-- `GET` and `HEAD /mods/build/:hash` return the archive with `Content-Type:
-  application/zip`, its `Content-Length`, `X-Mod-Scripts` (the build's script files),
-  `Accept-Ranges: bytes`, `Cache-Control: public, max-age=31536000, immutable`,
-  `X-Content-Type-Options: nosniff`, a `default-src 'none'; sandbox` CSP,
-  `Content-Disposition: attachment` and the hash as the ETag. A `GET` with one
-  `Range: bytes=a-b` (or `a-`, or `-n`) answers 206 with `Content-Range`, so a download that
-  broke off resumes where it stopped; `If-Range` with another ETag, or several ranges, gets
-  the whole archive; a range past the end is 416. The bytes stream from R2 and never sit in
-  the Worker.
-- Part of a build. A published map that uses only some files of a mod uploads just those, as a
-  build of its own (the product's `modslice.c`): its `mod.json` author part names the build it was
-  cut from in `"slice-of"` (64 lowercase hex), and its archive carries, beside `mod.json`, that
-  build's canonical manifest as `source.json`. The check refuses such an archive, with 422 and one
-  sentence, when it has no `source.json`, when the SHA-256 of `source.json` is not `slice-of`, when
-  `source.json` is not UTF-8 JSON listing files, or is another mod (its `id` is not the salt), or when
-  a carried file is not a file of `source.json` with the same `path`, SHA-256 (`blob`) and size. A
-  `source.json` in a whole build is refused. Otherwise part of a build is stored, served, claimed,
-  released and purged like any build; two maps that need the same files of one build name one hash,
-  and parts of one build share every blob they have in common, `source.json` included. The
-  per-object units a map will name are stored the same way and need no change here as long as each
-  is an archive named by its hash; a claim names them like builds.
-- `POST /mods/build/:hash/asked` takes `{"request","by"}`: a player's game asked a stored part of a
-  build for `request`, which the part lacks; `by` is the name of what asked, or empty, and is cut to
-  256 characters. Only a file the part's `source.json` lists and the part does not carry is kept, so
-  an author never sees a report about anything else and a part never holds more reports than files
-  it left out. Kept once per build and request (the first `by`), deleted with the build. 204; 404
-  for a build the store does not hold or a whole one; 400 for any other request. Nothing about the
-  player is sent or kept. It counts as a claim call.
-- `POST /mods/asked` takes `{"claim","secret"}` and returns 200 `{"asked":[{"build","salt","request",
-  "by"}]}` for every build that claim names, so the published map's author sees what players lacked
-  and publishes again to carry it; 403 for a wrong secret, 404 for an unknown claim. It counts as a
-  read.
-- `POST /mods/claim` takes `{"ref","builds":[hash...]}` (any non-empty ref of text, any
-  number of stored builds; the body is bounded only by the platform's request size) and
-  returns 201 `{"claim","secret"}`. The registry stores only the SHA-256 of the secret.
-  One claim stands for one published item: sending `{"ref","builds","secret"}` with an
-  existing claim's ref and secret replaces that claim's build set and returns 200 with
-  the same claim and secret; a secret matching no claim for that ref is 403. Builds the store
-  does not hold, or holds broken, are 409 `{"error","missing"}`: the client uploads them again.
-- `POST /mods/release` takes `{"claim","secret"}` and returns 204; a wrong secret is 403
-  and an unknown claim 404.
+The admin routes take `Authorization: Bearer <MODS_ADMIN_TOKEN>` and answer 404 while the secret is unset:
 
-Every refusal on a `/mods` route is JSON `{"error"}` (with `missing` on 409 and
-`blocked` on 451) whose `error` is one plain sentence of printable ASCII, which the product
-shows as it is.
+- `POST /mods/admin/block {unit, reason}` removes a unit: it is no longer served, its blobs no other unit names are
+  deleted, claims stop naming it, and its hash is blocked, so no upload can put it back (status `removed`, 451).
+  Players who already have it keep it. `POST /mods/admin/unblock {unit}` lifts the block.
+- `POST /mods/admin/release-ref {ref}` releases every claim of one published item, at its publisher's request (D42).
+- `POST /mods/admin/forget-key {key}` deletes a publishing key's record and its name binding, freeing the name for the
+  next key that presents it; the key's claims stay, since their secrets authorise them (SPEC 4.4).
+- `POST /mods/admin/stats` says what the store holds; `POST /mods/admin/reset` deletes every object in the `MODS`
+  bucket, aborts every upload in parts and empties the index.
 
-A build is served while a claim names it or for one hour after its upload (the time a
-publish needs between its uploads and its claim); otherwise it answers 404. Deletion is
-immediate: the release that drops a build's last claim (`POST /mods/release`, or a
-re-claim that leaves the build out) removes it from the index and deletes its archive or
-skeleton at once, with every blob no other build names and every pack left without a live
-blob. The daily cron (`[triggers]` in `wrangler.toml`) collects uploads nothing ever
-claimed, past the hour, uploads in parts abandoned for a day, whatever the delete queue still
-holds, and objects in the bucket that no row names and that are more than a day old (200,000
-listed a run, continuing where the last run stopped), and wakes the packer.
+The retired routes of earlier stores (`/mods/build/*`, `/mods/bundle/*`, `/mods/author/*`, `/mods/claim`,
+`/mods/release`, `/mods/missing`, `PUT /mods/blob/<sha>`) answer 410 with "This version of Snapmap+ cannot use the mod
+store; run the Snapmap+ installer to update."
 
-Repair. A request that finds an object a build needs missing from R2 (a pack, an archive or a
-skeleton) marks that build, and every build that needs the same pack, broken: they answer 404
-from then on, a claim naming them is 409, and the store no longer says it holds them, so the
-author's next publish uploads the build again; the upload replaces the broken build in place
-(its claims stay), the packer rewrites the missing blobs, and every other build that needed them
-is planned again and served once nothing of it is missing.
+### Workers Free and Paid
 
-Hourly limits per client address and UTC hour: 1,024 new uploads, 64 GiB of declared upload
-bytes, 20,000 reads (`GET` or `HEAD`) and 256 claim, release or report calls. The byte limit is
-soft: an upload is admitted while the hour's bytes are below it, whatever its own size, so a
-build of any size can always be published. A build the store already holds under a claim costs
-nothing, and a publish in parts counts as one upload of its whole size, when its upload starts:
-its parts, its resumes and its completion count nothing, so a large publish is never stopped
-half way. Exhaustion returns 429 with `Retry-After`. The counters live in `WRITE_QUOTAS` objects
-named `mods-address:<digest>`; the raw address is never stored. IPv6 addresses are keyed by their
-/64. Set the optional secret `MODS_ADDRESS_KEY` to make the digest an HMAC that cannot be
-reversed by enumerating addresses. Uploads and claims fail closed with 503 when quota storage
-is unavailable; reads fail open.
-
-Takedown is the `MODS_BLOCKED` variable in `wrangler.toml`: a JSON array of build
-hashes. Edit it and redeploy. Every route answers a blocked hash with 451 and the
-blocked list, including claims and uploads in parts that name it. A malformed list
-fails closed with 503.
-
-Before the first deployment of this configuration, create the bucket with
-`npx wrangler r2 bucket create snapmap-plus-mods`. The `v2-mod-registry` migration
-provisions `ModRegistry` and `v3-mod-checker` provisions `ModChecker`; the index makes its
-tables itself when the object starts. Deploy the bindings and code together.
-
-### Units, published maps and their authors
-
-The store is internal to map publishing (the owner's distribution design, 2026-11-17): content
-arrives when a map is published and leaves when no published map claims it; authors never touch
-the store directly. A published map names, for each mod it uses, the units it places: a unit is
-the content-addressed closure of one placed object (its files and pointers), uploaded, checked,
-packed and served exactly as a build, at `/mods/unit/:hash` (the same routes as
-`/mods/build/:hash`). Any publisher may upload a unit the store lacks; the check proves every file
-is the bytes its `mod.json` names. Units that hold the same files share them, so a unit used by
-many maps, or by many units, is stored once. A map's claim (`POST /mods/claim`, one per map,
-`builds` naming its units) keeps them until the map's own author republishes it (the claim's units
-replaced) or unpublishes it (`POST /mods/release`); a unit no map claims is deleted at once.
-
-A claim is signed by the map's author: the SnapMap author ID with an Ed25519 key the product
-creates.
-
-- `POST /mods/author/:id/key` `{"author","key","time"}` binds an Ed25519 public key (32 bytes,
-  base64url) to the author ID. The body is signed by that key, its signature in `X-Mod-Signature`
-  (base64url). A new or unknown ID binds at once (201); the same key again is 200; another key for a
-  bound ID also needs `X-Mod-Previous-Signature`, the bound key's signature of the same body, else
-  409. `GET /mods/author/:id` returns `{"author","key","bound"}`.
-- `POST /mods/claim` and `POST /mods/release` signed: the same bodies with `"author"` and `"time"`
-  (milliseconds, within 15 minutes) added and `X-Mod-Signature` over the body; no secret is needed.
-  A map's signed claim can be replaced or released only by a request its author signed (403
-  otherwise), and no secret-only request can change it. A claim made with its secret alone (today's
-  client) works as before.
-
-Mod listings (installing a mod from the store, the current version only) are a later feature: a
-build's `vrefs` column is kept for them, so a listing can later claim units the way a map does
-without a change to how units are stored.
-### Emptying the mod store, and what it holds
-
-`POST /mods/admin/reset` aborts every upload in parts, deletes every object in the `MODS`
-bucket (packs, skeletons, archives and anything an earlier store left) and empties the index.
-`POST /mods/admin/stats` returns what the store holds: builds (claimed, staged, broken), their
-archives' bytes, blobs and their bytes, packs and their bytes, claims and the delete queue. Both
-exist only while the `MODS_ADMIN_TOKEN` secret is set and need `Authorization: Bearer <token>`;
-otherwise they answer 404 or 403. The reset returns
-`{"deleted":{"builds","other"},"index":{"claim_build","claim","build_blob","blob","pack","build","upload","asked","dead"}}`,
-the counts removed (`builds` counts the objects this store writes, `other` everything else).
-Every published map's claim goes with it, so it is for the wipe before a release, not for
-routine use. After the Worker with this store is deployed, from this directory:
-
-```text
-npx wrangler secret put MODS_ADMIN_TOKEN
-curl -X POST -H "Authorization: Bearer <token>" https://api.snapmapplus.com/mods/admin/reset
-npx wrangler secret delete MODS_ADMIN_TOKEN
-```
-
-The first command asks for the token (use a long random one); the last hides the routes
-again.
+The store runs on both from the same code: the Worker only moves bytes and the work that reads every byte runs in
+Durable Objects (30 s of CPU a request on either plan). `wrangler.toml` and `wrangler.staging.toml` carry the switch to
+Paid as two commented lines (`[limits]`, `cpu_ms = 300000`); docs/services.md, "Switching to Workers Paid", says what
+changes. Measured on staging (2026-11-18): a 194.6 MiB unit's archive answered in 9 s with 104 ms of Worker CPU, every
+other route under 7 ms.
 
 ### Staging
 

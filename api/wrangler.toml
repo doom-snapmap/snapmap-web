@@ -30,13 +30,13 @@ class_name = "CommunityQuota"
 tag = "v1-write-quotas"
 new_sqlite_classes = ["CommunityQuota"]
 
-# Anonymous mod store: one archive per build, each its own object build/<hash>/<id>, served through /mods/*.
+# The mod store (README.md, "Mod store"): units of published maps, their files once each in packs, served through /mods/*.
 # Provisioned by the maintainer (npx wrangler r2 bucket create snapmap-plus-mods).
 [[r2_buckets]]
 bucket_name = "snapmap-plus-mods"
 binding = "MODS"
 
-# Single index of stored builds, their anonymous claims and the uploads in parts in progress.
+# Single index of units, blobs, packs, map claims, publishers and the uploads in parts in progress.
 [[durable_objects.bindings]]
 name = "MOD_REGISTRY"
 class_name = "ModRegistry"
@@ -44,7 +44,7 @@ class_name = "ModRegistry"
 [[migrations]]
 tag = "v2-mod-registry"
 new_sqlite_classes = ["ModRegistry"]
-# The check of each build's uploads, one object per build hash (mods_registry.js ModChecker): it
+# The check of each unit's uploads, one object per unit hash (mods_registry.js ModChecker): it
 # reads an upload back and hashes every byte, which needs a Durable Object's CPU time.
 [[durable_objects.bindings]]
 name = "MOD_CHECKER"
@@ -54,9 +54,8 @@ class_name = "ModChecker"
 tag = "v3-mod-checker"
 new_sqlite_classes = ["ModChecker"]
 
-# Takedown list: JSON array of blocked build hashes; edit and redeploy to block.
 
-# Daily purge of builds nothing ever claimed, older than one hour, and of uploads in parts abandoned
-# for a day (scheduled handler in worker.js); a released build is deleted at its release, not here.
+# Daily purge of units no claim has named for 24 hours, of uploads in parts abandoned
+# for a day and of objects no row names (scheduled handler in worker.js).
 [triggers]
 crons = ["23 4 * * *"]

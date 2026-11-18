@@ -42,7 +42,7 @@ class_name = "ModRegistry"
 [[migrations]]
 tag = "v2-mod-registry"
 new_sqlite_classes = ["ModRegistry"]
-# The check of each build's uploads, one object per build hash (mods_registry.js ModChecker): it
+# The check of each unit's uploads, one object per unit hash (mods_registry.js ModChecker): it
 # reads an upload back and hashes every byte, which needs a Durable Object's CPU time.
 [[durable_objects.bindings]]
 name = "MOD_CHECKER"
