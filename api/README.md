@@ -100,8 +100,9 @@ platform and the archive form fix, stated here as theirs:
   build's own `MOD_CHECKER` Durable Object: an archive over 256 MiB is walked and hashed in parts
   of about 512 MiB by further checker objects, four at a time, each a request of its own, and its
   central directory is checked against them; the packer runs on the registry's alarm, and a download
-  pipes ranges of R2 objects to the response. Reading and hashing cost about 3 to 4 ms of CPU a
-  megabyte, so one file of a mod up to about 7 GB fits a request on Free; memory grows with the number of entries and
+  pipes ranges of R2 objects to the response. Walking and hashing cost 1.3 to 7.8 ms of CPU a
+  megabyte on staging, so what a request's CPU bounds is one file of a mod, about 3.8 GB on Free at
+  the slowest rate measured and ten times that on Paid; memory grows with the number of entries and
   the size of `mod.json` (about 5 MB for 20,000 files), never with the archive's size.
 
 ### Storage: every file once
