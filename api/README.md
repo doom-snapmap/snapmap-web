@@ -97,10 +97,11 @@ platform and the archive form fix, stated here as theirs:
   JavaScript number counts exactly and is refused as the platform's;
 - CPU time: a Worker request has 10 ms on the Workers Free plan (30 s by default on Paid,
   configurable to 5 minutes), a Durable Object request 30 s on either. So the Worker never
-  touches an archive's bytes: an upload is piped to R2 by the runtime, the check that reads
-  and hashes every byte runs in the build's own `MOD_CHECKER` Durable Object, the packer runs
-  on the registry's alarm, and a download pipes ranges of R2 objects to the response. A 4.25 GiB
-  build is checked in about a minute of wall time; memory grows with the number of entries and
+  touches an archive's bytes: an upload is piped to R2 by the runtime, the check runs in the
+  build's own `MOD_CHECKER` Durable Object, which walks the archive and has its files hashed by
+  further checker objects, 512 MiB each and four at a time (hashing is about 6 ms of CPU a
+  megabyte), the packer runs on the registry's alarm, and a download pipes ranges of R2 objects
+  to the response. One file of a mod up to about 4.5 GB is hashed in one request; memory grows with the number of entries and
   the size of `mod.json` (about 5 MB for 20,000 files), never with the archive's size.
 
 ### Storage: every file once

@@ -8,7 +8,7 @@ import {
   authorRow, bindAuthor, listingOf, publishListing, deleteListing,
 } from './mods_registry_store.js';
 import { packStaged } from './mods_pack.js';
-import { checkArchive, leftOutIn } from './mods_store.js';
+import { checkArchive, hashParts, leftOutIn } from './mods_store.js';
 
 const ALARM_BUDGET_MS = 10 * 60 * 1000;   // one alarm packs for at most this long (the platform allows 15 minutes)
 
@@ -94,8 +94,10 @@ export class ModRegistry extends DurableObject {
 /* The check of one build's uploads (named "check:<hash>"): reads an uploaded archive back from R2,
  * hashes every byte and judges it (mods_store.js checkArchive), so the Worker that took the
  * upload only moved its bytes. A Durable Object has the CPU time a large archive needs on any
- * plan; one per build keeps the checks of different builds apart. It keeps no state. */
+ * plan; one per build keeps the checks of different builds apart, and the hashing of a large archive
+ * is shared among several, named "hash:<hash>:<n>". It keeps no state. */
 export class ModChecker extends DurableObject {
   check(hash, object, size) { return checkArchive(this.env, hash, object, size); }
+  hashParts(object, start, length, parts) { return hashParts(this.env, object, start, length, parts); }
   leftOut(skeleton, request) { return leftOutIn(this.env, skeleton, request); }
 }

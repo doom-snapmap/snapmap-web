@@ -38,7 +38,10 @@ const PURGE_ROUNDS = 20;
 const SWEEP_PAGES = 200;                  // 200,000 objects listed per daily run
 const ORPHAN_AGE_MS = 86400000;          // an object no row names is deleted once it is a day old
 const ASKER_SHOWN = 256;
-const READ_CHUNK = 1024 * 1024;               // the check reads an archive back this much at a time                 // what asked for a missing file, as its author is shown it
+const READ_CHUNK = 1024 * 1024;               // the check reads an archive back this much at a time
+const HASH_JOB = 512 * 1024 * 1024;            // the bytes one checker hashes (a larger file alone)
+const HASH_WORKERS = 4;                        // checkers hashing one archive at once
+const EMPTY_SHA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';                 // what asked for a missing file, as its author is shown it
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
@@ -413,7 +416,10 @@ class ScriptCheck {
  * its marker, so there is no bound on an entry's size, the archive's size or the number of
  * entries. error is the first refusal; once set, later bytes are ignored. */
 export class ArchiveWalker {
-  constructor(length) {
+  /* options.hash false: entries are not hashed as they pass (the check hashes them elsewhere,
+   * hashParts); mod.json and source.json are captured either way. */
+  constructor(length, options = {}) {
+    this.hashEntries = options.hash !== false;
     this.length = length;
     this.at = 0;                     // bytes consumed
     this.state = 'sig';              // sig, local, localVar, data, central, centralVar, end, endComment, trail
@@ -462,7 +468,7 @@ export class ArchiveWalker {
 
   /* Every entry's SHA-256, once the archive has ended: entry.sha set on each. */
   async digests() {
-    await Promise.all(this.entries.map(async entry => { entry.sha = await entry.digest; }));
+    await Promise.all(this.entries.map(async entry => { if (entry.digest) entry.sha = await entry.digest; }));
   }
 
   fail(cause) {
@@ -486,7 +492,7 @@ export class ArchiveWalker {
         const entry = this.current, bytes = chunk.subarray(i, i + n);
         if (entry.data) { entry.data.set(bytes, entry.captured); entry.captured += n; }
         else if (entry.check) entry.check.push(bytes);
-        this.hashing = entry.hash.write(bytes);
+        if (entry.hash) this.hashing = entry.hash.write(bytes);
         this.remaining -= n; i += n; this.at += n;
         if (this.remaining === 0) this.endEntry();
         continue;
@@ -504,7 +510,7 @@ export class ArchiveWalker {
   endEntry() {
     const entry = this.current;
     if (entry.check) { entry.scriptFault = entry.check.fault(); entry.check = null; }
-    entry.digest = entry.hash.end();
+    entry.digest = entry.hash ? entry.hash.end() : null;
     entry.hash = null;
     this.current = null;
     this.toSig();
@@ -589,7 +595,7 @@ export class ArchiveWalker {
       if (this.names.has(name)) return this.fail('The archive holds ' + shown(name) + ' twice.');
       entry.name = name;
       entry.header = b.slice(0, this.need);
-      entry.hash = new StreamHash();
+      entry.hash = this.hashEntries ? new StreamHash() : null;
       this.names.add(name);
       this.entries.push(entry);
       if (name === 'mod.json') {
@@ -925,8 +931,8 @@ function requirementsOk(req) {
 
 /* Runs a stream through a fresh walker to its end. Returns the walker, with error set when
  * the archive is refused, or null when the stream broke off. */
-async function walkStream(stream, length) {
-  const walker = new ArchiveWalker(length);
+async function walkStream(stream, length, options = {}) {
+  const walker = new ArchiveWalker(length, options);
   let reader, byob = true;
   /* A byte stream (R2's) is read a megabyte at a time: the check's own work is per chunk, so a
    * gigabyte costs a thousand steps, not hundreds of thousands. */
@@ -1013,11 +1019,22 @@ export async function checkArchive(env, hash, object, size) {
     await deleteObjects(env, [object]);
     return { status: 400, body: { error: 'The upload ended before the whole archive arrived; try again.' } };
   }
-  const walker = await walkStream(obj.body, size);
+  /* The walk judges the form and keeps mod.json; the bytes of the files are hashed by a few
+   * checkers at once, each a part of the archive (hashParts), so no one request spends more CPU
+   * than the platform gives it, whatever the archive's size. */
+  const walker = await walkStream(obj.body, size, { hash: false });
   if (!walker) {
     await deleteObjects(env, [object]);
     console.log('mods: an archive could not be read back');
     return { status: 503, body: { error: UNAVAILABLE } };
+  }
+  if (!walker.error) {
+    try { await hashEntries(env, hash, object, walker.entries); }
+    catch (error) {
+      await deleteObjects(env, [object]);
+      console.log('mods: hashing an archive failed:', String(error && error.message).slice(0, 200));
+      return { status: 503, body: { error: UNAVAILABLE } };
+    }
   }
   const verdict = await verdictOf(walker, hash);
   if (verdict.refusal) {
@@ -1026,6 +1043,84 @@ export async function checkArchive(env, hash, object, size) {
   }
   if (verdict.sliceOf) verdict.leftOut = leftOutOfSource(walker);
   return register(env, hash, size, verdict, object, walker);
+}
+
+/* Every entry's SHA-256: mod.json and source.json from the bytes the walk kept, the rest in jobs
+ * of up to HASH_JOB bytes of the archive (a larger file alone), HASH_WORKERS at a time, each in a
+ * checker Durable Object of its own when the binding is there. */
+async function hashEntries(env, hash, object, entries) {
+  const jobs = [];
+  let job = null;
+  for (const e of entries) {
+    if (e.data) { e.sha = await sha256Hex(e.data); continue; }
+    const at = e.offset + e.header.byteLength;
+    if (!job || (job.bytes > 0 && job.bytes + e.size > HASH_JOB)) { job = { start: at, end: at, bytes: 0, entries: [] }; jobs.push(job); }
+    job.entries.push(e);
+    job.bytes += e.size;
+    job.end = at + e.size;
+  }
+  let next = 0;
+  const run = async () => {
+    for (let k; (k = next++) < jobs.length;) {
+      const j = jobs[k];
+      const parts = j.entries.map(e => [e.offset + e.header.byteLength - j.start, e.size]);
+      const shas = env.MOD_CHECKER
+        ? await env.MOD_CHECKER.get(env.MOD_CHECKER.idFromName('hash:' + hash + ':' + k)).hashParts(object, j.start, j.end - j.start, parts)
+        : await hashParts(env, object, j.start, j.end - j.start, parts);
+      j.entries.forEach((e, i) => { e.sha = shas[i]; });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(HASH_WORKERS, jobs.length) }, run));
+}
+
+/* The SHA-256 of each part ([offset, length], sorted, within [start, start + length)) of an
+ * object, read once, a megabyte at a time. */
+export async function hashParts(env, object, start, length, parts) {
+  const out = [];
+  let k = 0, pos = 0, h = null;
+  const begin = () => {
+    while (k < parts.length && parts[k][1] === 0) { out.push(EMPTY_SHA); k++; }
+    h = k < parts.length ? new StreamHash() : null;
+  };
+  begin();
+  if (!h) return out;
+  const obj = await env.MODS.get(object, { range: { offset: start, length } });
+  if (!obj) throw new Error('the archive is gone');
+  const feed = async chunk => {
+    let i = 0;
+    while (i < chunk.byteLength && k < parts.length) {
+      const [off, len] = parts[k];
+      if (pos + i < off) { i = Math.min(chunk.byteLength, off - pos); continue; }
+      const take = Math.min(chunk.byteLength - i, off + len - (pos + i));
+      await h.write(chunk.subarray(i, i + take));
+      i += take;
+      if (pos + i === off + len) { out.push(await h.end()); k++; begin(); }
+    }
+    pos += chunk.byteLength;
+  };
+  let reader, byob = true;
+  try { reader = obj.body.getReader({ mode: 'byob' }); } catch { byob = false; reader = obj.body.getReader(); }
+  try {
+    for (;;) {
+      if (!byob) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        await feed(value);
+        continue;
+      }
+      let buf = new Uint8Array(READ_CHUNK), filled = 0, done = false;
+      while (filled < buf.byteLength) {
+        const r = await reader.read(new Uint8Array(buf.buffer, filled, buf.byteLength - filled));
+        if (r.done) { done = true; if (r.value) buf = new Uint8Array(r.value.buffer); break; }
+        buf = new Uint8Array(r.value.buffer);
+        filled += r.value.byteLength;
+      }
+      if (filled) await feed(buf.subarray(0, filled));
+      if (done) break;
+    }
+  } finally { reader.releaseLock(); }
+  if (out.length !== parts.length) throw new Error('the archive ended before its last file');
+  return out;
 }
 
 /* The requests of the build a part was cut from that the part does not carry. */
