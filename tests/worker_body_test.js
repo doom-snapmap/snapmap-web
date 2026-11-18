@@ -22,7 +22,8 @@ function streamed(chunks, declared) {
   return { body, headers, pulls: () => pulls, cancelled: () => cancelled };
 }
 
-const modsSource = fs.readFileSync(path.join(root, 'api/mods_store.js'), 'utf8').replace('./request_body.js', bodyURL);
+const packURL = 'data:text/javascript;base64,' + Buffer.from(fs.readFileSync(path.join(root, 'api/mods_pack.js'), 'utf8')).toString('base64');
+const modsSource = fs.readFileSync(path.join(root, 'api/mods_store.js'), 'utf8').replace('./request_body.js', bodyURL).replace('./mods_pack.js', packURL);
 const modsURL = 'data:text/javascript;base64,' + Buffer.from(modsSource).toString('base64');
 
 async function loadWorker(name) {
@@ -30,7 +31,7 @@ async function loadWorker(name) {
   source = source.replace('./request_body.js', bodyURL).replace('./mods_store.js', modsURL);
   // The Cloudflare-only class exports are exercised by worker_runtime_test.js.
   source = source.replace("export { CommunityQuota } from './quota.js';", '');
-  source = source.replace("export { ModRegistry } from './mods_registry.js';", '');
+  source = source.replace("export { ModRegistry, ModChecker } from './mods_registry.js';", '');
   return (await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'))).default;
 }
 

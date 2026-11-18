@@ -7,7 +7,7 @@
 import { RequestError, readBody, readJsonObject } from './request_body.js';
 import { handleMods, purgeMods } from './mods_store.js';
 export { CommunityQuota } from './quota.js';
-export { ModRegistry } from './mods_registry.js';
+export { ModRegistry, ModChecker } from './mods_registry.js';
 
 const REPO_OWNER = 'doom-snapmap';
 const REPO_NAME = 'snapmap-web';

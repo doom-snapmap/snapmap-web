@@ -10,13 +10,15 @@ const root = path.join(__dirname, '..');
 const dataURL = source => 'data:text/javascript;base64,' + Buffer.from(source).toString('base64');
 const read = name => fs.readFileSync(path.join(root, 'api', name), 'utf8');
 const bodyURL = dataURL(read('request_body.js'));
-const modsURL = dataURL(read('mods_store.js').replace('./request_body.js', bodyURL));
+const packURL = dataURL(read('mods_pack.js'));
+const modsURL = dataURL(read('mods_store.js').replace('./request_body.js', bodyURL).replace('./mods_pack.js', packURL));
 const workerURL = dataURL(read('worker.js').replace('./request_body.js', bodyURL).replace('./mods_store.js', modsURL)
-  .replace("export { CommunityQuota } from './quota.js';", '').replace("export { ModRegistry } from './mods_registry.js';", ''));
+  .replace("export { CommunityQuota } from './quota.js';", '').replace("export { ModRegistry, ModChecker } from './mods_registry.js';", ''));
 const modsModule = import(modsURL);
 const workerModule = import(workerURL);
 const quotaModule = import(dataURL(read('quota_store.js')));
-const registryModule = import(dataURL(read('mods_registry_store.js')));
+const registryModule = import(dataURL(read('mods_registry_store.js').replace('./mods_pack.js', packURL)));
+const packModule = import(packURL);
 
 const DAY = 86400000;
 const HOUR = 3600000;
@@ -38,6 +40,20 @@ if (!globalThis.FixedLengthStream) {
         flush() { if (seen !== length) throw new Error('stream shorter than declared'); },
       });
       this.readable.declaredLength = length;
+    }
+  };
+}
+
+/* workerd's streaming SHA-256 (crypto.DigestStream), over node:crypto. */
+if (!globalThis.crypto.DigestStream) {
+  globalThis.crypto.DigestStream = class DigestStream extends WritableStream {
+    constructor(algorithm) {
+      assert.equal(algorithm, 'SHA-256');
+      const h = createHash('sha256');
+      let resolve;
+      const digest = new Promise(r => { resolve = r; });
+      super({ write(chunk) { h.update(chunk); }, close() { const d = h.digest(); resolve(d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength)); } });
+      this.digest = digest;
     }
   };
 }
@@ -129,13 +145,19 @@ function memoryBucket() {
     },
     resumeMultipartUpload(key, uploadId) { return multipart(key, uploadId); },
     async head(key) { log.push(['head', key]); const o = objects.get(key); return o ? meta(key, o) : null; },
-    async get(key) {
+    async get(key, options = {}) {
       log.push(['get', key]);
       const o = objects.get(key);
       if (!o) return null;
       let cancelled = false;
-      const body = new ReadableStream({ start(c) { c.enqueue(o.bytes); c.close(); }, cancel() { cancelled = true; } });
-      return { ...meta(key, o), body, get cancelled() { return cancelled; } };
+      const r = options.range;
+      const bytes = r ? o.bytes.subarray(r.offset, r.offset + (r.length ?? o.bytes.byteLength - r.offset)) : o.bytes;
+      /* Several chunks, as R2 streams them, so readers that join or cut chunks are exercised. */
+      const body = new ReadableStream({ start(c) {
+        for (let at = 0; at < bytes.byteLength; at += 65536) c.enqueue(bytes.slice(at, at + 65536));
+        c.close();
+      }, cancel() { cancelled = true; } });
+      return { ...meta(key, o), body, arrayBuffer: async () => bytes.slice().buffer, get cancelled() { return cancelled; } };
     },
     async put(key, value, options = {}) {
       log.push(['put', key]);
@@ -153,7 +175,7 @@ function memoryBucket() {
       const start = cursor ? Number(cursor) : 0;
       const page = keys.slice(start, start + limit);
       const truncated = start + limit < keys.length;
-      return { objects: page.map(key => ({ key })), truncated, cursor: truncated ? String(start + limit) : undefined };
+      return { objects: page.map(key => ({ key, uploaded: objects.get(key).uploaded })), truncated, cursor: truncated ? String(start + limit) : undefined };
     },
   };
 }
@@ -161,6 +183,7 @@ function memoryBucket() {
 async function modsEnv(extra = {}) {
   const { initializeQuota, consumeModQuota } = await quotaModule;
   const registry = await registryModule;
+  const pack = await packModule;
   const clock = { offset: 0, now() { return Date.now() + this.offset; } };
   const quotaObjects = new Map();
   const names = [];
@@ -183,19 +206,29 @@ async function modsEnv(extra = {}) {
       get() {
         return {
           buildRow: async hash => registry.buildRow(storage, hash),
-          registerBuild: async (hash, size, salt, object, scripts, sliceOf) =>
-            registry.registerBuild(storage, hash, size, salt, object, scripts, clock.now(), sliceOf ?? null),
+          registerBuild: async b => registry.registerBuild(storage, b, clock.now()),
           touchBuild: async hash => registry.touchBuild(storage, hash, clock.now()),
           buildServed: async hash => registry.buildServed(storage, hash, clock.now()),
+          markBroken: async (hash, object) => registry.markBroken(storage, hash, object, clock.now()),
           claim: async request => registry.claimBuilds(storage, request, clock.now()),
-          release: async (id, hash) => registry.releaseClaim(storage, id, hash),
+          release: async (id, hash) => registry.releaseClaim(storage, id, hash, clock.now()),
+          deadObjects: async limit => registry.deadObjects(storage, limit),
+          forgetDead: async objects => registry.forgetDead(storage, objects),
+          unnamedObjects: async keys => registry.unnamedObjects(storage, keys),
+          stats: async () => registry.storeStats(storage),
+          kick: async () => true,
+          meta: async (key, value) => {
+            if (value !== undefined) { storage.sql.exec('INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value)); return true; }
+            return storage.sql.exec('SELECT value FROM store_meta WHERE key = ?', key).toArray()[0]?.value ?? null;
+          },
+          packNow: async () => pack.packStaged(env, bound(), Date.now() + 60000),
           purgeBuilds: async limit => registry.purgeBuilds(storage, clock.now(), limit),
           uploadSession: async (hash, size) => registry.uploadSession(storage, hash, size),
           openUpload: async request => registry.openUpload(storage, request, clock.now()),
           recordPart: async (hash, size, upload, part, etag) => registry.recordPart(storage, hash, size, upload, part, etag, clock.now()),
           closeUpload: async (hash, size, upload) => registry.closeUpload(storage, hash, size, upload),
           abandonUploads: async (limit, all) => registry.abandonUploads(storage, clock.now(), limit, all),
-          reportAsked: async (hash, request, asker) => registry.reportAsked(storage, hash, request, asker, clock.now()),
+          reportAsked: async (hash, request, asker, known) => registry.reportAsked(storage, hash, request, asker, clock.now(), known),
           listAsked: async (id, hash) => registry.listAsked(storage, id, hash),
           reset: async () => registry.resetRegistry(storage),
         };
@@ -203,6 +236,19 @@ async function modsEnv(extra = {}) {
     },
     ...extra,
   };
+  /* What the Durable Object binds for its packer (mods_registry.js boundRegistry). */
+  const bound = () => ({
+    nextStaged: () => registry.nextStaged(storage),
+    stagedCount: () => registry.stagedCount(storage),
+    reserveBlobs: (id, skeleton, shas) => registry.reserveBlobs(storage, id, skeleton, shas),
+    commitPacks: (id, skeleton, packs, skel) => registry.commitPacks(storage, id, skeleton, packs, clock.now(), skel),
+    nextReplan: () => registry.nextReplan(storage),
+    replan: (id, skeleton, skel) => registry.replanBuild(storage, id, skeleton, skel),
+    markBroken: (hash, object) => registry.markBroken(storage, hash, object, clock.now()),
+    deadObjects: limit => registry.deadObjects(storage, limit),
+    forgetDead: objects => registry.forgetDead(storage, objects),
+  });
+  env.pack = () => pack.packStaged(env, bound(), Date.now() + 60000);
   return env;
 }
 
@@ -376,21 +422,24 @@ async function stored(env, ...archives) {
 }
 
 function row(env, hash) {
-  return env.registryStorage.sql.exec('SELECT size, salt, created, claims, scripts FROM mod_build WHERE hash = ?', hash).toArray()[0];
+  return env.registryStorage.sql.exec('SELECT size, salt, created, claims, scripts, state, broken FROM build WHERE hash = ?', hash).toArray()[0];
 }
 
-/* The object that serves a build (its own key, build/<hash>/<random>), or undefined. */
+/* The archive that serves a staged build (its own key, build/<hash>/<random>), or undefined. */
 function objectOf(env, hash) {
-  return env.registryStorage.sql.exec('SELECT object FROM mod_build WHERE hash = ?', hash).toArray()[0]?.object;
+  return env.registryStorage.sql.exec('SELECT archive FROM build WHERE hash = ?', hash).toArray()[0]?.archive ?? undefined;
 }
 
-function bytesOf(env, hash) {
-  return Buffer.from(env.MODS.objects.get(objectOf(env, hash)).bytes);
+/* The stored archive's bytes, as a GET serves them. */
+async function bytesOf(env, hash) {
+  const response = await fetchWorker(env, call('GET', '/mods/build/' + hash));
+  assert.equal(response.status, 200);
+  return Buffer.from(await response.arrayBuffer());
 }
 
-/* Every object stored for a build, registered or not. */
+/* Every object stored for a build (its archive and skeleton), registered or not. */
 function objectsFor(env, hash) {
-  return [...env.MODS.objects.keys()].filter(key => key.startsWith('build/' + hash));
+  return [...env.MODS.objects.keys()].filter(key => key.startsWith('build/' + hash) || key.startsWith('skel/' + hash));
 }
 
 /* ---------------- upload and serving ---------------- */
@@ -402,15 +451,41 @@ test('an archive PUT creates the build, a re-PUT is idempotent, GET and HEAD ser
   assert.equal(created.status, 201);
   assert.deepEqual(await created.json(), { build: archive.hash, size: archive.bytes.length, scripts: 0 });
   assert.match(objectOf(env, archive.hash), new RegExp('^build/' + archive.hash + '/[0-9a-f]{32}$'));
-  assert.deepEqual([...env.MODS.objects.keys()], [objectOf(env, archive.hash)]);
-  assert.deepEqual(bytesOf(env, archive.hash), archive.bytes);
+  const skeleton = [...env.MODS.objects.keys()].find(key => key.startsWith('skel/'));
+  assert.match(skeleton, new RegExp('^skel/' + archive.hash + '/[0-9a-f]{32}$'));
+  assert.deepEqual([...env.MODS.objects.keys()].sort(), [objectOf(env, archive.hash), skeleton].sort());
+  assert.deepEqual(await bytesOf(env, archive.hash), archive.bytes, 'a staged build is served from its archive');
   assert.equal(row(env, archive.hash).salt, SALT);
   assert.equal(row(env, archive.hash).size, archive.bytes.length);
+  assert.equal(row(env, archive.hash).state, 'staged');
 
+  /* The same archive again: checked, found the same, and its new objects deleted. */
   const again = await put(env, archive);
   assert.equal(again.status, 200);
   assert.deepEqual(await again.json(), { build: archive.hash, size: archive.bytes.length, scripts: 0 });
-  assert.equal(env.MODS.log.filter(([op]) => op === 'put').length, 1, 'the second body is read and discarded');
+  assert.deepEqual([...env.MODS.objects.keys()].sort(), [objectOf(env, archive.hash), skeleton].sort(), 'the second upload left nothing');
+
+  /* Packed: its files move into a pack, its archive goes, and it is served byte for byte. */
+  assert.deepEqual(await env.pack(), { packed: 1, left: 0 });
+  assert.equal(row(env, archive.hash).state, 'packed');
+  assert.equal(objectOf(env, archive.hash), undefined);
+  const keys = [...env.MODS.objects.keys()].sort();
+  assert.equal(keys.length, 2);
+  assert.match(keys[0], /^pack\/[0-9a-f]{32}$/);
+  assert.equal(keys[1], skeleton);
+  const packed = Buffer.from(env.MODS.objects.get(keys[0]).bytes);
+  assert.deepEqual(packed, archive.bytes.subarray(0, archive.cd),
+    'a pack of a build the store held nothing of is its entries, headers and bytes, end to end');
+  const plan = JSON.parse(env.registryStorage.sql.exec('SELECT plan FROM build WHERE hash = ?', archive.hash).toArray()[0].plan);
+  assert.deepEqual(plan, [[keys[0], 0, archive.cd], [null, plan[1][1], archive.bytes.length - archive.cd]], 'served as one range of the pack and the tail');
+
+  /* A claimed build is never sent again: its body is read and discarded. */
+  const claimed = await fetchWorker(env, postJson('/mods/claim', { ref: 'item', builds: [archive.hash] }));
+  assert.equal(claimed.status, 201);
+  const puts = env.MODS.log.filter(([op]) => op === 'put').length;
+  const third = await put(env, archive);
+  assert.equal(third.status, 200);
+  assert.equal(env.MODS.log.filter(([op]) => op === 'put').length, puts, 'the third body is read and discarded');
 
   const got = await fetchWorker(env, call('GET', '/mods/build/' + archive.hash));
   assert.equal(got.status, 200);
@@ -609,8 +684,8 @@ test('no mod version anywhere: a build without one is stored, and one an author 
   assert.deepEqual(Object.keys(answer).sort(), ['build', 'scripts', 'size']);
   const written = build({ author: { version: '2.0.0-beta' } });
   assert.equal((await put(env, written)).status, 201, 'a hand-written version is an unknown author key');
-  assert.deepEqual(Object.keys(row(env, written.hash)).sort(), ['claims', 'created', 'salt', 'scripts', 'size']);
-  const columns = env.registryStorage.sql.exec("SELECT name FROM pragma_table_info('mod_build')").toArray().map(r => r.name);
+  assert.deepEqual(Object.keys(row(env, written.hash)).sort(), ['broken', 'claims', 'created', 'salt', 'scripts', 'size', 'state']);
+  const columns = env.registryStorage.sql.exec("SELECT name FROM pragma_table_info('build')").toArray().map(r => r.name);
   assert.ok(!columns.includes('version'), 'the index keeps no version');
 });
 
@@ -771,7 +846,7 @@ test('every refusal on every mod route is one plain sentence', async () => {
   for (const request of requests) {
     const response = await fetchWorker(env, request);
     statuses.push(response.status);
-    assert.ok(response.status >= 400, request.method + ' ' + request.url);
+    assert.ok(response.status >= 400, request.method + ' ' + request.url + ' answered ' + response.status);
     assertSentence((await response.json()).error, request.method + ' ' + request.url);
   }
   assert.deepEqual(statuses, [415, 411, 413, 422, 400, 404, 405, 405, 404, 404, 400, 400, 400, 400, 400, 409, 403, 400, 400, 400, 404, 415, 404, 405, 400, 400, 404]);
@@ -793,7 +868,8 @@ test('every refusal on every mod route is one plain sentence', async () => {
   assert.equal(down.status, 503);
   assertSentence((await down.json()).error, 'index down');
   const limitedEnv = await modsEnv();
-  for (let i = 0; i < 64; i++) await fetchWorker(limitedEnv, postJson('/mods/claim', { ref: 'a', builds: ['d'.repeat(64)] }));
+  const { MOD_LIMITS } = await quotaModule;
+  for (let i = 0; i < MOD_LIMITS.mod_claim; i++) await fetchWorker(limitedEnv, postJson('/mods/claim', { ref: 'a', builds: ['d'.repeat(64)] }));
   const limited = await fetchWorker(limitedEnv, postJson('/mods/claim', { ref: 'a', builds: ['d'.repeat(64)] }));
   assert.equal(limited.status, 429);
   assertSentence((await limited.json()).error, 'rate limited');
@@ -832,7 +908,7 @@ test('the retired blob, bundle and missing routes are gone', async () => {
   for (const gone of ['manifestError', 'canonicalText', 'canonicalSource', 'logicalName', 'MAX_BLOB']) assert.equal(mods[gone], undefined, gone);
 });
 
-test('an unclaimed archive of another size is replaced only by an upload that validates; a claimed one never', async () => {
+test('an unclaimed build is replaced by any later upload that passes the checks; a claimed one never', async () => {
   const env = await modsEnv();
   const hash = sha(Buffer.from('contested'));
   const forged = build({ hash, salt: 'zzzzzzzz', files: [{ request: 'generated/decls/entitydef/mods/zzzzzzzz/x.decl', data: 'forged' }] });
@@ -841,23 +917,32 @@ test('an unclaimed archive of another size is replaced only by an upload that va
   assert.equal(row(env, hash).salt, 'zzzzzzzz');
   const broken = damaged(real, b => b.writeUInt16LE(8, 8));
   assert.equal((await put(env, broken)).status, 422);
-  assert.deepEqual(bytesOf(env, hash), forged.bytes, 'a refused upload leaves the stored archive');
-  assert.equal(objectsFor(env, hash).length, 1, 'and stores nothing of its own');
-  const forgedObject = objectOf(env, hash);
+  assert.deepEqual(await bytesOf(env, hash), forged.bytes, 'a refused upload leaves the stored archive');
+  assert.equal(objectsFor(env, hash).length, 2, 'and stores nothing of its own');
+  const forgedObjects = objectsFor(env, hash);
   assert.equal(row(env, hash).salt, 'zzzzzzzz');
   const replaced = await put(env, real);
   assert.equal(replaced.status, 201);
-  assert.deepEqual(bytesOf(env, hash), real.bytes);
-  assert.ok(!env.MODS.objects.has(forgedObject), 'the replaced archive is deleted');
+  assert.deepEqual(await bytesOf(env, hash), real.bytes);
+  for (const key of forgedObjects) assert.ok(!env.MODS.objects.has(key), 'the replaced archive and skeleton are deleted');
   assert.equal(row(env, hash).salt, SALT);
   assert.equal(row(env, hash).size, real.bytes.length);
+
+  /* Of the same size, too: a forged archive cannot hold a hash by matching the real one's size. */
+  const sameSize = build({ hash, files: [{ request: defaultFiles(SALT)[0].request, data: defaultFiles(SALT)[0].data.replace('imp', 'imq') }, defaultFiles(SALT)[1]] });
+  assert.equal(sameSize.bytes.length, real.bytes.length);
+  assert.equal((await put(env, sameSize)).status, 201);
+  assert.deepEqual(await bytesOf(env, hash), sameSize.bytes);
+  assert.equal((await put(env, real)).status, 201);
+  assert.deepEqual(await bytesOf(env, hash), real.bytes, 'the later upload holds the hash');
+  await env.pack();
 
   assert.equal((await fetchWorker(env, postJson('/mods/claim', { ref: 'item-1', builds: [hash] }))).status, 201);
   const later = await put(env, forged);
   assert.equal(later.status, 200);
   assert.deepEqual(await later.json(), { build: hash, size: real.bytes.length, scripts: 0 });
-  assert.deepEqual(bytesOf(env, hash), real.bytes, 'a claimed archive is never replaced');
-  assert.equal(objectsFor(env, hash).length, 1);
+  assert.deepEqual(await bytesOf(env, hash), real.bytes, 'a claimed archive is never replaced');
+  assert.equal(objectsFor(env, hash).length, 1, 'the skeleton; its files are in a pack');
 });
 
 test('blocked hashes are refused with 451 on every route', async () => {
@@ -881,7 +966,8 @@ test('blocked hashes are refused with 451 on every route', async () => {
 test('per-address limits exhaust with 429, use hashed names and leave other addresses alone', async () => {
   const env = await modsEnv();
   const archive = build();
-  for (let i = 0; i < 64; i++) assert.notEqual((await put(env, archive)).status, 429, 'put ' + i);
+  const { MOD_LIMITS } = await quotaModule;
+  for (let i = 0; i < MOD_LIMITS.mod_build_put; i++) assert.notEqual((await put(env, archive)).status, 429, 'put ' + i);
   const limited = await put(env, archive);
   assert.equal(limited.status, 429);
   assert.match(limited.headers.get('Retry-After'), /^\d+$/);
@@ -904,7 +990,7 @@ test('per-address limits exhaust with 429, use hashed names and leave other addr
   assert.equal((await fetchWorker(failing, call('GET', '/mods/build/' + archive.hash))).status, 404, 'reads fail open');
 });
 
-test('the byte quota refuses an upload that would exceed the hourly bytes', async () => {
+test('the byte quota admits any single upload while the hour is under it, then waits for the next hour', async () => {
   const env = await modsEnv();
   const { MOD_LIMITS } = await quotaModule;
   let first = true;
@@ -915,13 +1001,15 @@ test('the byte quota refuses an upload that would exceed the hourly bytes', asyn
     return stub;
   };
   const response = await put(env, build());
-  assert.equal(response.status, 429);
-  assert.equal(env.MODS.objects.size, 0);
+  assert.equal(response.status, 201, 'a build larger than what is left of the hour is still admitted');
+  const next = await put(env, build());
+  assert.equal(next.status, 429, 'the hour has had its bytes');
+  assert.equal(env.MODS.objects.size, 2, 'the first build is stored, the second not');
 });
 
 test('mod quota admits each limit exactly and all-or-nothing across kinds', async () => {
   const { initializeQuota, consumeModQuota, MOD_LIMITS } = await quotaModule;
-  assert.deepEqual({ ...MOD_LIMITS }, { mod_build_put: 64, mod_bytes: 4 * 1024 ** 3, mod_get: 20000, mod_claim: 64 });
+  assert.deepEqual({ ...MOD_LIMITS }, { mod_build_put: 1024, mod_bytes: 64 * 1024 ** 3, mod_get: 20000, mod_claim: 256 });
   const storage = sqliteStorage();
   initializeQuota(storage);
   const hour = 3600000 * 10;
@@ -935,6 +1023,13 @@ test('mod quota admits each limit exactly and all-or-nothing across kinds', asyn
   assert.equal(consumeModQuota(fresh, [['mod_build_put', 1], ['mod_bytes', MOD_LIMITS.mod_bytes]], hour).allowed, true);
   assert.deepEqual(consumeModQuota(fresh, [['mod_build_put', 1], ['mod_bytes', 1]], hour + 1), { allowed: false, kind: 'mod_bytes' });
   assert.equal(fresh.sql.exec("SELECT used FROM mod_quota WHERE kind = 'mod_build_put'").toArray()[0].used, 1, 'refusal spent nothing');
+  /* The byte limit is soft: one byte under it admits an upload of any size. */
+  const soft = sqliteStorage();
+  initializeQuota(soft);
+  assert.equal(consumeModQuota(soft, [['mod_bytes', MOD_LIMITS.mod_bytes - 1]], hour).allowed, true);
+  assert.equal(consumeModQuota(soft, [['mod_bytes', 10 * MOD_LIMITS.mod_bytes]], hour).allowed, true, 'a build of any size');
+  assert.equal(consumeModQuota(soft, [['mod_bytes', 1]], hour).allowed, false);
+  assert.equal(consumeModQuota(soft, [['mod_bytes', 1]], hour + 3600000).allowed, true, 'the next hour');
   for (const bad of [[], [['post', 1]], [['mod_get', 0]], [['mod_get', 1], ['mod_get', 1]], [['mod_get', 1.5]], [['mod_blob_put', 1]]]) {
     assert.throws(() => consumeModQuota(storage, bad, hour));
   }
@@ -952,18 +1047,18 @@ test('addresses normalize to IPv4 or an IPv6 /64', async () => {
 
 test('a publish in parts counts as one upload, so a large publish is never stopped half way', async () => {
   const env = await modsEnv();
-  for (let i = 0; i < 63; i++) assert.notEqual((await put(env, build({ files: [] }))).status, 429, 'put ' + i);
+  const { MOD_LIMITS } = await quotaModule;
+  for (let i = 0; i < MOD_LIMITS.mod_build_put - 1; i++) assert.notEqual((await put(env, build({ files: [] }))).status, 429, 'put ' + i);
   const archive = largeBuild();
   const size = archive.bytes.length;
-  assert.equal((await startParts(env, archive.hash, size)).status, 201, 'the 64th upload');
+  assert.equal((await startParts(env, archive.hash, size)).status, 201, 'the last upload the hour admits');
   assert.equal((await sendPart(env, archive.hash, size, 1, slice(archive.bytes, 1))).status, 200);
   assert.equal((await startParts(env, archive.hash, size)).status, 200, 'a resume counts nothing');
   for (const part of allParts(size).slice(1)) assert.equal((await sendPart(env, archive.hash, size, part, slice(archive.bytes, part))).status, 200);
   assert.equal((await completeParts(env, archive.hash, size)).status, 201);
-  assert.equal((await put(env, build({ files: [] }))).status, 429, 'the 65th upload this hour');
+  assert.equal((await put(env, build({ files: [] }))).status, 429, 'one more upload this hour');
   const other = await modsEnv();
   assert.equal((await startParts(other, archive.hash, size)).status, 201);
-  const { MOD_LIMITS } = await quotaModule;
   for (let i = 0; i < MOD_LIMITS.mod_build_put - 1; i++) await put(other, build({ files: [] }));
   assert.equal((await startParts(other, sha(Buffer.from('another')), size)).status, 429, 'a new upload in parts is an upload');
 });
@@ -984,7 +1079,7 @@ test('claim, re-claim with the secret, and release with wrong and right secrets'
   assert.match(claim, /^[0-9a-f]{32}$/);
   assert.match(secret, /^[0-9a-f]{64}$/);
   assert.equal(claims(env, first.hash), 1);
-  const kept = env.registryStorage.sql.exec('SELECT secret FROM mod_claim').toArray()[0].secret;
+  const kept = env.registryStorage.sql.exec('SELECT secret FROM claim').toArray()[0].secret;
   assert.equal(kept, sha(Buffer.from(secret)), 'only the digest of the secret is kept');
 
   const other = await fetchWorker(env, postJson('/mods/claim', { ref: 'item-41', builds: [first.hash] }));
@@ -1013,12 +1108,13 @@ test('claim, re-claim with the secret, and release with wrong and right secrets'
   assert.equal((await fetchWorker(env, postJson('/mods/release', { claim: 'c'.repeat(32), secret }))).status, 404);
   assert.equal((await fetchWorker(env, postJson('/mods/release', { claim: 'nothex', secret }))).status, 400);
   env.MODS.log.length = 0;
-  const secondObject = objectOf(env, second.hash);
+  const secondObjects = objectsFor(env, second.hash);
   const released = await fetchWorker(env, postJson('/mods/release', { claim, secret }));
   assert.equal(released.status, 204);
   assert.equal(claims(env, second.hash), undefined, 'its last release removes the build from the index');
-  assert.deepEqual(env.MODS.log.filter(([op]) => op === 'delete'), [['delete', secondObject]], 'and its archive at once');
-  assert.ok(!env.MODS.objects.has(secondObject));
+  assert.deepEqual(env.MODS.log.filter(([op]) => op === 'delete').map(([, key]) => key).sort(), secondObjects.sort(), 'and its archive and skeleton at once');
+  for (const key of secondObjects) assert.ok(!env.MODS.objects.has(key));
+  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM dead').toArray()[0].n, 0, 'nothing is left on the delete queue');
   assert.equal((await fetchWorker(env, call('HEAD', '/mods/build/' + second.hash))).status, 404);
   assert.equal(claims(env, first.hash), 1, 'a build another claim names stays');
   assert.equal((await fetchWorker(env, postJson('/mods/release', { claim, secret }))).status, 404);
@@ -1060,37 +1156,45 @@ test('purge deletes unclaimed builds past the hour and keeps claimed ones', asyn
   const first = build(), second = build();
   await stored(env, first, second);
   assert.equal((await fetchWorker(env, postJson('/mods/claim', { ref: 'item-9', builds: [second.hash] }))).status, 201);
-  assert.deepEqual(await purgeMods(env), { builds: 0, uploads: 0 }, 'nothing is purged inside the window');
+  const none = { builds: 0, uploads: 0, queued: 0, orphans: 0 };
+  assert.deepEqual(await purgeMods(env), none, 'nothing is purged inside the window');
   env.clock.offset = 2 * HOUR;
   env.MODS.log.length = 0;
-  const firstObject = objectOf(env, first.hash);
-  assert.deepEqual(await purgeMods(env), { builds: 1, uploads: 0 });
-  assert.deepEqual(env.MODS.log.filter(([op]) => op === 'delete'), [['delete', firstObject]]);
-  assert.deepEqual([...env.MODS.objects.keys()], [objectOf(env, second.hash)]);
+  const firstObjects = objectsFor(env, first.hash);
+  assert.deepEqual(await purgeMods(env), { ...none, builds: 1 });
+  assert.deepEqual(env.MODS.log.filter(([op]) => op === 'delete').map(([, key]) => key).sort(), firstObjects.sort());
+  assert.deepEqual([...env.MODS.objects.keys()].sort(), objectsFor(env, second.hash).sort());
   assert.equal(row(env, first.hash), undefined);
   assert.equal((await fetchWorker(env, postJson('/mods/claim', { ref: 'item-10', builds: [first.hash] }))).status, 409, 'a purged build cannot be claimed');
-  assert.deepEqual(await purgeMods(env), { builds: 0, uploads: 0 });
+  assert.deepEqual(await purgeMods(env), none);
 });
 
-test('the registry drops the retired blob and bundle tables', async () => {
+test('the registry drops the tables of the blob and bundle store and of one archive per build', async () => {
   const registry = await registryModule;
+  const current = ['asked', 'blob', 'build', 'build_blob', 'claim', 'claim_build', 'dead', 'pack', 'store_meta', 'upload'];
   const storage = sqliteStorage();
   for (const statement of ['CREATE TABLE mod_blob (hash TEXT PRIMARY KEY)', 'CREATE TABLE mod_bundle (hash TEXT PRIMARY KEY)',
     'CREATE TABLE mod_bundle_blob (bundle TEXT, blob TEXT)', 'CREATE TABLE mod_claim_bundle (claim TEXT, bundle TEXT)',
     'CREATE TABLE mod_claim (id TEXT PRIMARY KEY, ref TEXT NOT NULL, secret TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL)',
     "INSERT INTO mod_claim VALUES ('x', 'r', 's', 1, 1)"]) storage.sql.exec(statement);
   registry.initializeRegistry(storage);
-  const tables = storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").toArray().map(r => r.name);
-  assert.deepEqual(tables, ['mod_asked', 'mod_build', 'mod_claim', 'mod_claim_build', 'mod_upload']);
-  assert.equal(storage.sql.exec('SELECT count(*) AS n FROM mod_claim').toArray()[0].n, 0, 'claims of bundles go with them');
+  const tables = s => s.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").toArray().map(r => r.name);
+  assert.deepEqual(tables(storage), current);
+  assert.equal(storage.sql.exec('SELECT count(*) AS n FROM claim').toArray()[0].n, 0, 'claims of bundles go with them');
   registry.initializeRegistry(storage);
-  assert.throws(() => registry.registerBuild(storage, 'a'.repeat(64), 10, 'Bad', 'build/' + 'a'.repeat(64), 0, 1));
-  /* An index from before per-upload objects names each archive at build/<hash>. */
+  assert.equal(storage.sql.exec("SELECT value FROM store_meta WHERE key = 'schema'").toArray()[0].value, '3');
+  assert.throws(() => registry.registerBuild(storage, { hash: 'a'.repeat(64), size: 10, salt: 'Bad', scripts: 0, archive: 'build/' + 'a'.repeat(64),
+    skeleton: 'skel/x', modjson: 'a'.repeat(64), entries: 1 }, 1));
+  /* The one-archive-per-build index (staging before this store) goes the same way. */
   const old = sqliteStorage();
-  old.sql.exec('CREATE TABLE mod_build (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, salt TEXT NOT NULL, created INTEGER NOT NULL, claims INTEGER NOT NULL DEFAULT 0)');
-  old.sql.exec("INSERT INTO mod_build VALUES (?, 10, 'k7pinkim', 1, 1)", 'a'.repeat(64));
+  old.sql.exec('CREATE TABLE mod_build (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, salt TEXT NOT NULL, created INTEGER NOT NULL, claims INTEGER NOT NULL DEFAULT 0, object TEXT)');
+  old.sql.exec('CREATE TABLE mod_claim_build (claim TEXT NOT NULL, build TEXT NOT NULL, PRIMARY KEY (claim, build))');
+  old.sql.exec('CREATE TABLE mod_upload (hash TEXT, size INTEGER)');
+  old.sql.exec('CREATE TABLE mod_asked (build TEXT, request TEXT)');
+  old.sql.exec("INSERT INTO mod_build VALUES (?, 10, 'k7pinkim', 1, 1, 'build/x')", 'a'.repeat(64));
   registry.initializeRegistry(old);
-  assert.deepEqual({ ...registry.buildRow(old, 'a'.repeat(64)) }, { size: 10, salt: 'k7pinkim', created: 1, claims: 1, object: 'build/' + 'a'.repeat(64), scripts: 0, slice_of: null });
+  assert.deepEqual(tables(old), current);
+  assert.equal(registry.buildRow(old, 'a'.repeat(64)), null);
 });
 
 /* ---------------- uploads in parts, no limits, the release race ---------------- */
@@ -1154,12 +1258,15 @@ test('a build larger than one part goes up in parts, resumes without resending a
   assert.equal(done.status, 201, await done.clone().text());
   assert.deepEqual(await done.json(), { build: archive.hash, size, scripts: 0 });
   assert.equal(env.MODS.uploads.size, 0);
-  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM mod_upload').toArray()[0].n, 0);
+  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM upload').toArray()[0].n, 0);
   const got = await fetchWorker(env, call('GET', '/mods/build/' + archive.hash));
   assert.equal(got.status, 200);
   assert.equal(got.headers.get('Content-Length'), String(size));
   assert.equal(sha(Buffer.from(await got.arrayBuffer())), sha(archive.bytes), 'byte for byte');
 
+  /* Once a claim names it, the store says it holds it and nothing is sent again; before that a
+   * start opens an upload (which the registry keeps the stored archive against if it is the same). */
+  assert.equal((await fetchWorker(env, postJson('/mods/claim', { ref: 'big', builds: [archive.hash] }))).status, 201);
   const again = await startParts(env, archive.hash, size);
   assert.deepEqual(await again.json(), { build: archive.hash, size, scripts: 0, stored: true });
   assert.equal((await completeParts(env, archive.hash, size)).status, 200);
@@ -1176,7 +1283,7 @@ test('an archive in parts is checked by the same rules, and a refused one leaves
   assert.equal((await refused.json()).error, "The archive's end record places its central directory wrongly.");
   assert.deepEqual(objectsFor(env, archive.hash), []);
   assert.equal(row(env, archive.hash), undefined);
-  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM mod_upload').toArray()[0].n, 0);
+  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM upload').toArray()[0].n, 0);
 
   const script = largeBuild({ files: [{ request: 'generated/image/mods/' + SALT + '/huge.bimage', data: Buffer.alloc(95 * MIB, 3) },
     { request: 'mods/' + SALT + '/scripts/main.lua', data: Buffer.from([0x1b, 0x4c, 0x75, 0x61, 1, 2]) }], block: { scripts: { files: 1 } } });
@@ -1196,9 +1303,9 @@ test('an upload in parts nobody finishes is aborted and its parts deleted', asyn
   const size = archive.bytes.length;
   await startParts(env, archive.hash, size);
   await sendPart(env, archive.hash, size, 1, slice(archive.bytes, 1));
-  assert.deepEqual(await purgeMods(env), { builds: 0, uploads: 0 }, 'a live upload stays');
+  assert.deepEqual(await purgeMods(env), { builds: 0, uploads: 0, queued: 0, orphans: 0 }, 'a live upload stays');
   env.clock.offset = 25 * HOUR;
-  assert.deepEqual(await purgeMods(env), { builds: 0, uploads: 1 });
+  assert.deepEqual(await purgeMods(env), { builds: 0, uploads: 1, queued: 0, orphans: 0 });
   assert.equal(env.MODS.uploads.size, 0, 'the multipart upload is aborted');
   assert.equal((await sendPart(env, archive.hash, size, 2, slice(archive.bytes, 2))).status, 404);
   assert.equal((await completeParts(env, archive.hash, size)).status, 404);
@@ -1230,7 +1337,8 @@ test('a release racing an upload of the same build never leaves a claim on a mis
   const got = await fetchWorker(env, call('GET', '/mods/build/' + archive.hash));
   assert.equal(got.status, 200, 'the claimed build is served');
   assert.deepEqual(Buffer.from(await got.arrayBuffer()), archive.bytes);
-  assert.deepEqual(objectsFor(env, archive.hash), [objectOf(env, archive.hash)]);
+  const current = env.registryStorage.sql.exec('SELECT archive, skeleton FROM build WHERE hash = ?', archive.hash).toArray()[0];
+  assert.deepEqual(objectsFor(env, archive.hash).sort(), [current.archive, current.skeleton].sort(), 'only the new upload\'s objects are left');
 });
 
 test('no limit on files per mod, builds per claim or mod.json size', async () => {
@@ -1405,14 +1513,26 @@ test('the maintainer reset route is hidden without the secret and empties the st
   assert.equal((await fetchWorker(env, call('POST', '/mods/admin/reset'))).status, 403);
   assert.equal((await fetchWorker(env, call('POST', '/mods/admin/reset', { headers: { Authorization: 'Bearer nope' } }))).status, 403);
   assert.equal((await fetchWorker(env, call('GET', '/mods/admin/reset'))).status, 405);
-  assert.equal(env.MODS.objects.size, 4);
-  const response = await fetchWorker(env, call('POST', '/mods/admin/reset', { headers: { Authorization: 'Bearer correct horse battery staple' } }));
+  /* Two builds that share two of their three files: four blobs, the second build's pack only its mod.json. */
+  await env.pack();
+  assert.equal(env.MODS.objects.size, 6, 'two packs, two skeletons and the two objects of the retired store');
+  const auth = { headers: { Authorization: 'Bearer correct horse battery staple' } };
+  const stats = await fetchWorker(env, call('POST', '/mods/admin/stats', auth));
+  assert.equal(stats.status, 200);
+  const held = await stats.json();
+  assert.deepEqual({ builds: held.builds, claimed: held.claimed, staged: held.staged, blobs: held.blobs, packs: held.packs, claims: held.claims },
+    { builds: 2, claimed: 1, staged: 0, blobs: 4, packs: 2, claims: 1 });
+  assert.equal(held.archiveBytes, first.bytes.length + second.bytes.length);
+  assert.ok(held.packBytes < held.archiveBytes - 300, 'the shared image is stored once');
+  const response = await fetchWorker(env, call('POST', '/mods/admin/reset', auth));
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { deleted: { builds: 2, other: 2 }, index: { mod_claim_build: 1, mod_claim: 1, mod_build: 2, mod_upload: 0, mod_asked: 0 } });
+  assert.deepEqual(await response.json(), { deleted: { builds: 4, other: 2 },
+    index: { claim_build: 1, claim: 1, build_blob: 6, blob: 4, pack: 2, build: 2, upload: 0, asked: 0, dead: 0 } });
   assert.equal(env.MODS.objects.size, 0);
-  for (const table of ['mod_build', 'mod_claim', 'mod_claim_build', 'mod_upload', 'mod_asked']) {
+  for (const table of ['build', 'blob', 'pack', 'build_blob', 'claim', 'claim_build', 'upload', 'asked', 'dead']) {
     assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM ' + table).toArray()[0].n, 0, table);
   }
+  assert.equal((await fetchWorker(env, call('POST', '/mods/admin/stats'))).status, 403);
   assert.equal((await fetchWorker(env, call('GET', '/mods/build/' + first.hash))).status, 404);
 });
 
@@ -1446,7 +1566,7 @@ test('part of a build is stored when every file it carries is a file of the buil
   const part = cutOf(whole, whole.slice(0, 2));
   const created = await put(env, part);
   assert.equal(created.status, 201, await created.clone().text());
-  assert.equal(env.registryStorage.sql.exec('SELECT slice_of FROM mod_build WHERE hash = ?', part.hash).toArray()[0].slice_of, part.sliceOf);
+  assert.equal(env.registryStorage.sql.exec('SELECT slice_of FROM build WHERE hash = ?', part.hash).toArray()[0].slice_of, part.sliceOf);
   /* A second map that needs the same files names the same build: one archive serves both. */
   assert.equal((await put(env, part)).status, 200);
   const served = await fetchWorker(env, call('GET', '/mods/build/' + part.hash));
@@ -1493,13 +1613,23 @@ test('what players asked for of a part is kept for the claim holder and goes wit
   assert.equal(r.status, 404, 'a whole build lacks nothing');
   assertSentence((await r.json()).error, 'whole');
   assert.equal((await ask(part.hash, { request: 'generated/image/mods/q2otherm/x.bimage' })).status, 400, 'another mod');
+  r = await ask(part.hash, { request: 'generated/image/mods/' + SALT + '/invented.bimage' });
+  assert.equal(r.status, 400, 'a file of the mod that its source does not list');
+  assertSentence((await r.json()).error, 'not left out');
+  assert.equal((await ask(part.hash, { request: whole[0].request })).status, 400, 'a file the part carries');
+  assert.equal((await ask(part.hash, { request: 'generated/decls/entitydef/mods/' + SALT + '/blue_imp.decl', by: 'x'.repeat(5000) })).status, 204);
+  assert.equal(env.registryStorage.sql.exec('SELECT asker FROM asked WHERE request LIKE ?', '%blue_imp.decl').toArray()[0].asker.length, 256,
+    'a long name of what asked is cut, not refused');
+  /* After packing, the part's source.json is read from its blob. */
+  await env.pack();
+  assert.equal((await ask(part.hash, { request: 'generated/image/mods/' + SALT + '/invented.bimage' })).status, 400);
   assert.equal((await ask(part.hash, { request: 'Generated/Image/X.bimage' })).status, 400, 'not a request path');
   assert.equal((await ask('c'.repeat(64), { request: missing })).status, 404, 'unknown build');
   const claimed = await fetchWorker(env, postJson('/mods/claim', { ref: 'item-1', builds: [part.hash] }));
   const { claim, secret } = await claimed.json();
   r = await fetchWorker(env, postJson('/mods/asked', { claim, secret }));
   assert.equal(r.status, 200);
-  assert.deepEqual(await r.json(), { asked: [{ build: part.hash, salt: SALT, request: missing, by: 'mods/' + SALT + '/blue_imp' }] });
+  assert.deepEqual((await r.json()).asked.filter(a => a.request === missing), [{ build: part.hash, salt: SALT, request: missing, by: 'mods/' + SALT + '/blue_imp' }]);
   assert.equal((await fetchWorker(env, postJson('/mods/asked', { claim, secret: 'd'.repeat(64) }))).status, 403);
   assert.equal((await fetchWorker(env, postJson('/mods/asked', { claim: 'e'.repeat(32), secret }))).status, 404);
   /* A republish that carries the file replaces the claim's build set; the old part and what
@@ -1509,7 +1639,173 @@ test('what players asked for of a part is kept for the claim holder and goes wit
   const replaced = await fetchWorker(env, postJson('/mods/claim', { ref: 'item-1', builds: [again.hash], secret }));
   assert.equal(replaced.status, 200);
   assert.equal((await fetchWorker(env, call('HEAD', '/mods/build/' + part.hash))).status, 404, 'the earlier part is deleted');
-  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM mod_asked').toArray()[0].n, 0);
+  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM asked').toArray()[0].n, 0);
   r = await fetchWorker(env, postJson('/mods/asked', { claim, secret }));
   assert.deepEqual(await r.json(), { asked: [] });
+});
+
+/* ---------------- content addressing: packs, ranges, repair, the sweep ---------------- */
+
+function blobCount(env) {
+  return env.registryStorage.sql.exec('SELECT count(*) AS n FROM blob').toArray()[0].n;
+}
+
+function packKeys(env) {
+  return [...env.MODS.objects.keys()].filter(key => key.startsWith('pack/'));
+}
+
+test('a file whose bytes are not the SHA-256 mod.json gives it is refused before anything is kept', async () => {
+  const env = await modsEnv();
+  const archive = build();
+  const lying = JSON.parse(archive.modjson);
+  lying['snapmap-plus'].files[1].sha256 = 'e'.repeat(64);
+  const modjson = Buffer.from(JSON.stringify(lying));
+  const forged = { hash: archive.hash, ...zip(entriesFor(modjson, archive.files)) };
+  const response = await put(env, forged);
+  assert.equal(response.status, 422);
+  const { error } = await response.json();
+  assert.equal(error, 'The file assets/generated/image/mods/' + SALT + '/pink.bimage does not match the SHA-256 its mod.json gives it.');
+  assertSentence(error, 'sha');
+  assert.equal(env.MODS.objects.size, 0);
+});
+
+test('identical files are stored once across builds, revisions and parts of a mod', async () => {
+  const env = await modsEnv();
+  const shared = { request: 'generated/image/mods/' + SALT + '/board.bimage', data: Buffer.alloc(200000, 5) };
+  const v1 = build({ files: [shared, { request: 'generated/decls/entitydef/mods/' + SALT + '/a.decl', data: 'entityDef a { v = 1; }\n' }] });
+  const v2 = build({ files: [shared, { request: 'generated/decls/entitydef/mods/' + SALT + '/a.decl', data: 'entityDef a { v = 2; }\n' }] });
+  await stored(env, v1);
+  await env.pack();
+  assert.equal(blobCount(env), 3, 'mod.json, the image, the decl');
+  const after1 = packKeys(env).length;
+  await stored(env, v2);
+  await env.pack();
+  assert.equal(blobCount(env), 5, 'the revision adds only its mod.json and its decl');
+  const newPack = packKeys(env).filter(k => true).length - after1;
+  assert.equal(newPack, 1);
+  const v2pack = env.registryStorage.sql.exec('SELECT p.size AS size FROM pack p ORDER BY p.id DESC LIMIT 1').toArray()[0].size;
+  assert.ok(v2pack < 10000, 'the second pack holds no copy of the image (' + v2pack + ' bytes)');
+  for (const b of [v1, v2]) assert.deepEqual(await bytesOf(env, b.hash), b.bytes, 'each build is served byte for byte');
+  const planOf = hash => JSON.parse(env.registryStorage.sql.exec('SELECT plan FROM build WHERE hash = ?', hash).toArray()[0].plan);
+  assert.ok(planOf(v2.hash).length <= 5, 'the revision is a few ranges: its new mod.json, the shared image, its decl, the tail');
+  /* The same bytes under another name: the blob is shared, its header is the build's own. */
+  const renamed = build({ salt: 'q2otherm', files: [{ request: 'generated/image/mods/q2otherm/copy.bimage', data: shared.data }] });
+  await stored(env, renamed);
+  await env.pack();
+  assert.deepEqual(await bytesOf(env, renamed.hash), renamed.bytes);
+  assert.ok(planOf(renamed.hash).some(([object]) => object === null), 'its own header comes from its skeleton');
+  assert.equal(env.registryStorage.sql.exec('SELECT refs FROM blob WHERE sha = ?', sha(shared.data)).toArray()[0].refs, 3);
+  /* Two parts of one pack (the per-object units a map names) that share a file share its blob. */
+  const whole = [shared, ...packFiles()];
+  const unitA = cutOf(whole, [shared, whole[1]]);
+  const unitB = cutOf(whole, [shared, whole[3]]);
+  await stored(env, unitA, unitB);
+  await env.pack();
+  const blobs = env.registryStorage.sql.exec('SELECT refs FROM blob b WHERE sha = ?', sha(shared.data)).toArray()[0];
+  assert.equal(blobs.refs, 5, 'one image blob serves both revisions, the renamed copy and both units');
+  const source = env.registryStorage.sql.exec('SELECT refs FROM blob WHERE sha = ?', sha(unitA.source)).toArray()[0];
+  assert.equal(source.refs, 2, 'the source.json both units carry is one blob');
+  for (const b of [unitA, unitB]) assert.deepEqual(await bytesOf(env, b.hash), b.bytes);
+  /* Releasing v1 keeps what v2 and the units still name and frees the rest. */
+  const { claim, secret } = await (await fetchWorker(env, postJson('/mods/claim', { ref: 'm', builds: [v1.hash] }))).json();
+  assert.equal((await fetchWorker(env, postJson('/mods/release', { claim, secret }))).status, 204);
+  assert.equal(env.registryStorage.sql.exec('SELECT refs FROM blob WHERE sha = ?', sha(shared.data)).toArray()[0].refs, 4);
+  assert.deepEqual(await bytesOf(env, v2.hash), v2.bytes);
+  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM dead').toArray()[0].n, 0);
+});
+
+test('a GET serves one byte range of a staged or packed build, so a download resumes', async () => {
+  const env = await modsEnv();
+  const archive = build({ files: [{ request: 'generated/image/mods/' + SALT + '/big.bimage', data: Buffer.from(Array.from({ length: 300000 }, (_, i) => i % 251)) },
+    ...defaultFiles(SALT)] });
+  await stored(env, archive);
+  const size = archive.bytes.length;
+  const ranged = async (range, extra = {}) => fetchWorker(env, call('GET', '/mods/build/' + archive.hash, { headers: { Range: range, ...extra } }));
+  for (const phase of ['staged', 'packed']) {
+    if (phase === 'packed') await env.pack();
+    assert.equal(row(env, archive.hash).state, phase);
+    for (const [range, start, end] of [['bytes=0-99', 0, 100], ['bytes=1000-', 1000, size], ['bytes=-22', size - 22, size],
+      ['bytes=150000-150010', 150000, 150011], ['bytes=5-' + (size + 50), 5, size]]) {
+      const r = await ranged(range);
+      assert.equal(r.status, 206, phase + ' ' + range);
+      assert.equal(r.headers.get('Content-Range'), 'bytes ' + start + '-' + (end - 1) + '/' + size);
+      assert.equal(r.headers.get('Content-Length'), String(end - start));
+      assert.deepEqual(Buffer.from(await r.arrayBuffer()), archive.bytes.subarray(start, end), phase + ' ' + range);
+    }
+    const past = await ranged('bytes=' + size + '-');
+    assert.equal(past.status, 416);
+    assert.equal(past.headers.get('Content-Range'), 'bytes */' + size);
+    assertSentence((await past.json()).error, '416');
+    assert.equal((await ranged('bytes=0-1,5-6')).status, 200, 'several ranges: the whole archive');
+    assert.equal((await ranged('bytes=0-9', { 'If-Range': '"' + 'f'.repeat(64) + '"' })).status, 200, 'If-Range of another build');
+    assert.equal((await ranged('bytes=0-9', { 'If-Range': '"' + archive.hash + '"' })).status, 206);
+    const whole = await fetchWorker(env, call('GET', '/mods/build/' + archive.hash));
+    assert.equal(whole.headers.get('Accept-Ranges'), 'bytes');
+    assert.deepEqual(Buffer.from(await whole.arrayBuffer()), archive.bytes);
+  }
+});
+
+test('a build whose stored objects went missing stops being served and is repaired by the next upload', async () => {
+  const env = await modsEnv();
+  const a = build(), b = build();   // they share the two default files
+  await stored(env, a, b);
+  await fetchWorker(env, postJson('/mods/claim', { ref: 'a', builds: [a.hash, b.hash] }));
+  await env.pack();
+  /* The pack that holds the shared files is lost. */
+  const shared = env.registryStorage.sql.exec('SELECT p.object AS object FROM blob x JOIN pack p ON p.id = x.pack WHERE x.sha = ?',
+    sha(Buffer.alloc(300, 7))).toArray()[0].object;
+  env.MODS.objects.delete(shared);
+  const got = await fetchWorker(env, call('GET', '/mods/build/' + a.hash));
+  await assert.rejects(got.arrayBuffer(), 'the download breaks off where the pack is missing');
+  assert.equal(row(env, a.hash).broken, 1);
+  assert.equal(row(env, b.hash).broken, 1, 'every build that needs the pack');
+  assert.equal((await fetchWorker(env, call('HEAD', '/mods/build/' + a.hash))).status, 404, 'so the author\'s next publish uploads it');
+  assert.equal((await startParts(env, a.hash, a.bytes.length)).status, 201, 'the store does not say it holds a broken build');
+  await fetchWorker(env, call('DELETE', '/mods/build/x'));
+  const repaired = await put(env, a);
+  assert.equal(repaired.status, 201, 'a claimed broken build takes the upload');
+  assert.equal(row(env, a.hash).claims, 1, 'and keeps its claim');
+  await env.pack();
+  assert.equal(row(env, a.hash).broken, 0);
+  assert.equal(row(env, b.hash).broken, 0, 'the repaired blobs serve the other build again');
+  for (const x of [a, b]) assert.deepEqual(await bytesOf(env, x.hash), x.bytes);
+  /* A missing archive of a staged build, and a missing skeleton, are found the same way. */
+  const c = build();
+  await stored(env, c);
+  env.MODS.objects.delete(objectOf(env, c.hash));
+  assert.equal((await fetchWorker(env, call('GET', '/mods/build/' + c.hash))).status, 404);
+  assert.equal(row(env, c.hash).broken, 1);
+});
+
+test('the daily purge deletes what no row names once it is a day old, and empties the delete queue', async () => {
+  const { purgeMods } = await modsModule;
+  const env = await modsEnv();
+  const kept = build();
+  await stored(env, kept);
+  await env.pack();
+  const old = new Date(Date.now() - 2 * DAY);
+  for (const key of ['pack/' + 'a'.repeat(32), 'skel/' + 'b'.repeat(64) + '/' + 'c'.repeat(32), 'blob/' + 'd'.repeat(64), 'bundle/' + 'e'.repeat(64)]) {
+    await env.MODS.put(key, new Uint8Array([1]));
+    env.MODS.objects.get(key).uploaded = old;
+  }
+  await env.MODS.put('pack/' + 'f'.repeat(32), new Uint8Array([1]));   // too young: a packer may be writing it
+  env.registryStorage.sql.exec("INSERT INTO dead (object, queued) VALUES ('pack/0123456789abcdef0123456789abcdef', 1)");
+  const before = new Set(env.MODS.objects.keys());
+  const result = await purgeMods(env, { sweepPages: 1 });
+  assert.equal(result.orphans, 4);
+  assert.equal(result.queued, 1);
+  const after = new Set(env.MODS.objects.keys());
+  assert.ok(after.has('pack/' + 'f'.repeat(32)));
+  assert.equal(before.size - after.size, 4);
+  assert.deepEqual(await bytesOf(env, kept.hash), kept.bytes, 'what a row names stays');
+  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM dead').toArray()[0].n, 0);
+});
+
+test('a pack plan keeps a large file alone and starts a new read past a large gap', async () => {
+  const { planPacks, PACK_TARGET } = await packModule;
+  const plans = planPacks([{ sha: 'a', length: 10, at: 0 }, { sha: 'b', length: 10, at: 10 }, { sha: 'c', length: PACK_TARGET, at: 20 },
+    { sha: 'd', length: 5, at: PACK_TARGET + 20 }, { sha: 'e', length: 5, at: PACK_TARGET + 20 + 9 * MIB }]);
+  assert.deepEqual(plans.map(p => p.blobs.map(b => b.sha).join('')), ['ab', 'c', 'd', 'e']);
+  assert.deepEqual(plans.map(p => [p.start, p.end]), [[0, 20], [20, PACK_TARGET + 20], [PACK_TARGET + 20, PACK_TARGET + 25],
+    [PACK_TARGET + 20 + 9 * MIB, PACK_TARGET + 25 + 9 * MIB]]);
 });

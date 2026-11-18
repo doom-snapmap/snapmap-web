@@ -1,8 +1,14 @@
 export const LIMITS = Object.freeze({ post: 10, comment: 60, reaction: 120, upload: 30, preview: 120, edit: 60 });
-/* Anonymous mod store limits, per hashed client address per UTC hour. Byte limits count declared upload lengths. */
+/* Anonymous mod store limits, per hashed client address per UTC hour. They protect the bucket and
+ * its bill from abuse and are not limits on a mod: a count of new uploads, bytes of new uploads,
+ * reads, and claim calls. The byte limit is soft (SOFT_MOD_LIMITS): an upload is admitted while
+ * the hour's bytes are below it, whatever its own size, so a build of any size can always be
+ * published, and an address that has sent that much this hour waits for the next. A build the
+ * store already holds, a resumed upload and its parts count nothing. */
 export const MOD_LIMITS = Object.freeze({
-  mod_build_put: 64, mod_bytes: 4 * 1024 * 1024 * 1024, mod_get: 20000, mod_claim: 64,
+  mod_build_put: 1024, mod_bytes: 64 * 1024 * 1024 * 1024, mod_get: 20000, mod_claim: 256,
 });
+export const SOFT_MOD_LIMITS = new Set(['mod_bytes']);
 const HOUR_MS = 3600000;
 
 export function initializeQuota(storage) {
@@ -42,7 +48,7 @@ export function consumeModQuota(storage, entries, now) {
     });
     for (let i = 0; i < entries.length; i++) {
       const [kind, amount] = entries[i];
-      if (used[i] + amount > MOD_LIMITS[kind]) return { allowed: false, kind };
+      if (SOFT_MOD_LIMITS.has(kind) ? used[i] >= MOD_LIMITS[kind] : used[i] + amount > MOD_LIMITS[kind]) return { allowed: false, kind };
     }
     for (let i = 0; i < entries.length; i++) {
       storage.sql.exec('INSERT INTO mod_quota (kind, window, used) VALUES (?, ?, ?) ON CONFLICT(kind) DO UPDATE SET window = excluded.window, used = excluded.used',

@@ -19,7 +19,8 @@ function community() {
     modulesRules: [{ type: 'ESModule', include: ['**/*.js'] }],
     compatibilityDate: '2026-07-01',
     durableObjects: { WRITE_QUOTAS: { className: 'CommunityQuota', useSQLite: true },
-                      MOD_REGISTRY: { className: 'ModRegistry', useSQLite: true } },
+                      MOD_REGISTRY: { className: 'ModRegistry', useSQLite: true },
+                      MOD_CHECKER: { className: 'ModChecker', useSQLite: true } },
     durableObjectsPersist: path.join(scratch, 'quotas'),
     kvNamespaces: ['SESSIONS'], r2Buckets: ['MEDIA', 'MODS'], bindings: { MODS_BLOCKED: '[]' },
     outboundService: () => { throw new Error('unexpected external request'); },
@@ -121,14 +122,23 @@ function archive(salt, files, method = 0, block = {}) {
   const doc = { name: 'Pink Imp', 'snapmap-plus': { format: 2, salt, build: hash, ...block,
     files: files.map(f => ({ path: 'assets/' + f.request, sha256: sha(f.data), size: f.data.length, provides: { type: 'image', name: f.request }, needs: [] })) } };
   const modjson = Buffer.from(JSON.stringify(doc, null, 2) + '\n');
-  return { hash, bytes: zip([{ name: 'mod.json', data: modjson, method }, ...files.map(f => ({ name: 'assets/' + f.request, data: f.data }))]) };
+  return { hash, files, bytes: zip([{ name: 'mod.json', data: modjson, method }, ...files.map(f => ({ name: 'assets/' + f.request, data: f.data }))]) };
 }
 
 async function mods(mf) {
   const send = (method, route, body, headers = {}) => mf.dispatchFetch('http://local.test' + route, { method, body, headers });
   const zipType = bytes => ({ 'Content-Type': 'application/zip', 'Content-Length': String(bytes.length) });
   const bucket = await mf.getR2Bucket('MODS');
-  const stored = async hash => (await bucket.list({ prefix: 'build/' + hash })).objects.map(o => o.key);
+  /* A build's own objects: its archive while staged, its skeleton always. */
+  const stored = async hash => [...(await bucket.list({ prefix: 'build/' + hash })).objects, ...(await bucket.list({ prefix: 'skel/' + hash })).objects].map(o => o.key);
+  /* The packer runs on the registry's alarm: wait until the archive is gone (its files are in packs). */
+  const packed = async hash => {
+    for (let i = 0; i < 200; i++) {
+      if (!(await bucket.list({ prefix: 'build/' + hash })).objects.length) return true;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    throw new Error('build ' + hash.slice(0, 12) + ' was not packed');
+  };
   const salt = 'k7pinkim';
   const big = archive(salt, [{ request: 'generated/image/mods/' + salt + '/pink.bimage', data: randomBytes(5 * 1024 * 1024 + 17) },
     { request: 'generated/decls/entitydef/mods/' + salt + '/pink_imp.decl', data: Buffer.from('entityDef mods/' + salt + '/pink_imp {}\n') }]);
@@ -138,6 +148,7 @@ async function mods(mf) {
   assert.equal(refused.status, 422);
   assert.deepEqual(await refused.json(), { error: 'The archive has a compressed entry; Snapmap+ stores every file uncompressed.' });
   assert.deepEqual(await stored(compressed.hash), [], 'a refused archive was kept');
+  assert.deepEqual((await bucket.list()).objects.map(o => o.key), [], 'nothing at all was kept');
   const damaged = Buffer.from(big.bytes);
   damaged.writeUInt32LE(0, damaged.length - 6);   // the end record's central directory offset
   const late = await send('PUT', '/mods/build/' + big.hash, damaged, zipType(damaged));
@@ -148,10 +159,16 @@ async function mods(mf) {
   const created = await send('PUT', '/mods/build/' + big.hash, big.bytes, zipType(big.bytes));
   assert.equal(created.status, 201, await created.clone().text());
   assert.deepEqual(await created.json(), { build: big.hash, size: big.bytes.length, scripts: 0 });
-  assert.equal((await stored(big.hash)).length, 1);
+  assert.equal((await stored(big.hash)).length, 2, 'its archive and skeleton');
+  const staged = await send('GET', '/mods/build/' + big.hash, undefined, { Range: 'bytes=100-199' });
+  assert.equal(staged.status, 206);
+  assert.deepEqual(Buffer.from(await staged.arrayBuffer()), big.bytes.subarray(100, 200));
   const again = await send('PUT', '/mods/build/' + big.hash, big.bytes, zipType(big.bytes));
   assert.equal(again.status, 200);
   await again.arrayBuffer();
+  await packed(big.hash);
+  assert.equal((await stored(big.hash)).length, 1, 'packed: its skeleton; the archive is gone');
+  assert.ok((await bucket.list({ prefix: 'pack/' })).objects.length >= 1, 'its files are in a pack');
   const other = Buffer.from(compressed.bytes);   // another size, refused only at its end record
   other.writeUInt16LE(0, 8); other.writeUInt16LE(0, other.length - 22 - 46 - 8 + 10);
   other.writeUInt32LE(0, other.length - 6);
@@ -159,14 +176,25 @@ async function mods(mf) {
   assert.equal(replacement.status, 422, await replacement.clone().text());
   await replacement.arrayBuffer();
   const kept = await stored(big.hash);
-  assert.equal(kept.length, 1, 'a refused replacement left only the stored archive');
-  assert.equal((await bucket.head(kept[0])).size, big.bytes.length);
+  assert.equal(kept.length, 1, 'a refused replacement left only the stored build');
   const got = await send('GET', '/mods/build/' + big.hash);
   assert.equal(got.status, 200);
   assert.equal(got.headers.get('content-type'), 'application/zip');
   assert.equal(got.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(got.headers.get('cache-control'), 'public, max-age=31536000, immutable');
-  assert.equal(sha(Buffer.from(await got.arrayBuffer())), sha(big.bytes));
+  assert.equal(sha(Buffer.from(await got.arrayBuffer())), sha(big.bytes), 'a packed build is served byte for byte');
+  const tail = await send('GET', '/mods/build/' + big.hash, undefined, { Range: 'bytes=' + (big.bytes.length - 1000) + '-' });
+  assert.equal(tail.status, 206);
+  assert.deepEqual(Buffer.from(await tail.arrayBuffer()), big.bytes.subarray(big.bytes.length - 1000), 'a range of a packed build');
+  /* A revision that shares the large image stores only what is new. */
+  const before = (await bucket.list({ prefix: 'pack/' })).objects.reduce((n, o) => n + o.size, 0);
+  const revision = archive(salt, [big.files[0], { request: 'generated/decls/entitydef/mods/' + salt + '/pink_imp.decl', data: Buffer.from('entityDef mods/' + salt + '/pink_imp { v = 2; }\n') }]);
+  assert.equal((await send('PUT', '/mods/build/' + revision.hash, revision.bytes, zipType(revision.bytes))).status, 201);
+  await packed(revision.hash);
+  const added = (await bucket.list({ prefix: 'pack/' })).objects.reduce((n, o) => n + o.size, 0) - before;
+  assert.ok(added < 4096, 'the revision added ' + added + ' bytes of packs, not another copy of the image');
+  const rev = await send('GET', '/mods/build/' + revision.hash);
+  assert.equal(sha(Buffer.from(await rev.arrayBuffer())), sha(revision.bytes));
   const head = await send('HEAD', '/mods/build/' + big.hash);
   assert.equal(head.status, 200);
   assert.equal(head.headers.get('content-length'), String(big.bytes.length), 'HEAD carries the archive size');
@@ -218,7 +246,7 @@ async function mods(mf) {
     await reclaim.arrayBuffer();
   }
 
-  await parts(send, bucket, stored);
+  await parts(send, bucket, stored, packed);
   for (const route of ['/mods/blob/' + big.hash, '/mods/bundle/' + big.hash]) {
     const retired = await send('GET', route);
     assert.equal(retired.status, 404);
@@ -316,16 +344,17 @@ function sizeOf(chunks) {
 }
 
 /* Two parts through the runtime: start, one part, resume, the other, complete, read back. */
-async function parts(send, bucket, stored) {
+async function parts(send, bucket, stored, packed) {
   const salt = 'k7pinkim', hash = sha(randomBytes(32));
   const size = sizeOf(generated(hash, salt, 2, 50 * 1024 * 1024));
   const start = await send('POST', '/mods/build/' + hash + '/parts', JSON.stringify({ size }));
   assert.equal(start.status, 201, await start.clone().text());
   const { partSize, parts: count } = await start.json();
-  assert.equal(count, 2);
+  assert.equal(count, Math.ceil(size / partSize));
+  assert.ok(count > 1);
   /* The same generator, so the bytes are the same: send only part 1, then resume. */
   const gen = () => generated(hash, salt, 2, 50 * 1024 * 1024);
-  await sendInParts(send, hash, gen(), size, partSize, new Set([2]));
+  await sendInParts(send, hash, gen(), size, partSize, new Set(Array.from({ length: count - 1 }, (_, i) => i + 2)));
   const resumed = await send('POST', '/mods/build/' + hash + '/parts', JSON.stringify({ size }));
   assert.deepEqual((await resumed.json()).have, [1]);
   const digest = await sendInParts(send, hash, gen(), size, partSize, new Set([1]));
@@ -335,7 +364,10 @@ async function parts(send, bucket, stored) {
   const got = await send('GET', '/mods/build/' + hash);
   assert.equal(got.status, 200);
   assert.equal(sha(Buffer.from(await got.arrayBuffer())), digest, 'the joined archive is the bytes sent');
+  await packed(hash);
   assert.equal((await stored(hash)).length, 1);
+  const again = await send('GET', '/mods/build/' + hash);
+  assert.equal(sha(Buffer.from(await again.arrayBuffer())), digest, 'and the packed build is the same bytes');
 }
 
 /* A build of `gib` GiB in parts: generated, uploaded, joined, checked and read back. */
