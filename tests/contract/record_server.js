@@ -27,12 +27,12 @@ const mf = new Miniflare({
   durableObjects: { WRITE_QUOTAS: { className: 'CommunityQuota', useSQLite: true }, MOD_REGISTRY: { className: 'ModRegistry', useSQLite: true },
                       MOD_CHECKER: { className: 'ModChecker', useSQLite: true } },
   durableObjectsPersist: path.join(scratch, 'do'), r2Persist: path.join(scratch, 'r2'),
-  kvNamespaces: ['SESSIONS'], r2Buckets: ['MEDIA', 'MODS'], bindings: { MODS_BLOCKED: '[]', MODS_ADMIN_TOKEN: token },
+  kvNamespaces: ['SESSIONS'], r2Buckets: ['MEDIA', 'MODS'], bindings: { MODS_ADMIN_TOKEN: token },
   outboundService: () => { throw new Error('unexpected external request'); },
 });
 
-const SHOWN_REQUEST = ['content-type', 'content-length', 'x-build-size', 'accept', 'range', 'if-range'];
-const SHOWN_RESPONSE = ['content-type', 'content-length', 'x-mod-scripts', 'etag', 'retry-after', 'content-range', 'accept-ranges'];
+const SHOWN_REQUEST = ['content-type', 'content-length', 'x-blob-size', 'accept', 'range', 'if-range', 'x-publisher-key', 'x-publisher-name', 'x-publisher-signature', 'user-agent'];
+const SHOWN_RESPONSE = ['content-type', 'content-length', 'etag', 'retry-after', 'content-range', 'accept-ranges'];
 const exchanges = [];
 
 function shape(value) {
@@ -83,7 +83,10 @@ const server = http.createServer(async (req, res) => {
   }
   res.end();
   const sent = {};
-  for (const k of SHOWN_REQUEST) if (req.headers[k] !== undefined) sent[k] = k === 'content-length' || k === 'x-build-size' ? 'number' : req.headers[k];
+  for (const k of SHOWN_REQUEST) {
+    if (req.headers[k] === undefined) continue;
+    sent[k] = k === 'content-length' || k === 'x-blob-size' ? 'number' : k.startsWith('x-publisher-') ? 'present' : k === 'range' ? 'bytes=<from>-' : req.headers[k];
+  }
   const got = {};
   for (const k of SHOWN_RESPONSE) if (out[k] !== undefined) got[k] = k === 'content-type' || k === 'accept-ranges' ? out[k] : typeof out[k];
   let reqBody = null;

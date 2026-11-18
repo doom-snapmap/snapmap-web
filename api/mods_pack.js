@@ -74,6 +74,14 @@ class Bytes {
 }
 
 const NAME_ENCODER = new TextEncoder();
+const NAME_DECODER_LOOSE = new TextDecoder();
+const u16At = (b, at) => b[at] | (b[at + 1] << 8);
+const u32At = (b, at) => (b[at] | (b[at + 1] << 8) | (b[at + 2] << 16)) + b[at + 3] * 0x1000000;
+function hexBytes(hex) {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
 
 /* The archive of a unit: `manifest` (its exact bytes), `files` ([{ path, sha256, size }] in the
  * manifest's order) and `blobs` (sha -> { object, at, size, crc }: where each blob's bytes are).
@@ -87,15 +95,40 @@ export function unitArchive(manifest, files, blobs) {
     if (last && last[0] === object && last[1] + last[2] === at) last[2] += length;
     else plan.push([object, at, length]);
   };
-  const entries = [{ name: 'unit.json', size: manifest.byteLength, crc: crc32(manifest), inline: manifest }];
+  const entries = [{ name: 'unit.json', size: manifest.byteLength, crc: crc32(manifest), inline: manifest, flags: 0 }];
+  const placed = [];
   for (const f of files) {
     const loc = blobs[f.sha256];
     if (!loc || loc.size !== f.size) return null;
-    entries.push({ name: f.path, size: f.size, crc: loc.crc, loc });
+    placed.push({ name: f.path, size: f.size, crc: loc.crc, loc, flags: 0 });
+  }
+  /* Files in the order their bytes lie in the packs, so the plan reads a few long ranges: one request reads many
+   * files (the platform bounds the requests one answer may make). A file whose blob arrived under this very path
+   * keeps the header it arrived with, which lies in the pack before its bytes. */
+  placed.sort((a, b) => (a.loc.object < b.loc.object ? -1 : a.loc.object > b.loc.object ? 1 : a.loc.at - b.loc.at));
+  const seen = new Set();
+  for (const e of placed) {
+    const stored = e.loc.hlen && typeof e.loc.hdr === 'string' && e.loc.hdr.length === e.loc.hlen * 2 && !seen.has(e.loc.object + ':' + e.loc.at)
+      ? hexBytes(e.loc.hdr) : null;
+    if (stored && stored[0] === 0x50 && stored[1] === 0x4b && stored[2] === 3 && stored[3] === 4 &&
+        u32At(stored, 14) === e.crc && u32At(stored, 18) === e.size && u32At(stored, 22) === e.size &&
+        NAME_DECODER_LOOSE.decode(stored.subarray(30, 30 + u16At(stored, 26))) === e.name) {
+      e.storedHeader = stored;
+      e.flags = u16At(stored, 6);
+      seen.add(e.loc.object + ':' + e.loc.at);
+    }
+    entries.push(e);
   }
   let offset = 0;
   for (const e of entries) {
     const name = NAME_ENCODER.encode(e.name);
+    e.offset = offset;
+    e.nameBytes = name;
+    if (e.storedHeader) {
+      push(e.loc.object, e.loc.at - e.loc.hlen, e.loc.hlen + e.size);
+      offset += e.loc.hlen + e.size;
+      continue;
+    }
     const big = e.size >= M32;
     const h = new Bytes();
     h.u32(SIG_LOCAL); h.u16(big ? 45 : 20); h.u16(0); h.u16(0); h.u16(0); h.u16(0);
@@ -104,8 +137,6 @@ export function unitArchive(manifest, files, blobs) {
     h.push(name);
     if (big) { h.u16(1); h.u16(16); h.u64(e.size); h.u64(e.size); }
     const header = h.bytes();
-    e.offset = offset;
-    e.nameBytes = name;
     const rawAt = raw.length;
     raw.push(header);
     push(null, rawAt, header.byteLength);
@@ -119,7 +150,7 @@ export function unitArchive(manifest, files, blobs) {
     const mu = e.size >= M32, mo = e.offset >= M32;
     const extra = (mu ? 16 : 0) + (mo ? 8 : 0);
     const c = new Bytes();
-    c.u32(SIG_CENTRAL); c.u16(mu || mo ? 45 : 20); c.u16(mu || mo ? 45 : 20); c.u16(0); c.u16(0); c.u16(0); c.u16(0);
+    c.u32(SIG_CENTRAL); c.u16(mu || mo ? 45 : 20); c.u16(mu || mo ? 45 : 20); c.u16(e.flags); c.u16(0); c.u16(0); c.u16(0);
     c.u32(e.crc); c.u32(mu ? M32 : e.size); c.u32(mu ? M32 : e.size);
     c.u16(e.nameBytes.byteLength); c.u16(extra ? extra + 4 : 0); c.u16(0); c.u16(0); c.u16(0); c.u32(0);
     c.u32(mo ? M32 : e.offset);

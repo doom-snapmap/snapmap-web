@@ -859,3 +859,26 @@ test('the reset empties the bucket and the index', async () => {
   const stats = await (await admin(env, 'stats')).json();
   assert.equal(stats.units + stats.blobs + stats.packs + stats.publishers, 0);
 });
+
+test('a unit archive is read in a few long ranges of its packs, whatever its number of files', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const files = {};
+  for (let i = 0; i < 300; i++) files['images/f' + String(i).padStart(3, '0') + '.bimage'] = Buffer.alloc(1000 + i, i & 255);
+  const u = makeUnit(files);
+  await publishUnit(env, key, u);
+  const { archivePlanIn } = await modsModule;
+  const made = await archivePlanIn(env, u.hash);
+  const packRanges = made.plan.filter(p => p[0] !== null).length;
+  assert.ok(packRanges <= 2, 'pack ranges: ' + packRanges);
+  const before = env.MODS.log.filter(l => l[0] === 'get').length;
+  const whole = Buffer.from(await (await fetchWorker(env, call('GET', '/mods/unit/' + u.hash + '/archive'))).arrayBuffer());
+  assert.ok(env.MODS.log.filter(l => l[0] === 'get').length - before <= 3, 'R2 reads for one archive answer');
+  const entries = unzip(whole);
+  assert.equal(entries.length, 301);
+  for (const f of u.files) assert.equal(sha(entries.find(e => e.name === f.path).data), f.sha256);
+  const { ArchiveWalker } = await modsModule;
+  const w = new ArchiveWalker(whole.length, { hash: false });
+  w.push(new Uint8Array(whole)); w.finish();
+  assert.equal(w.error, null);
+});

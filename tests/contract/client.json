@@ -1,105 +1,99 @@
 {
-  "about": "What the Snapmap+ product's mod-store client sends and what it accepts, route by route, read from the product's own source and recorded from a run of that client against this Worker. tests/worker_contract_test.js replays it against the Worker under Miniflare; a Worker change that breaks any line fails CI. When the product's client changes, record it again (README.md in this folder) and update this file in the same change as the Worker.",
+  "about": "What the Snapmap+ product's map-content client sends and what it accepts, route by route, read from the product's own source and recorded from a run of that client against this Worker. tests/worker_contract_test.js replays it against the Worker under Miniflare; a Worker change that breaks any line fails CI. When the product's client changes, record it again (README.md in this folder) and update this file in the same change as the Worker.",
   "product": {
     "repository": "doom-snapmap/snapmap-plus",
-    "commit": "c6a91042",
-    "files": ["src/backend/modnet.c", "src/backend/modnet.h", "src/backend/modsync.c", "src/backend/modbundle.c", "src/backend/modzip.c"],
-    "recorded": "2026-11-17, store_roundtrip (the product's modsync.c, modnet.c, modzip.c and modbundle.c linked unchanged) against this Worker under Miniflare: a 1.3 KB build in one request, two 232 MB and 237 MB builds of one mod in 14 and 15 parts, a second player's download and install of each, a re-claim, releases, a report of a missing file and the asked list."
+    "branch": "owner-dsc1",
+    "files": ["src/backend/modnet.c", "src/backend/modnet.h", "src/backend/modcache.c", "src/backend/modkey.c", "src/backend/modzip.c", "src/backend/modunit.c"],
+    "recorded": "2026-11-18, tests/unit_roundtrip.c (the product's modcache.c, modnet.c, modkey.c, modzip.c and modunit.c linked unchanged) against this Worker under Miniflare and against the staging Worker: two units of the two-demon pack published with a P-256 key, a second player's download into a clean cache, a remix claim with a second key, a report of a missing file, the asked list, three releases."
   },
   "transport": {
     "accept": "application/json, application/octet-stream",
-    "redirects": "never followed (WINHTTP_OPTION_REDIRECT_POLICY_NEVER, modnet.c:416)",
-    "singleRequestMax": 33554432,
-    "singleRequestMaxNote": "MODNET_PART_SIZE (modnet.h:57): an archive up to 32 MiB goes in one PUT, a larger one in parts of the size the store's answer names; the store's one-request limit must be at least this.",
-    "partWorkers": 4,
-    "partTries": 4,
+    "userAgent": "snapmap-plus/<version> (modnet.c MN_AGENT, SPEC-distribution 5.22)",
+    "redirects": "never followed (WINHTTP_OPTION_REDIRECT_POLICY_NEVER)",
+    "oneRequestMax": 99614720,
+    "oneRequestMaxNote": "MODNET_ONE_REQUEST_MAX (modnet.h): an archive of at most 95 MiB in one PUT; modcache.c keeps each archive 1 MiB under it and sends a larger file in parts of the size the store names.",
     "completeTimeoutMs": 900000,
     "receiveTimeoutMs": 30000,
-    "errorBody": "A refusal's body is JSON {\"error\": <sentence>}; the client keeps its printable ASCII, whole, as the message it shows (mn_error_text, modnet.c:597).",
+    "errorBody": "A refusal's body is JSON {\"error\": <sentence>}; the client keeps its printable ASCII, whole, as the message it shows (mn_error_text).",
     "statusCodes": { "400": "REFUSED", "411": "REFUSED", "415": "REFUSED", "422": "REFUSED", "403": "FORBIDDEN", "404": "NOT_FOUND",
-      "409": "CONFLICT", "413": "TOO_LARGE", "429": "RATE", "451": "BLOCKED", "5xx": "UNAVAILABLE", "other": "HTTP (unexpected)" }
+      "409": "CONFLICT", "413": "TOO_LARGE", "429": "RATE", "451": "BLOCKED", "5xx": "UNAVAILABLE", "other": "HTTP (unexpected)" },
+    "signed": "Every write carries X-Publisher-Key (base64url of the 65-byte P-256 point), X-Publisher-Name (the account name percent-encoded, or absent) and X-Publisher-Signature (base64url of the 64-byte P1363 signature) over 'snapmap-plus/request/1\\n' + method + '\\n' + path + '\\n' + name header + '\\n' + hex SHA-256 of the body (modkey.c mk_sign)."
   },
   "routes": {
-    "head": {
-      "source": "modnet_head_build, modnet.c:725-753",
-      "request": { "method": "HEAD", "path": "/mods/build/<hash>", "headers": {}, "body": null },
-      "accepts": { "status": [200], "headers": { "content-length": "integer", "x-mod-scripts": "integer" } },
-      "means": { "404": "the store does not hold or serve the build (the gate asks to upload or says it is missing)", "451": "taken down" }
+    "status": {
+      "source": "modnet_unit_status",
+      "request": { "method": "POST", "path": "/mods/units", "headers": { "content-type": "application/json" }, "body": { "units": "array of hex64, at most 4096" } },
+      "accepts": { "status": [200], "body": "an object naming every unit asked: 'held', 'missing' or 'removed'" }
+    },
+    "manifest": {
+      "source": "modnet_get_unit",
+      "request": { "method": "GET", "path": "/mods/unit/<hash>", "headers": {}, "body": null },
+      "accepts": { "status": [200], "body": "the manifest's bytes, whose SHA-256 is the hash (else MODNET_E_HASH)" },
+      "means": { "404": "not in the store", "451": "removed by moderation" }
+    },
+    "blob": {
+      "source": "modnet_get_blob (mn_get_resumed)",
+      "request": { "method": "GET", "path": "/mods/blob/<hash>", "headers": { "range": "bytes=<from>- when resuming" }, "body": null },
+      "accepts": { "status": [200, 206, 416], "body": "the bytes; 206 the rest from the range; 416 when the file is already whole" }
+    },
+    "archive": {
+      "source": "modnet_get_unit_archive (mn_get_resumed); modcache.c reads it with modzip.c, every entry's CRC-32 and SHA-256 checked",
+      "request": { "method": "GET", "path": "/mods/unit/<hash>/archive", "headers": { "range": "bytes=<from>- when resuming" }, "body": null },
+      "accepts": { "status": [200, 206, 416], "body": "a stored ZIP of unit.json and every file at its path (modzip.c reads it)" }
+    },
+    "begin": {
+      "source": "modnet_begin_unit",
+      "request": { "method": "POST", "path": "/mods/unit/<hash>/begin", "headers": { "content-type": "application/json", "signed": true }, "body": "the manifest's bytes" },
+      "accepts": { "status": [200], "oneOf": [ { "body": { "held": true } }, { "body": { "missing": "array of hex64 (at least one)" } } ] },
+      "means": { "422": "the manifest is refused (a builder defect)", "451": "removed by moderation" }
     },
     "put": {
-      "source": "modnet_put_build, modnet.c:1018-1065 (an archive of at most singleRequestMax bytes)",
-      "request": { "method": "PUT", "path": "/mods/build/<hash>", "headers": { "content-type": "application/zip", "content-length": "integer" }, "body": "archive" },
-      "accepts": { "status": [200, 201] },
-      "means": { "201": "created (stats.builds_created)", "200": "the store held it already" }
+      "source": "modnet_put_unit_archive",
+      "request": { "method": "PUT", "path": "/mods/unit/<hash>/archive", "headers": { "content-type": "application/zip", "content-length": "integer", "signed": true }, "body": "a stored ZIP of unit.json and missing files" },
+      "accepts": { "status": [200, 201], "body": { "held": "boolean" } }
     },
     "partsStart": {
-      "source": "mn_put_parts and mn_parts_state, modnet.c:779-811, 977-995",
-      "request": { "method": "POST", "path": "/mods/build/<hash>/parts", "headers": { "content-type": "application/json" }, "body": { "size": "integer" } },
-      "accepts": { "status": [200, 201], "oneOf": [
-        { "body": { "stored": true } },
-        { "body": { "partSize": "integer>=1", "parts": "integer>=1", "have": "array of part numbers" }, "rule": "ceil(size / partSize) == parts" }
-      ] },
-      "means": { "stored": "nothing is sent and the upload is a success with created = 0" }
+      "source": "modnet_put_blob",
+      "request": { "method": "POST", "path": "/mods/blob/<hash>/parts", "headers": { "content-type": "application/json", "signed": true }, "body": { "size": "integer" } },
+      "accepts": { "status": [200, 201], "body": { "partSize": "integer>=1", "parts": "integer>=1", "have": "array of part numbers" }, "rule": "ceil(size / partSize) == parts" }
     },
     "part": {
-      "source": "mn_parts_worker_proc, modnet.c:866-924",
-      "request": { "method": "PUT", "path": "/mods/build/<hash>/parts/<n>", "headers": { "content-type": "application/octet-stream", "content-length": "integer", "x-build-size": "integer" }, "body": "bytes [(n-1)*partSize, min(size, n*partSize))" },
-      "accepts": { "status": [200] },
-      "means": { "any refusal": "the start is asked again (up to partTries) and resumes from its have list when transient or 404" }
+      "source": "modnet_put_blob",
+      "request": { "method": "PUT", "path": "/mods/blob/<hash>/parts/<n>", "headers": { "content-type": "application/octet-stream", "content-length": "integer", "x-blob-size": "integer" }, "body": "bytes [(n-1)*partSize, min(size, n*partSize))" },
+      "accepts": { "status": [200] }
+    },
+    "partsComplete": {
+      "source": "modnet_put_blob",
+      "request": { "method": "POST", "path": "/mods/blob/<hash>/complete", "headers": { "content-type": "application/json", "signed": true }, "body": { "size": "integer" } },
+      "accepts": { "status": [200, 201] }
     },
     "complete": {
-      "source": "mn_put_parts, modnet.c:999-1014",
-      "request": { "method": "POST", "path": "/mods/build/<hash>/complete", "headers": { "content-type": "application/json" }, "body": { "size": "integer" } },
+      "source": "modnet_complete_unit",
+      "request": { "method": "POST", "path": "/mods/unit/<hash>/complete", "headers": { "content-type": "application/json", "signed": true }, "body": "empty" },
       "accepts": { "status": [200, 201] },
-      "means": { "201": "created", "404 or 409": "the start is asked again", "422": "refused with the store's sentence" }
-    },
-    "get": {
-      "source": "modnet_get_build, modnet.c:1067-1108",
-      "request": { "method": "GET", "path": "/mods/build/<hash>", "headers": {}, "body": null },
-      "accepts": { "status": [200], "body": "the archive, Content-Length bytes (a shorter body is 'ended early'); nothing is checked here, modsync.c verifies every file before installing" }
+      "means": { "409": "a file is still missing" }
     },
     "claim": {
-      "source": "modnet_claim, modnet.c:1110-1172",
-      "request": { "method": "POST", "path": "/mods/claim", "headers": { "content-type": "application/json" }, "body": { "builds": ["hex64"], "ref": "string", "secret?": "hex64" } },
-      "accepts": { "status": [200, 201], "body": { "claim": "hex32", "secret": "hex64" }, "rule": "with a secret sent, the same secret comes back" },
-      "means": { "201": "a new claim", "200": "the claim for this ref and secret now names these builds", "409": "a build is not stored", "403": "no claim matches ref and secret" }
+      "source": "modnet_map_claim",
+      "request": { "method": "POST", "path": "/mods/map/claim", "headers": { "content-type": "application/json", "signed": true }, "body": { "ref": "string", "rev": "integer>=1", "secret": "hex64", "units": "array of hex64" } },
+      "accepts": { "status": [200, 201, 451], "body": { "rev": "integer" } },
+      "means": { "201": "a new claim", "200": "replaced", "451": "made with every unit but the removed ones, named in 'removed'", "409 with rev": "stale: the stored rev", "409 with missing": "upload them first" }
     },
     "release": {
-      "source": "modnet_release, modnet.c:1174-1199",
-      "request": { "method": "POST", "path": "/mods/release", "headers": { "content-type": "application/json" }, "body": { "claim": "hex32", "secret": "hex64" } },
-      "accepts": { "status": [200, 204] }
+      "source": "modnet_map_release",
+      "request": { "method": "POST", "path": "/mods/map/release", "headers": { "content-type": "application/json", "signed": true }, "body": { "ref": "string", "rev": "integer>=1", "secret": "hex64" } },
+      "accepts": { "status": [204] },
+      "means": { "404": "no such claim", "409 with rev": "stale" }
     },
     "asked": {
-      "source": "modnet_report_asked, modnet.c:1201-1234",
-      "request": { "method": "POST", "path": "/mods/build/<hash>/asked", "headers": { "content-type": "application/json" }, "body": { "by": "string", "request": "string" } },
-      "accepts": { "status": [200, 204] },
-      "means": { "404": "the store does not hold the build, or it is a whole build" }
+      "source": "modnet_unit_asked",
+      "request": { "method": "POST", "path": "/mods/unit/<hash>/asked", "headers": { "content-type": "application/json" }, "body": { "path": "string" } },
+      "accepts": { "status": [204] }
     },
     "askedList": {
-      "source": "modnet_list_asked, modnet.c:1236-1272",
-      "request": { "method": "POST", "path": "/mods/asked", "headers": { "content-type": "application/json" }, "body": { "claim": "hex32", "secret": "hex64" } },
-      "accepts": { "status": [200], "body": { "asked": [{ "build": "hex64", "salt": "string", "request": "string", "by": "string" }] } }
+      "source": "modnet_asked_units",
+      "request": { "method": "POST", "path": "/mods/asked", "headers": { "content-type": "application/json", "signed": true }, "body": { "claims": [ { "ref": "string", "secret": "hex64" } ] } },
+      "accepts": { "status": [200], "body": { "asked": [ { "unit": "hex64", "root": "string", "path": "string" } ] } }
     }
-  },
-  "archive": {
-    "source": "modsync_write_archive (modsync.c) through modzip.c",
-    "form": "stored entries (method 0) with sizes in the local header, mod.json first, then assets/<request> per carried file in the block's order, then the central directory, ZIP64 records where a value needs them, the end record; a part of a build adds source.json",
-    "carriedExtensions": ["decl", "bmd6model", "bmd6skl", "bmd6anim", "bimage", "bmodel", "bcm", "bnk", "json", "bin", "vspv", "fspv", "cspv", "mrpr", "dmodel", "pmodel"],
-    "carriedExtensionsSource": "sh_mb_extension_allowed, modbundle.c (the list, then .bswf under generated/swf/, .lua under mods/<salt>/scripts/, .mega2 virtual-texture members, .baas_<class>)",
-    "verifiedOnDownload": "msy_archive_matches and msy_unpack, modsync.c:1189-1292: mod.json loads and its canonical hash is the row's build, the salt is the row's, every carried file is present with its size and SHA-256, nothing else is in the archive, a part's source.json hashes to its slice-of"
-  },
-  "recorded": [
-    { "method": "PUT", "route": "/mods/build/<hash>", "status": 201 },
-    { "method": "HEAD", "route": "/mods/build/<hash>", "status": 200 },
-    { "method": "HEAD", "route": "/mods/build/<hash>", "status": 404 },
-    { "method": "GET", "route": "/mods/build/<hash>", "status": 200 },
-    { "method": "POST", "route": "/mods/build/<hash>/parts", "status": 201 },
-    { "method": "PUT", "route": "/mods/build/<hash>/parts/<n>", "status": 200 },
-    { "method": "POST", "route": "/mods/build/<hash>/complete", "status": 201 },
-    { "method": "POST", "route": "/mods/claim", "status": 201 },
-    { "method": "POST", "route": "/mods/claim", "status": 200 },
-    { "method": "POST", "route": "/mods/release", "status": 204 },
-    { "method": "POST", "route": "/mods/build/<hash>/asked", "status": 404 },
-    { "method": "POST", "route": "/mods/asked", "status": 200 }
-  ]
+  }
 }

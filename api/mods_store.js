@@ -847,7 +847,7 @@ export async function checkUnitArchiveIn(env, hash, object, size, auth) {
     if (f.sha256 !== e.sha || f.size !== e.size) return refuseWith(422, 'The archive\'s ' + shown(e.name) + ' is not the file the unit\'s manifest names.');
     if (e.crcComputed !== e.crc) return refuseWith(422, 'The archive\'s ' + shown(e.name) + ' does not have the CRC-32 its header gives.');
     if (e.scriptFault) return refuseWith(422, shown(e.name) + ' ' + e.scriptFault + '.');
-    blobs.push({ sha: e.sha, size: e.size, crc: e.crc, at: e.offset, hlen: e.header.byteLength, hdr: '' });
+    blobs.push({ sha: e.sha, size: e.size, crc: e.crc, at: e.offset, hlen: e.header.byteLength, hdr: hexOf(e.header) });
   }
   if (!manifestSeen) return refuseWith(422, 'The archive has no unit.json.');
   const result = await registry(env, 'commitUnitArchive', hash, object, size, blobs);

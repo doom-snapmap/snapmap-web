@@ -292,9 +292,9 @@ export function unitServed(storage, hash, withBlobs = false) {
   const out = { manifest: u.manifest, manifestObject: u.manifest_object, mlen: u.mlen, size: u.size };
   if (withBlobs) {
     out.blobs = {};
-    for (const r of rows(storage, 'SELECT b.sha AS sha, b.size AS size, b.crc AS crc, b.at AS at, b.hlen AS hlen, p.object AS object ' +
+    for (const r of rows(storage, 'SELECT b.sha AS sha, b.size AS size, b.crc AS crc, b.at AS at, b.hlen AS hlen, b.hdr AS hdr, p.object AS object ' +
       'FROM unit_blob x JOIN blob b ON b.sha = x.sha JOIN pack p ON p.id = b.pack WHERE x.unit = ?', u.id)) {
-      out.blobs[r.sha] = { object: r.object, at: r.at + r.hlen, size: r.size, crc: r.crc };
+      out.blobs[r.sha] = { object: r.object, at: r.at + r.hlen, size: r.size, crc: r.crc, hlen: r.hlen, hdr: r.hdr };
     }
   }
   return out;

@@ -1,16 +1,16 @@
 'use strict';
-/* The product's mod-store client against this Worker: every request in the shape the client
- * sends it (tests/contract/client.json, read from the product's modnet.c and recorded from a run
- * of the product's own client), every answer checked against what the client accepts, under
- * Miniflare (the real runtime, with R2, the registry's alarm and its packer).
+/* The product's map-content client against this Worker: every request in the shape the client sends it
+ * (tests/contract/client.json, read from the product's modnet.c and modcache.c and recorded from a run of the
+ * product's own client, tests/unit_roundtrip.c there), signed as modkey.c signs, every answer checked against what
+ * the client accepts, under Miniflare (the real runtime, with R2 and the registry and checker Durable Objects).
  *
  *   node tests/worker_contract_test.js <miniflare module path> */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
-const { createHash, randomBytes } = require('node:crypto');
+const zlib = require('node:zlib');
+const { createHash, randomBytes, generateKeyPairSync, sign: nodeSign } = require('node:crypto');
 const { Miniflare } = require(process.argv[2] ? path.resolve(process.argv[2]) : 'miniflare');
 
 const root = path.join(__dirname, '..');
@@ -19,16 +19,13 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'snapmap-web-contract-'));
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const observed = new Set();
 
-/* ---------------- archives in the client's form (modzip.c) ---------------- */
-
-const CRC = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
-function crc32(bytes) { let c = 0xffffffff; for (const b of bytes) c = CRC[(c ^ b) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+/* ---------------- the client's forms ---------------- */
 
 function zip(entries) {
   const parts = [], records = [];
   let offset = 0;
   for (const { name, data } of entries) {
-    const n = Buffer.from(name), local = Buffer.alloc(30), crc = crc32(data);
+    const n = Buffer.from(name), local = Buffer.alloc(30), crc = zlib.crc32(data);
     local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x21, 12); local.writeUInt32LE(crc, 14);
     local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(n.length, 26);
     parts.push(local, n, data);
@@ -50,25 +47,43 @@ function zip(entries) {
   return Buffer.concat(parts);
 }
 
-/* A built mod as the product writes it: the author part, the builder block, the archive. */
-function built(salt, files, block = {}) {
-  const hash = sha(randomBytes(32));
-  const doc = { name: 'Contract Imp', author: 'contract', 'snapmap-plus': { format: 2, salt, rules: 12, built: 1794000000, build: hash,
-    tree: 'a'.repeat(64), classes: { adds: files.length }, editor: [], registries: {}, ...block,
-    files: files.map(f => ({ needs: [], path: 'assets/' + f.request, provides: { name: f.request, type: 'image' }, sha256: sha(f.data), size: f.data.length })) } };
-  const modjson = Buffer.from(JSON.stringify(doc, null, 2) + '\n');
-  return { hash, bytes: zip([{ name: 'mod.json', data: modjson }, ...files.map(f => ({ name: 'assets/' + f.request, data: f.data }))]) };
+function canonical(value) {
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}';
+  return JSON.stringify(value);
+}
+
+function unit(files) {
+  const list = Object.keys(files).sort().map(p => ({ path: p, sha256: sha(files[p]), size: files[p].length }));
+  const manifest = Buffer.from(canonical({ files: list, format: 1, game: [], mod: {}, root: { kind: 'entity', name: 'entities/contract' } }));
+  return { hash: sha(manifest), manifest, list, files };
+}
+
+function key() {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const jwk = publicKey.export({ format: 'jwk' });
+  return { privateKey, pub: Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]).toString('base64url') };
+}
+
+/* modkey.c mk_sign's headers. */
+function signedHeaders(k, method, route, body, name) {
+  const header = name ? encodeURIComponent(name) : '';
+  const message = 'snapmap-plus/request/1\n' + method + '\n' + route + '\n' + header + '\n' + sha(body);
+  const h = { 'X-Publisher-Key': k.pub, 'X-Publisher-Signature': nodeSign('sha256', Buffer.from(message), { key: k.privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url') };
+  if (header) h['X-Publisher-Name'] = header;
+  return h;
 }
 
 /* ---------------- checking an answer against what the client accepts ---------------- */
 
 function typed(value, type) {
   if (type === 'hex64') return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
-  if (type === 'hex32') return typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
   if (type === 'string') return typeof value === 'string';
+  if (type === 'boolean') return typeof value === 'boolean';
   if (type === 'integer') return Number.isSafeInteger(value);
   if (type === 'integer>=1') return Number.isSafeInteger(value) && value >= 1;
   if (type === 'array of part numbers') return Array.isArray(value) && value.every(n => Number.isSafeInteger(n) && n >= 1);
+  if (type === 'array of hex64 (at least one)') return Array.isArray(value) && value.length > 0 && value.every(v => typed(v, 'hex64'));
   if (type === true) return value === true;
   if (Array.isArray(type)) return Array.isArray(value) && value.every(v => Object.entries(type[0]).every(([k, t]) => typed(v[k], t)));
   throw new Error('unknown type ' + JSON.stringify(type));
@@ -78,117 +93,83 @@ function bodyMatches(body, spec) {
   return body && Object.entries(spec).every(([k, t]) => typed(body[k], t));
 }
 
-/* Sends a request the way the client builds it for `route` and checks the answer. Returns the
- * response and, for JSON, its body. */
-async function exchange(send, routeName, { hash, n, body, bytes, size, expect } = {}) {
-  const spec = contract.routes[routeName];
-  const p = spec.request.path.replace('<hash>', hash || '').replace('<n>', String(n));
-  const headers = { Accept: contract.transport.accept };
-  let payload;
-  if (spec.request.headers['content-type']) headers['Content-Type'] = spec.request.headers['content-type'];
-  if (body !== undefined) payload = JSON.stringify(body);
-  if (bytes !== undefined) payload = bytes;
-  if (payload !== undefined) headers['Content-Length'] = String(Buffer.byteLength(payload));
-  if (spec.request.headers['x-build-size']) headers['X-Build-Size'] = String(size);
-  const response = await send(spec.request.method, p, payload, headers);
-  const route = spec.request.path.replace(/\/parts\/<n>$/, '/parts/<n>');
-  observed.add(spec.request.method + ' ' + route + ' ' + response.status);
-  const json = (response.headers.get('content-type') || '').startsWith('application/json') && spec.request.method !== 'HEAD'
-    ? await response.json() : null;
-  if (!json && spec.request.method !== 'GET') await response.arrayBuffer();
-  const what = routeName + ' ' + response.status;
-  if (expect !== undefined) assert.equal(response.status, expect, what + ' ' + JSON.stringify(json));
-  if (response.status >= 400) {
-    /* What the client shows: the printable ASCII of "error", whole. */
-    if (spec.request.method !== 'HEAD') assert.ok(json && typeof json.error === 'string' && /^[\x20-\x7e]+$/.test(json.error), what + ': a refusal is one sentence');
-    return { response, json };
-  }
-  assert.ok(spec.accepts.status.includes(response.status), what + ': a status the client accepts');
-  for (const [header, type] of Object.entries(spec.accepts.headers || {})) {
-    const value = response.headers.get(header);
-    assert.ok(value !== null && (type !== 'integer' || /^\d+$/.test(value)), what + ': ' + header);
-  }
-  if (spec.accepts.body && typeof spec.accepts.body === 'object') assert.ok(bodyMatches(json, spec.accepts.body), what + ': ' + JSON.stringify(json));
-  if (spec.accepts.oneOf) {
-    const which = spec.accepts.oneOf.find(o => bodyMatches(json, o.body));
-    assert.ok(which, what + ': the parts answer is one of the forms the client reads: ' + JSON.stringify(json));
-    if (which.rule) assert.equal(Math.ceil(size / json.partSize), json.parts, 'ceil(size / partSize) == parts');
-  }
-  return { response, json };
-}
-
-/* The client's upload: one PUT up to the single-request maximum, else parts, four at a time. */
-async function upload(send, archive) {
-  const size = archive.bytes.length;
-  if (size <= contract.transport.singleRequestMax) return exchange(send, 'put', { hash: archive.hash, bytes: archive.bytes });
-  const { json } = await exchange(send, 'partsStart', { hash: archive.hash, body: { size }, size });
-  if (json.stored) return { json };
-  const todo = Array.from({ length: json.parts }, (_, i) => i + 1).filter(k => !json.have.includes(k));
-  const worker = async () => {
-    for (let k; (k = todo.shift()) !== undefined;) {
-      const bytes = archive.bytes.subarray((k - 1) * json.partSize, Math.min(size, k * json.partSize));
-      await exchange(send, 'part', { hash: archive.hash, n: k, bytes, size, expect: 200 });
-    }
-  };
-  await Promise.all(Array.from({ length: contract.transport.partWorkers }, worker));
-  return exchange(send, 'complete', { hash: archive.hash, body: { size } });
+/* One exchange in the client's shape: the request built from client.json's route, the answer checked. */
+async function exchange(mf, name, { hash, n, body, json, signer, headers = {}, expect }) {
+  const r = contract.routes[name];
+  assert.ok(r, 'client.json has no route ' + name);
+  const route = r.request.path.replace('<hash>', hash || '').replace('<n>', String(n || ''));
+  const bytes = body !== undefined ? Buffer.from(body) : json !== undefined ? Buffer.from(JSON.stringify(json)) : null;
+  const h = { 'User-Agent': 'snapmap-plus/1.0', Accept: contract.transport.accept, 'CF-Connecting-IP': '203.0.113.50', ...headers };
+  if (r.request.headers['content-type']) h['Content-Type'] = r.request.headers['content-type'];
+  if (bytes) h['Content-Length'] = String(bytes.length);
+  if (r.request.headers.signed) Object.assign(h, signedHeaders(signer, r.request.method, route, bytes || Buffer.alloc(0), 'Contract Tester'));
+  const res = await mf.dispatchFetch('http://local.test' + route, { method: r.request.method, body: r.request.method === 'GET' ? undefined : (bytes || Buffer.alloc(0)), headers: h });
+  const raw = Buffer.from(await res.arrayBuffer());
+  const statuses = expect ? [expect] : r.accepts.status;
+  assert.ok(statuses.includes(res.status), name + ' answered ' + res.status + ': ' + raw.toString().slice(0, 300));
+  let parsed = null;
+  if ((res.headers.get('content-type') || '').startsWith('application/json')) parsed = JSON.parse(raw.toString('utf8'));
+  if (!expect && r.accepts.body && typeof r.accepts.body === 'object' && res.status < 300) assert.ok(bodyMatches(parsed, r.accepts.body), name + ' answer shape: ' + raw.toString().slice(0, 300));
+  if (!expect && r.accepts.oneOf) assert.ok(r.accepts.oneOf.some(o => bodyMatches(parsed, o.body)), name + ' answer: ' + raw.toString());
+  if (res.status >= 400) assert.ok(parsed && typeof parsed.error === 'string' && /^[\x20-\x7e]+$/.test(parsed.error), name + ' refusal is one plain sentence');
+  observed.add(name);
+  return { status: res.status, body: parsed, raw, headers: res.headers };
 }
 
 async function run() {
-  /* What the store must mirror of the product's rules. */
-  const mods = await import(pathToFileURL(path.join(root, 'api', 'mods_store.js')));
-  for (const ext of contract.archive.carriedExtensions) assert.ok(mods.CARRIED_EXTENSIONS.has(ext), 'the store carries .' + ext + ', as the product builder does');
-  assert.ok(mods.ONE_REQUEST_MAX >= contract.transport.singleRequestMax, 'the store takes in one request what the client sends in one');
-
   const mf = new Miniflare({
     name: 'contract', modules: true, modulesRoot: root, scriptPath: path.join(root, 'api/worker.js'),
     modulesRules: [{ type: 'ESModule', include: ['**/*.js'] }], compatibilityDate: '2026-07-01',
     durableObjects: { WRITE_QUOTAS: { className: 'CommunityQuota', useSQLite: true }, MOD_REGISTRY: { className: 'ModRegistry', useSQLite: true },
                       MOD_CHECKER: { className: 'ModChecker', useSQLite: true } },
-    durableObjectsPersist: path.join(scratch, 'do'), kvNamespaces: ['SESSIONS'], r2Buckets: ['MEDIA', 'MODS'], bindings: { MODS_BLOCKED: '[]' },
+    durableObjectsPersist: path.join(scratch, 'do'), r2Persist: path.join(scratch, 'r2'),
+    kvNamespaces: ['SESSIONS'], r2Buckets: ['MEDIA', 'MODS'],
     outboundService: () => { throw new Error('unexpected external request'); },
   });
   try {
-    const send = (method, route, body, headers) => mf.dispatchFetch('http://local.test' + route, { method, body, headers });
-    const salt = 'c0ntract';
-    const small = built(salt, [{ request: 'generated/image/mods/' + salt + '/small.bimage', data: randomBytes(4096) }]);
-    const large = built(salt, [{ request: 'generated/image/mods/' + salt + '/large.bimage', data: randomBytes(contract.transport.singleRequestMax + 1024) },
-      { request: 'mods/' + salt + '/scripts/main.lua', data: Buffer.from('return {}\n') }], { scripts: { files: 1 } });
-
-    /* Publish: HEAD each build, upload the ones the store lacks, claim them under the item. */
-    for (const b of [small, large]) {
-      await exchange(send, 'head', { hash: b.hash, expect: 404 });
-      const { response } = await upload(send, b);
-      assert.equal(response.status, 201, 'a new build is created');
+    const a = key(), b = key();
+    const big = randomBytes(16 * 1024 * 1024 + 3000);
+    const u = unit({ 'entities/contract.decl': Buffer.from('entityDef'), 'images/contract.bimage': randomBytes(70000),
+      'virtual-textures/contract_sq1.mega2': big });
+    let x = await exchange(mf, 'status', { json: { units: [u.hash] } });
+    assert.equal(x.body[u.hash], 'missing');
+    x = await exchange(mf, 'begin', { hash: u.hash, body: u.manifest, signer: a });
+    assert.equal(x.body.missing.length, 3);
+    const bigSha = sha(big);
+    x = await exchange(mf, 'partsStart', { hash: bigSha, json: { size: big.length }, signer: a });
+    assert.equal(Math.ceil(big.length / x.body.partSize), x.body.parts);
+    for (let n = 1; n <= x.body.parts; n++) {
+      const part = big.subarray((n - 1) * x.body.partSize, n * x.body.partSize);
+      await exchange(mf, 'part', { hash: bigSha, n, body: part, headers: { 'X-Blob-Size': String(big.length) } });
     }
-    const { json: made } = await exchange(send, 'claim', { body: { builds: [small.hash, large.hash], ref: 'contract-item' }, expect: 201 });
-
-    /* A player: HEAD (size and scripts before asking), GET, byte for byte. */
-    for (const b of [small, large]) {
-      const { response } = await exchange(send, 'head', { hash: b.hash, expect: 200 });
-      assert.equal(response.headers.get('content-length'), String(b.bytes.length));
-      assert.equal(response.headers.get('x-mod-scripts'), b === large ? '1' : '0');
-      const got = await exchange(send, 'get', { hash: b.hash, expect: 200 });
-      assert.equal(sha(Buffer.from(await got.response.arrayBuffer())), sha(b.bytes), 'the archive comes back byte for byte');
-    }
-
-    /* Republish: what the store holds under a claim is not sent again; the re-claim keeps its secret. */
-    const again = await upload(send, large);
-    assert.ok(again.json.stored, 'a claimed build is answered "stored", so the client sends nothing');
-    const { json: kept } = await exchange(send, 'claim', { body: { builds: [large.hash], ref: 'contract-item', secret: made.secret }, expect: 200 });
-    assert.equal(kept.secret, made.secret, 'with a secret sent, the same secret comes back');
-    await exchange(send, 'head', { hash: small.hash, expect: 404 });
-
-    /* What players asked for: a whole build lacks nothing; the claim's list is readable. */
-    await exchange(send, 'asked', { hash: large.hash, body: { by: 'contract', request: 'generated/image/mods/' + salt + '/x.bimage' }, expect: 404 });
-    const { json: list } = await exchange(send, 'askedList', { body: { claim: made.claim, secret: made.secret }, expect: 200 });
-    assert.deepEqual(list, { asked: [] });
-
-    /* Unpublish: the release deletes what no claim names. */
-    await exchange(send, 'release', { body: { claim: made.claim, secret: made.secret }, expect: 204 });
-    await exchange(send, 'head', { hash: large.hash, expect: 404 });
-
-    for (const r of contract.recorded) assert.ok(observed.has(r.method + ' ' + r.route + ' ' + r.status), 'the recorded exchange ' + JSON.stringify(r) + ' was replayed');
+    await exchange(mf, 'partsComplete', { hash: bigSha, json: { size: big.length }, signer: a });
+    const rest = u.list.filter(f => f.sha256 !== bigSha).map(f => ({ name: f.path, data: u.files[f.path] }));
+    x = await exchange(mf, 'put', { hash: u.hash, body: zip([{ name: 'unit.json', data: u.manifest }, ...rest]), signer: a });
+    assert.equal(x.body.held, true);
+    await exchange(mf, 'complete', { hash: u.hash, body: '', signer: a });
+    x = await exchange(mf, 'begin', { hash: u.hash, body: u.manifest, signer: b });
+    assert.equal(x.body.held, true);
+    x = await exchange(mf, 'manifest', { hash: u.hash });
+    assert.equal(sha(x.raw), u.hash);
+    x = await exchange(mf, 'blob', { hash: bigSha, headers: { Range: 'bytes=1000-' } });
+    assert.equal(x.status, 206);
+    assert.ok(x.raw.equals(big.subarray(1000)));
+    x = await exchange(mf, 'archive', { hash: u.hash });
+    assert.equal(x.status, 200);
+    x = await exchange(mf, 'claim', { json: { ref: 'contract-map', rev: 1, secret: 'a'.repeat(64), units: [u.hash] }, signer: a });
+    assert.equal(x.status, 201);
+    assert.equal(x.body.rev, 1);
+    x = await exchange(mf, 'claim', { json: { ref: 'contract-map', rev: 1, secret: 'a'.repeat(64), units: [u.hash] }, signer: a, expect: 409 });
+    assert.equal(x.body.rev, 1);
+    x = await exchange(mf, 'claim', { json: { ref: 'contract-remix', rev: 1, secret: 'b'.repeat(64), units: [u.hash] }, signer: b });
+    await exchange(mf, 'asked', { hash: u.hash, json: { path: 'images/contract_missing.bimage' } });
+    x = await exchange(mf, 'askedList', { json: { claims: [{ ref: 'contract-map', secret: 'a'.repeat(64) }] }, signer: a });
+    assert.deepEqual(x.body.asked.map(e => e.path), ['images/contract_missing.bimage']);
+    await exchange(mf, 'release', { json: { ref: 'contract-map', rev: 2, secret: 'a'.repeat(64) }, signer: a });
+    await exchange(mf, 'release', { json: { ref: 'contract-map', rev: 3, secret: 'a'.repeat(64) }, signer: a, expect: 404 });
+    await exchange(mf, 'release', { json: { ref: 'contract-remix', rev: 2, secret: 'b'.repeat(64) }, signer: b });
+    x = await exchange(mf, 'manifest', { hash: u.hash });   /* the deletion delay: still served */
+    for (const name of Object.keys(contract.routes)) assert.ok(observed.has(name), 'route not exercised: ' + name);
     console.log('worker contract: ' + observed.size + ' kinds of exchange, every one the product client makes, answered as it accepts');
   } finally { await mf.dispose(); }
 }
