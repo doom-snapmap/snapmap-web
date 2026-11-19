@@ -94,10 +94,10 @@ function bodyMatches(body, spec) {
 }
 
 /* One exchange in the client's shape: the request built from client.json's route, the answer checked. */
-async function exchange(mf, name, { hash, n, body, json, signer, headers = {}, expect }) {
+async function exchange(mf, name, { hash, n, mask, body, json, signer, headers = {}, expect }) {
   const r = contract.routes[name];
   assert.ok(r, 'client.json has no route ' + name);
-  const route = r.request.path.replace('<hash>', hash || '').replace('<n>', String(n || ''));
+  const route = r.request.path.replace('<hash>', hash || '').replace('<n>', String(n || '')).replace('<mask>', mask || '');
   const bytes = body !== undefined ? Buffer.from(body) : json !== undefined ? Buffer.from(JSON.stringify(json)) : null;
   const h = { 'User-Agent': 'snapmap-plus/1.0', Accept: contract.transport.accept, 'CF-Connecting-IP': '203.0.113.50', ...headers };
   if (r.request.headers['content-type']) h['Content-Type'] = r.request.headers['content-type'];
@@ -149,13 +149,17 @@ async function run() {
     await exchange(mf, 'complete', { hash: u.hash, body: '', signer: a });
     x = await exchange(mf, 'begin', { hash: u.hash, body: u.manifest, signer: b });
     assert.equal(x.body.held, true);
-    x = await exchange(mf, 'manifest', { hash: u.hash });
-    assert.equal(sha(x.raw), u.hash);
     x = await exchange(mf, 'blob', { hash: bigSha, headers: { Range: 'bytes=1000-' } });
     assert.equal(x.status, 206);
     assert.ok(x.raw.equals(big.subarray(1000)));
     x = await exchange(mf, 'archive', { hash: u.hash });
     assert.equal(x.status, 200);
+    assert.ok(x.raw.includes(u.manifest), 'the archive brings the manifest (unit.json)');
+    /* The files a player lacks: the manifest's first and third (bits 0 and 2), not the second. */
+    x = await exchange(mf, 'archiveWanted', { hash: u.hash, mask: Buffer.from([0x05]).toString('base64url') });
+    assert.equal(x.status, 200);
+    assert.ok(x.raw.includes(u.files[u.list[0].path]) && x.raw.includes(u.files[u.list[2].path]) &&
+              !x.raw.includes(u.files[u.list[1].path]), 'the archive carries the files the mask names, and only those');
     x = await exchange(mf, 'claim', { json: { ref: 'contract-map', rev: 1, secret: 'a'.repeat(64), units: [u.hash] }, signer: a });
     assert.equal(x.status, 201);
     assert.equal(x.body.rev, 1);
@@ -168,7 +172,7 @@ async function run() {
     await exchange(mf, 'release', { json: { ref: 'contract-map', rev: 2, secret: 'a'.repeat(64) }, signer: a });
     await exchange(mf, 'release', { json: { ref: 'contract-map', rev: 3, secret: 'a'.repeat(64) }, signer: a, expect: 404 });
     await exchange(mf, 'release', { json: { ref: 'contract-remix', rev: 2, secret: 'b'.repeat(64) }, signer: b });
-    x = await exchange(mf, 'manifest', { hash: u.hash });   /* the deletion delay: still served */
+    x = await exchange(mf, 'archive', { hash: u.hash });   /* the deletion delay: still served */
     for (const name of Object.keys(contract.routes)) assert.ok(observed.has(name), 'route not exercised: ' + name);
     console.log('worker contract: ' + observed.size + ' kinds of exchange, every one the product client makes, answered as it accepts');
   } finally { await mf.dispose(); }

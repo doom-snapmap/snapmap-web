@@ -58,7 +58,7 @@ read back a generated build of that size in parts through the runtime.
 | `POST /community/reactions`, `/community/preview` | React to content or preview Markdown. |
 | `POST /media/upload`, `GET /media/:key` | Store or retrieve a screenshot. |
 | `POST /mods/units` | Whether the store holds each of up to 4,096 units: held, missing or removed. |
-| `GET /mods/unit/:hash`, `/mods/unit/:hash/archive`, `/mods/blob/:sha` | A unit's manifest, a ZIP of the unit, or one file's bytes (ranges resume). |
+| `GET /mods/unit/:hash`, `/mods/unit/:hash/archive[?want=<mask>]`, `/mods/blob/:sha` | A unit's manifest, a ZIP of `unit.json` and the unit's files (or the files a mask names: bit i of the base64url bytes, byte i >> 3, is the manifest's file i), or one file's bytes (ranges resume). A player's game gets a unit with the archive alone, in one request. |
 | `POST /mods/unit/:hash/begin`, `PUT /mods/unit/:hash/archive`, `POST /mods/unit/:hash/complete` | Upload a unit: its manifest, then the files the store lacks (signed). |
 | `POST /mods/blob/:sha/parts`, `PUT /mods/blob/:sha/parts/:n`, `POST /mods/blob/:sha/complete` | Upload one file larger than one request in parts. |
 | `POST /mods/map/claim`, `/mods/map/release` | Make, replace or release a published map's claim of units (signed, with its secret and rev). |
@@ -113,6 +113,14 @@ again, and a file the store holds already is dead space in the later pack. A blo
 (`blob/<sha>/<32 hex>`). The archive route writes `unit.json` and the unit's files in the order their bytes lie in the
 packs, reusing each stored header, so one answer reads a few long R2 ranges whatever the unit's file count
 (`api/mods_pack.js`).
+
+Rows written are what the account's plan counts (100,000 a day on Workers Free, billed past the included amount on
+Workers Paid), every index a row of its own. A blob is one row (schema 5: keyed by its SHA-256, no row id and no
+index by pack, so finding a missing pack's blobs scans); a unit's link to each of its files is two (the link and its
+index by SHA-256, which every refcount and promotion reads); a purge changes each pack's counts once, not once per
+file; the schema row is written only when it changes. The hourly counters of the quota objects are one row each.
+`api/sql_meter.js` counts what each object's SQL reads and writes (`stats.sql` of the admin stats route), and
+`tests/worker_rows_test.js` measures a publish and a download under Miniflare.
 
 A unit no claim names records the store-clock time it lost its last claim (or its begin) and is kept and served for
 24 hours (`DELETE_DELAY_MS`), so a download in flight never meets a delete; a claim within the delay clears it; the daily

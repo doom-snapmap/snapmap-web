@@ -6,16 +6,19 @@ import {
   abandonUploads, deadObjects, forgetDead, unnamedObjects, storeStats, resetRegistry,
 } from './mods_registry_store.js';
 import { beginIn, checkUnitArchiveIn, checkBlobIn, archivePlanIn, askedIn } from './mods_store.js';
+import { meteredStorage } from './sql_meter.js';
 
 /* The single mod store index (named "registry"); see mods_registry_store.js. Every method is one
  * transaction on the object's SQLite storage, with the object's clock. */
 export class ModRegistry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
-    initializeRegistry(this.ctx.storage);
+    this.metered = meteredStorage(this.ctx.storage);
+    initializeRegistry(this.metered.storage);
   }
 
-  get s() { return this.ctx.storage; }
+  /* Every call's storage, counted (sql_meter.js): what the calls before it spent is settled first. */
+  get s() { this.metered.settle(); return this.metered.storage; }
   unitStatus(hashes) { return unitStatus(this.s, hashes); }
   unitRow(hash) { return unitRow(this.s, hash); }
   unitServed(hash, withBlobs) { return unitServed(this.s, hash, withBlobs); }
@@ -47,7 +50,7 @@ export class ModRegistry extends DurableObject {
   deadObjects(limit) { return deadObjects(this.s, limit); }
   forgetDead(objects) { return forgetDead(this.s, objects); }
   unnamedObjects(keys) { return unnamedObjects(this.s, keys); }
-  stats() { return storeStats(this.s); }
+  stats() { const stats = storeStats(this.s); return { ...stats, sql: { ...this.metered.settle() } }; }
   meta(key, value) {
     if (value !== undefined) {
       this.s.sql.exec('INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value));
@@ -66,6 +69,6 @@ export class ModChecker extends DurableObject {
   begin(hash, bytes, auth) { return beginIn(this.env, hash, bytes, auth); }
   archive(hash, object, size, auth) { return checkUnitArchiveIn(this.env, hash, object, size, auth); }
   blob(sha, object, size) { return checkBlobIn(this.env, sha, object, size); }
-  plan(hash) { return archivePlanIn(this.env, hash); }
+  plan(hash, want) { return archivePlanIn(this.env, hash, want); }
   asked(hash, path) { return askedIn(this.env, hash, path); }
 }

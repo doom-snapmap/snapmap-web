@@ -880,13 +880,30 @@ export async function checkBlobIn(env, sha, object, size) {
 }
 
 /* The serving plan of a unit's archive: { size, plan, raw } or null when it is not served. */
-export async function archivePlanIn(env, hash) {
+/* The files a `want` mask names, in the manifest's order: bit i (byte i >> 3, value 1 << (i & 7)) is the manifest's
+ * file i. The mask is base64url of exactly ceil(files / 8) bytes; null for none (every file); 'bad' for one that is
+ * not such a mask. */
+export function wantedFiles(files, want) {
+  if (want === null || want === undefined) return files;
+  if (typeof want !== 'string' || !/^[A-Za-z0-9_-]*$/.test(want)) return 'bad';
+  let mask;
+  try { mask = Uint8Array.from(atob(want.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(want.length / 4) * 4, '=')), c => c.charCodeAt(0)); }
+  catch { return 'bad'; }
+  if (mask.length !== Math.ceil(files.length / 8)) return 'bad';
+  return files.filter((f, i) => mask[i >> 3] & (1 << (i & 7)));
+}
+
+/* The serving plan of a unit's archive: unit.json and every file, or (`want`) the files a mask names, so a player who
+ * holds most of a unit's files already still gets the rest in one request. */
+export async function archivePlanIn(env, hash, want = null) {
   const served = await registry(env, 'unitServed', hash, true);
   if (!served) return null;
   const mbytes = await manifestBytes(env, served);
   const verdict = mbytes ? unitVerdict(mbytes) : null;
   if (!verdict || verdict.error) return null;
-  return unitArchive(mbytes, verdict.files, served.blobs);
+  const files = wantedFiles(verdict.files, want);
+  if (files === 'bad') return { bad: true };
+  return unitArchive(mbytes, files, served.blobs);
 }
 
 /* A player's game asked unit `hash` for `path` (3.8). Returns { status, body }. */
@@ -1006,15 +1023,19 @@ async function getUnit(req, env, hash) {
   return new Response(req.method === 'HEAD' ? null : bytes, { status: 200, headers });
 }
 
-/* GET /mods/unit/<hash>/archive: a ZIP of unit.json and every file at its path, written from the
- * manifest and streamed from packs; one byte range resumes a broken-off download. */
+/* GET /mods/unit/<hash>/archive[?want=<mask>]: a ZIP of unit.json and every file at its path (or the files the mask
+ * names, wantedFiles), written from the manifest and streamed from packs; one byte range resumes a broken-off
+ * download. A player gets a unit in this one request (R-DS6: a file-by-file download passed every file through the
+ * quota and the registry, and the account's daily rows written ran out). */
 async function getUnitArchive(req, env, hash) {
   if (!(await admit(req, env, [['mod_get', 1]], true))) return rateLimited();
+  const want = new URL(req.url).searchParams.get('want');
   const status = await registry(env, 'unitStatus', [hash]);
   if (status[hash] === 'removed') return refuse(REMOVED, 451, { removed: [hash] });
-  const made = await checker(env, 'unit:' + hash, 'plan', hash);
+  const made = await checker(env, 'unit:' + hash, 'plan', hash, want);
   if (!made) return refuse(NO_UNIT, 404);
-  const tag = hash + '.zip';
+  if (made.bad) return refuse('The request names the unit\'s files with a mask that does not fit it.', 400);
+  const tag = hash + (want === null ? '' : '.' + want) + '.zip';
   const range = req.method === 'GET' ? wantedRange(req, made.size, tag) : null;
   if (range === 'unsatisfiable') return unsatisfiable(made.size);
   const start = range ? range.start : 0, end = range ? range.end : made.size;

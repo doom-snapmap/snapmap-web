@@ -2,9 +2,9 @@
   "about": "What the Snapmap+ product's map-content client sends and what it accepts, route by route, read from the product's own source and recorded from a run of that client against this Worker. tests/worker_contract_test.js replays it against the Worker under Miniflare; a Worker change that breaks any line fails CI. When the product's client changes, record it again (README.md in this folder) and update this file in the same change as the Worker.",
   "product": {
     "repository": "doom-snapmap/snapmap-plus",
-    "branch": "owner-dsc1",
+    "branch": "owner-ds6",
     "files": ["src/backend/modnet.c", "src/backend/modnet.h", "src/backend/modcache.c", "src/backend/modkey.c", "src/backend/modzip.c", "src/backend/modunit.c"],
-    "recorded": "2026-11-18, tests/unit_roundtrip.c (the product's modcache.c, modnet.c, modkey.c, modzip.c and modunit.c linked unchanged) against this Worker under Miniflare and against the staging Worker: two units of the two-demon pack published with a P-256 key, a second player's download into a clean cache, a remix claim with a second key, a report of a missing file, the asked list, three releases."
+    "recorded": "2026-11-18, tests/unit_roundtrip.c (the product's modcache.c, modnet.c, modkey.c, modzip.c and modunit.c linked unchanged) against this Worker under Miniflare and against the staging Worker: two units of the two-demon pack published with a P-256 key, a second player's download into a clean cache, a remix claim with a second key, a report of a missing file, the asked list, three releases. Read again 2026-11-19 from owner-ds6 (R-DS6): a unit arrives in one archive request, unit.json bringing its manifest, with a mask of the files the player lacks; the client no longer asks for a manifest alone."
   },
   "transport": {
     "accept": "application/json, application/octet-stream",
@@ -25,21 +25,22 @@
       "request": { "method": "POST", "path": "/mods/units", "headers": { "content-type": "application/json" }, "body": { "units": "array of hex64, at most 4096" } },
       "accepts": { "status": [200], "body": "an object naming every unit asked: 'held', 'missing' or 'removed'" }
     },
-    "manifest": {
-      "source": "modnet_get_unit",
-      "request": { "method": "GET", "path": "/mods/unit/<hash>", "headers": {}, "body": null },
-      "accepts": { "status": [200], "body": "the manifest's bytes, whose SHA-256 is the hash (else MODNET_E_HASH)" },
-      "means": { "404": "not in the store", "451": "removed by moderation" }
-    },
+
     "blob": {
       "source": "modnet_get_blob (mn_get_resumed)",
       "request": { "method": "GET", "path": "/mods/blob/<hash>", "headers": { "range": "bytes=<from>- when resuming" }, "body": null },
       "accepts": { "status": [200, 206, 416], "body": "the bytes; 206 the rest from the range; 416 when the file is already whole" }
     },
     "archive": {
-      "source": "modnet_get_unit_archive (mn_get_resumed); modcache.c reads it with modzip.c, every entry's CRC-32 and SHA-256 checked",
+      "source": "modnet_get_unit_archive (mn_get_resumed), no mask: a unit whose manifest is not here or whose every file is lacking; modcache.c reads it with modzip.c, unit.json checked against the unit's hash, every entry's CRC-32 and SHA-256 checked",
       "request": { "method": "GET", "path": "/mods/unit/<hash>/archive", "headers": { "range": "bytes=<from>- when resuming" }, "body": null },
-      "accepts": { "status": [200, 206, 416], "body": "a stored ZIP of unit.json and every file at its path (modzip.c reads it)" }
+      "accepts": { "status": [200, 206, 416], "body": "a stored ZIP of unit.json and every file at its path (modzip.c reads it)" },
+      "means": { "404": "not in the store", "451": "removed by moderation" }
+    },
+    "archiveWanted": {
+      "source": "modnet_get_unit_archive with a mask (modcache.c mc_fetch_archive): the files of a unit the player lacks, bit i the manifest's file i, base64url without padding",
+      "request": { "method": "GET", "path": "/mods/unit/<hash>/archive?want=<mask>", "headers": { "range": "bytes=<from>- when resuming" }, "body": null },
+      "accepts": { "status": [200, 206, 416], "body": "a stored ZIP of unit.json and the files the mask names" }
     },
     "begin": {
       "source": "modnet_begin_unit",

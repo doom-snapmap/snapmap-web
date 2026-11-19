@@ -25,7 +25,7 @@
 export const DELETE_DELAY_MS = 86400000;     // D40: an unclaimed unit is kept and served this long
 export const UPLOAD_IDLE_MS = 86400000;      // an upload in parts untouched this long is abandoned
 export const ASKED_MAX = 256;                // D44: asked paths kept per unit
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /* Tables of the stores this index replaced (the blob and bundle store, one archive per build, and
  * ST1's builds and listings). The store is emptied before it goes live, so their rows are dropped,
@@ -33,18 +33,20 @@ export const SCHEMA_VERSION = 4;
 const RETIRED_TABLES = ['mod_claim_bundle', 'mod_bundle_blob', 'mod_bundle', 'mod_blob', 'mod_claim_build', 'mod_claim',
   'mod_build', 'mod_upload', 'mod_asked', 'build', 'build_blob', 'claim', 'claim_build', 'author', 'dist_mod',
   'dist_version', 'dist_unit', 'map_claim_row'];
-/* Tables whose shape changed with schema 4: dropped when an older schema is found. */
+/* Tables whose shape changed with schema 4 or 5 (blob keyed by its SHA-256 alone): dropped when an older schema is
+ * found. */
 const RESHAPED_TABLES = ['blob', 'pack', 'upload', 'asked', 'dead'];
 
 const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
   /* A blob: one file's bytes, once. pack and at say where its header starts in the pack; the bytes
    * follow the hlen header bytes. crc is the CRC-32 the check computed (the archive route's). broken:
-   * its pack is missing from R2; a later upload of the blob repairs it. */
-  'CREATE TABLE IF NOT EXISTS blob (id INTEGER PRIMARY KEY, sha TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, ' +
+   * its pack is missing from R2; a later upload of the blob repairs it. One B-tree keyed by the
+   * SHA-256 (no row id, no second index): a blob row is one row written, not three (R-DS6; the
+   * account's rows written are billed). Finding a pack's blobs (a missing pack) scans, which is rare. */
+  'CREATE TABLE IF NOT EXISTS blob (sha TEXT PRIMARY KEY, size INTEGER NOT NULL, ' +
     'crc INTEGER NOT NULL, pack INTEGER NOT NULL, at INTEGER NOT NULL, hlen INTEGER NOT NULL, hdr TEXT NOT NULL, ' +
-    'broken INTEGER NOT NULL DEFAULT 0)',
-  'CREATE INDEX IF NOT EXISTS blob_pack ON blob (pack)',
+    'broken INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID',
   /* A pack: an R2 object of blobs. live counts the blob rows pointing into it. */
   'CREATE TABLE IF NOT EXISTS pack (id INTEGER PRIMARY KEY, object TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, ' +
     'live INTEGER NOT NULL, live_bytes INTEGER NOT NULL, created INTEGER NOT NULL)',
@@ -114,8 +116,11 @@ export function initializeRegistry(storage) {
     for (const table of RESHAPED_TABLES) if (tables.has(table)) storage.sql.exec('DROP TABLE IF EXISTS ' + table);
   }
   for (const statement of SCHEMA) storage.sql.exec(statement);
-  storage.sql.exec("INSERT INTO store_meta (key, value) VALUES ('schema', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    String(SCHEMA_VERSION));
+  /* Written only when it changes: the object starts often, and a write each time is a row written each time. */
+  if (!meta || Number(meta.value) !== SCHEMA_VERSION) {
+    storage.sql.exec("INSERT INTO store_meta (key, value) VALUES ('schema', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      String(SCHEMA_VERSION));
+  }
 }
 
 /* ---------------- the delete queue ---------------- */
@@ -152,37 +157,46 @@ export function unnamedObjects(storage, keys) {
 
 /* A blob row that is held: present and not broken. */
 function goodBlob(storage, sha) {
-  return one(storage, 'SELECT id, size FROM blob WHERE sha = ? AND broken = 0', sha);
+  return one(storage, 'SELECT sha, size FROM blob WHERE sha = ? AND broken = 0', sha);
 }
 
-/* One blob row left a pack: the pack goes when no blob row points into it. */
-function unlinkFromPack(storage, packId, size, now) {
-  storage.sql.exec('UPDATE pack SET live = live - 1, live_bytes = live_bytes - ? WHERE id = ?', size, packId);
-  const pack = one(storage, 'SELECT object, live FROM pack WHERE id = ?', packId);
-  if (pack && pack.live <= 0) {
-    storage.sql.exec('DELETE FROM pack WHERE id = ?', packId);
-    return bury(storage, [pack.object], now);
+/* Blob rows left packs ({ pack id -> [count, bytes] }): each pack's counts change once, and a pack goes when no blob
+ * row points into it. Returns the objects queued. */
+function unlinkFromPacks(storage, left, now) {
+  const queued = [];
+  for (const [packId, [count, bytes]] of left) {
+    storage.sql.exec('UPDATE pack SET live = live - ?, live_bytes = live_bytes - ? WHERE id = ?', count, bytes, packId);
+    const pack = one(storage, 'SELECT object, live FROM pack WHERE id = ?', packId);
+    if (pack && pack.live <= 0) {
+      storage.sql.exec('DELETE FROM pack WHERE id = ?', packId);
+      queued.push(...bury(storage, [pack.object], now));
+    }
   }
-  return [];
+  return queued;
+}
+
+function leaving(left, packId, size) {
+  const was = left.get(packId) || [0, 0];
+  left.set(packId, [was[0] + 1, was[1] + size]);
 }
 
 /* Deletes the blob rows of `shas` that no unit names any more. Returns the objects queued. */
 function dropUnnamedBlobs(storage, shas, now) {
-  const queued = [];
+  const left = new Map();
   for (const sha of new Set(shas)) {
     if (one(storage, 'SELECT 1 AS hit FROM unit_blob WHERE sha = ? LIMIT 1', sha)) continue;
-    const blob = one(storage, 'SELECT id, pack, size FROM blob WHERE sha = ?', sha);
+    const blob = one(storage, 'SELECT pack, size FROM blob WHERE sha = ?', sha);
     if (!blob) continue;
-    storage.sql.exec('DELETE FROM blob WHERE id = ?', blob.id);
-    queued.push(...unlinkFromPack(storage, blob.pack, blob.size, now));
+    storage.sql.exec('DELETE FROM blob WHERE sha = ?', sha);
+    leaving(left, blob.pack, blob.size);
   }
-  return queued;
+  return unlinkFromPacks(storage, left, now);
 }
 
 /* The SHA-256s a unit names that the store does not hold whole. */
 function missingOf(storage, unitId) {
   return rows(storage, 'SELECT x.sha AS sha FROM unit_blob x LEFT JOIN blob b ON b.sha = x.sha AND b.broken = 0 ' +
-    'WHERE x.unit = ? AND b.id IS NULL ORDER BY x.sha', unitId).map(r => r.sha);
+    'WHERE x.unit = ? AND b.sha IS NULL ORDER BY x.sha', unitId).map(r => r.sha);
 }
 
 /* Pending units naming any of `shas` that now have every blob: held. */
@@ -213,15 +227,16 @@ function recordPack(storage, object, size, blobs, now) {
   let live = 0, liveBytes = 0;
   const discard = [];
   const added = [];
+  const left = new Map();
   for (const b of blobs) {
     if (!HEX64.test(b.sha) || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.at) || !Number.isSafeInteger(b.hlen) ||
         !Number.isSafeInteger(b.crc) || typeof b.hdr !== 'string') throw new Error('bad blob');
-    const blob = one(storage, 'SELECT id, broken, pack, size FROM blob WHERE sha = ?', b.sha);
+    const blob = one(storage, 'SELECT broken, pack, size FROM blob WHERE sha = ?', b.sha);
     if (blob && !blob.broken) continue;
     if (blob) {
-      storage.sql.exec('UPDATE blob SET size = ?, crc = ?, pack = ?, at = ?, hlen = ?, hdr = ?, broken = 0 WHERE id = ?',
-        b.size, b.crc, packId, b.at, b.hlen, b.hdr, blob.id);
-      discard.push(...unlinkFromPack(storage, blob.pack, blob.size, now));
+      storage.sql.exec('UPDATE blob SET size = ?, crc = ?, pack = ?, at = ?, hlen = ?, hdr = ?, broken = 0 WHERE sha = ?',
+        b.size, b.crc, packId, b.at, b.hlen, b.hdr, b.sha);
+      leaving(left, blob.pack, blob.size);
     } else {
       storage.sql.exec('INSERT INTO blob (sha, size, crc, pack, at, hlen, hdr) VALUES (?, ?, ?, ?, ?, ?, ?)',
         b.sha, b.size, b.crc, packId, b.at, b.hlen, b.hdr);
@@ -229,6 +244,7 @@ function recordPack(storage, object, size, blobs, now) {
     live++; liveBytes += b.size;
     added.push(b.sha);
   }
+  discard.push(...unlinkFromPacks(storage, left, now));
   if (live) storage.sql.exec('UPDATE pack SET live = ?, live_bytes = ? WHERE id = ?', live, liveBytes, packId);
   else { storage.sql.exec('DELETE FROM pack WHERE id = ?', packId); discard.push(...bury(storage, [object], now)); }
   return { packId, discard, added };

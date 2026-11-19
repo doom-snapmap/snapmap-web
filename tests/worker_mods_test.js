@@ -391,6 +391,17 @@ function admin(env, route, value) {
 
 /* ---------------- tests ---------------- */
 
+test('an archive mask names files in the manifest\'s order, bit i of byte i >> 3, and is refused when it does not fit', async () => {
+  const { wantedFiles } = await modsModule;
+  const files = Array.from({ length: 10 }, (_, i) => ({ path: 'f' + i }));
+  const mask = Buffer.from([0b10000101, 0b00000010]).toString('base64url');   /* files 0, 2, 7 and 9 */
+  assert.deepEqual(wantedFiles(files, mask).map(f => f.path), ['f0', 'f2', 'f7', 'f9']);
+  assert.equal(wantedFiles(files, null), files);
+  assert.equal(wantedFiles(files, Buffer.from([1]).toString('base64url')), 'bad');      /* one byte for ten files */
+  assert.equal(wantedFiles(files, 'not+base64url'), 'bad');
+  assert.deepEqual(wantedFiles(files, Buffer.from([0, 0]).toString('base64url')), []);
+});
+
 test('crc32 is the IEEE CRC-32 of any bytes, in any number of pieces', async () => {
   const { crc32 } = await packModule;
   for (const n of [0, 1, 7, 8, 9, 63, 4096, 100003]) {

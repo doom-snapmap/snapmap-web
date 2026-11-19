@@ -11,9 +11,13 @@ export const MOD_LIMITS = Object.freeze({
 export const SOFT_MOD_LIMITS = new Set(['mod_bytes']);
 const HOUR_MS = 3600000;
 
+/* The mod store's counters are one B-tree keyed by kind (no row id beside the key): each count is one
+ * row written, not two, and every mod store request makes one (R-DS6). The hour's counts of the table
+ * this replaced are dropped with it; the next request starts the hour again. */
 export function initializeQuota(storage) {
   storage.sql.exec('CREATE TABLE IF NOT EXISTS quota (kind TEXT PRIMARY KEY, window INTEGER NOT NULL, used INTEGER NOT NULL)');
-  storage.sql.exec('CREATE TABLE IF NOT EXISTS mod_quota (kind TEXT PRIMARY KEY, window INTEGER NOT NULL, used INTEGER NOT NULL)');
+  storage.sql.exec('DROP TABLE IF EXISTS mod_quota');
+  storage.sql.exec('CREATE TABLE IF NOT EXISTS mod_hourly (kind TEXT PRIMARY KEY, window INTEGER NOT NULL, used INTEGER NOT NULL) WITHOUT ROWID');
 }
 
 // The clock is supplied by the Durable Object, never by an HTTP client.
@@ -43,7 +47,7 @@ export function consumeModQuota(storage, entries, now) {
   const window = Math.floor(now / HOUR_MS);
   return storage.transactionSync(() => {
     const used = entries.map(([kind]) => {
-      const rows = storage.sql.exec('SELECT window, used FROM mod_quota WHERE kind = ?', kind).toArray();
+      const rows = storage.sql.exec('SELECT window, used FROM mod_hourly WHERE kind = ?', kind).toArray();
       return rows.length && rows[0].window === window ? rows[0].used : 0;
     });
     for (let i = 0; i < entries.length; i++) {
@@ -51,7 +55,7 @@ export function consumeModQuota(storage, entries, now) {
       if (SOFT_MOD_LIMITS.has(kind) ? used[i] >= MOD_LIMITS[kind] : used[i] + amount > MOD_LIMITS[kind]) return { allowed: false, kind };
     }
     for (let i = 0; i < entries.length; i++) {
-      storage.sql.exec('INSERT INTO mod_quota (kind, window, used) VALUES (?, ?, ?) ON CONFLICT(kind) DO UPDATE SET window = excluded.window, used = excluded.used',
+      storage.sql.exec('INSERT INTO mod_hourly (kind, window, used) VALUES (?, ?, ?) ON CONFLICT(kind) DO UPDATE SET window = excluded.window, used = excluded.used',
         entries[i][0], window, used[i] + entries[i][1]);
     }
     return { allowed: true };
