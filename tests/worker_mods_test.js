@@ -828,6 +828,71 @@ test('every refusal on the unit routes is one plain sentence', async () => {
   }
 });
 
+test('the oldest product version the store serves rides on every answer when it is set (D41)', async () => {
+  const { MINIMUM_HEADER } = await modsModule;
+  const plain = await modsEnv();
+  const none = await fetchWorker(plain, call('POST', '/mods/units', { body: '{"units":[]}' }));
+  assert.equal(none.headers.get(MINIMUM_HEADER), null);
+  const env = await modsEnv({ MODS_MINIMUM_VERSION: '1.0.2' });
+  const ok = await fetchWorker(env, call('POST', '/mods/units', { body: JSON.stringify({ units: ['d'.repeat(64)] }) }));
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get(MINIMUM_HEADER), '1.0.2');
+  const missing = await fetchWorker(env, call('GET', '/mods/unit/' + 'd'.repeat(64)));
+  assert.equal(missing.status, 404);
+  assert.equal(missing.headers.get(MINIMUM_HEADER), '1.0.2');
+  const retired = await fetchWorker(env, call('POST', '/mods/claim', { body: '{}' }));
+  assert.equal(retired.status, 410);
+  assert.equal(retired.headers.get(MINIMUM_HEADER), '1.0.2');
+  const bad = await modsEnv({ MODS_MINIMUM_VERSION: 'soon' });
+  assert.equal((await fetchWorker(bad, call('POST', '/mods/units', { body: '{"units":[]}' }))).headers.get(MINIMUM_HEADER), null);
+});
+
+test('a request its key did not sign spends nothing of that key\'s hour (B10)', async () => {
+  const env = await modsEnv();
+  const a = makeKey(), forger = makeKey();
+  /* Signed by another key, under a's name: refused, and a's quota object is never charged. */
+  for (let i = 0; i < 300; i++) {
+    const req = signedJson(forger, '/mods/map/claim', { ref: 'r' + i, units: [], secret: SECRET_A, rev: 1 });
+    req.headers.set('X-Publisher-Key', a.pub);
+    const res = await fetchWorker(env, req);
+    assert.equal(res.status, 403);
+    assertSentence((await res.json()).error, 'forged claim');
+  }
+  const res = await fetchWorker(env, signedJson(a, '/mods/map/release', { ref: 'r', secret: SECRET_A, rev: 1 },
+    { headers: { 'CF-Connecting-IP': '198.51.100.10' } }));
+  assert.equal(res.status, 404, 'a\'s own release still has its hour');
+});
+
+test('a claim the registry made is answered as made though recording its publisher failed (B10)', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const unit = makeUnit({ 'entities/b10.decl': 'b10' });
+  await publishUnit(env, key, unit);
+  const stub = env.MOD_REGISTRY.get();
+  const original = stub.publisherSeen;
+  stub.publisherSeen = async () => { throw new Error('storage unavailable'); };
+  try {
+    const res = await fetchWorker(env, signedJson(key, '/mods/map/claim', { ref: 'map-b10', units: [unit.hash], secret: SECRET_A, rev: 1 }));
+    assert.equal(res.status, 201);
+    const rel = await fetchWorker(env, signedJson(key, '/mods/map/release', { ref: 'map-b10', secret: SECRET_A, rev: 2 }));
+    assert.equal(rel.status, 204);
+  } finally { stub.publisherSeen = original; }
+});
+
+test('the body reader\'s refusals reach a publisher as sentences, and a completion body is small', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const h = 'e'.repeat(64);
+  const big = Buffer.alloc(70000, 32);
+  const complete = await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + h + '/complete', big));
+  assert.equal(complete.status, 413);
+  assertSentence((await complete.json()).error, 'a large completion body');
+  const badLength = call('POST', '/mods/map/claim', { body: '{}', headers: { 'Content-Length': 'many' } });
+  const res = await fetchWorker(env, badLength);
+  assert.ok(res.status >= 400);
+  assertSentence((await res.json()).error, 'a bad Content-Length');
+});
+
 test('a pack found missing breaks its files until an upload repairs them', async () => {
   const env = await modsEnv();
   const key = makeKey();

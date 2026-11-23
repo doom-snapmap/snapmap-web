@@ -72,6 +72,18 @@ function refuse(error, status, extra, headers) {
   return reply({ error, ...extra }, status, headers);
 }
 
+/* The shared body reader (request_body.js) refuses in a few words; the mod store says a sentence (SPEC section 8). */
+const BODY_TOO_LARGE = 'The request body is larger than one request may be.';
+const BODY_BROKEN = 'The request body did not arrive whole; send it again.';
+async function modsBody(req, maxBytes) {
+  try { return await readBody(req, maxBytes); }
+  catch (error) {
+    if (error instanceof RequestError && error.status === 413) throw new RequestError(BODY_TOO_LARGE, 413);
+    if (error instanceof RequestError && error.status === 400) throw new RequestError(BODY_BROKEN, 400);
+    throw error;
+  }
+}
+
 async function discard(req) {
   try { await req.body?.cancel(); } catch { /* The client may already have gone. */ }
 }
@@ -745,9 +757,12 @@ async function manifestBytes(env, row) {
 
 /* ---------------- the checks (in a MOD_CHECKER Durable Object) ---------------- */
 
-/* A signed request's publisher is recorded and its account name bound (D31). */
+/* A signed request's publisher is recorded and its account name bound (D31). It runs after the request's own work is
+ * done, so a registry that fails here never turns a done claim or release into a refusal (B10): the next signed
+ * request records it. */
 async function seen(env, signed) {
-  await registry(env, 'publisherSeen', signed.key, signed.name, foldedName(signed.name));
+  try { await registry(env, 'publisherSeen', signed.key, signed.name, foldedName(signed.name)); }
+  catch (error) { console.log('mods: the publisher was not recorded:', String(error && error.message).slice(0, 200)); }
 }
 
 /* POST /mods/unit/<hash>/begin: `bytes` is the manifest. Its SHA-256 must be the hash (SPEC 3.7 upload
@@ -1082,11 +1097,14 @@ function writerKey(auth) {
 /* POST /mods/unit/<hash>/begin: the manifest's bytes. */
 async function postBegin(req, env, hash, path) {
   const auth = authOf(req, path);
-  const { key, refusal } = writerKey(auth);
+  const { refusal } = writerKey(auth);
   if (refusal) { await discard(req); return refusal; }
-  if (!(await admit(req, env, [['mod_build_put', 1]], false, key))) { await discard(req); return rateLimited(); }
-  const bytes = await readBody(req, PART_SIZE).catch(error => { throw error instanceof RequestError && error.status === 413
+  const bytes = await modsBody(req, PART_SIZE).catch(error => { throw error instanceof RequestError && error.status === 413
     ? new RequestError('The manifest is larger than one request may be.', 413) : error; });
+  /* The key's quota is charged only for a request its key signed (B10). */
+  const signed = await verifyBody(auth, bytes);
+  if (signed.refusal) return refuse(signed.refusal, 403);
+  if (!(await admit(req, env, [['mod_build_put', 1]], false, signed.key))) return rateLimited();
   return answer(await checker(env, 'unit:' + hash, 'begin', hash, bytes, auth));
 }
 
@@ -1118,7 +1136,7 @@ async function putUnitArchive(req, env, hash, path) {
 /* POST /mods/unit/<hash>/complete: 201 when every blob is held, 409 with what is missing. */
 async function postComplete(req, env, hash, path) {
   const auth = authOf(req, path);
-  const bytes = await readBody(req, PART_SIZE);
+  const bytes = await modsBody(req, 65536);
   const signed = await verifyBody(auth, bytes);
   if (signed.refusal) return refuse(signed.refusal, 403);
   const result = await registry(env, 'completeUnit', hash);
@@ -1138,7 +1156,7 @@ function sessionReply(sha, size, session, status) {
 
 /* The size a parts request names, from its signed body. */
 async function signedSize(req, path) {
-  const bytes = await readBody(req, 65536);
+  const bytes = await modsBody(req, 65536);
   const signed = await verifyBody(authOf(req, path), bytes);
   if (signed.refusal) return { refusal: refuse(signed.refusal, 403) };
   let body;
@@ -1227,8 +1245,7 @@ async function readRequestJson(req) {
 
 /* A signed JSON body: { body, signed } or { refusal }. */
 async function signedJson(req, path) {
-  const bytes = await readBody(req, PART_SIZE).catch(error => { throw error instanceof RequestError && error.status === 413
-    ? new RequestError('The request body is larger than one request may be.', 413) : error; });
+  const bytes = await modsBody(req, PART_SIZE);
   const signed = await verifyBody(authOf(req, path), bytes);
   if (signed.refusal) return { refusal: refuse(signed.refusal, 403) };
   let body;
@@ -1244,11 +1261,11 @@ function validRef(ref) {
 /* POST /mods/map/claim {ref, units, secret, rev}, signed (SPEC 10.2, D33). */
 async function postClaim(req, env, path) {
   const auth = authOf(req, path);
-  const { key, refusal: unsigned } = writerKey(auth);
+  const { refusal: unsigned } = writerKey(auth);
   if (unsigned) { await discard(req); return unsigned; }
-  if (!(await admit(req, env, [['mod_claim', 1]], false, key))) { await discard(req); return rateLimited(); }
   const { body, signed, refusal } = await signedJson(req, path);
   if (refusal) return refusal;
+  if (!(await admit(req, env, [['mod_claim', 1]], false, signed.key))) return rateLimited();
   if (!validRef(body.ref)) return refuse('The claim names no published item.', 400);
   if (!Array.isArray(body.units) || !body.units.every(h => typeof h === 'string' && HEX64.test(h))) return refuse('The claim does not list its units by hash.', 400);
   if (typeof body.secret !== 'string' || !HEX64.test(body.secret)) return refuse(BAD_SECRET, 400);
@@ -1266,11 +1283,11 @@ async function postClaim(req, env, path) {
 /* POST /mods/map/release {ref, secret, rev}, signed. */
 async function postRelease(req, env, path) {
   const auth = authOf(req, path);
-  const { key, refusal: unsigned } = writerKey(auth);
+  const { refusal: unsigned } = writerKey(auth);
   if (unsigned) { await discard(req); return unsigned; }
-  if (!(await admit(req, env, [['mod_claim', 1]], false, key))) { await discard(req); return rateLimited(); }
   const { body, signed, refusal } = await signedJson(req, path);
   if (refusal) return refusal;
+  if (!(await admit(req, env, [['mod_claim', 1]], false, signed.key))) return rateLimited();
   if (!validRef(body.ref)) return refuse('The release names no published item.', 400);
   if (typeof body.secret !== 'string' || !HEX64.test(body.secret)) return refuse(BAD_SECRET, 400);
   if (!Number.isSafeInteger(body.rev) || body.rev < 1) return refuse('The release names no revision.', 400);
@@ -1385,6 +1402,10 @@ function notAllowed(req, allow) {
 /* Handles every path under /mods; no session, no Turnstile. Every answer that is not a success
  * carries one plain sentence in "error". */
 export async function handleMods(req, env, path) {
+  return withMinimum(await routeModsSafely(req, env, path), env);
+}
+
+async function routeModsSafely(req, env, path) {
   try { return await routeMods(req, env, path); }
   catch (error) {
     if (error instanceof RequestError) {
@@ -1392,6 +1413,20 @@ export async function handleMods(req, env, path) {
     }
     console.log('mods: unexpected failure:', String(error && error.message).slice(0, 200));
     return refuse(UNAVAILABLE, 503, {}, { 'Retry-After': String(retryAfterFor(error)) });
+  }
+}
+
+/* SPEC 5.22, D41: with MODS_MINIMUM_VERSION set (dot-separated numbers, a deploy setting), every answer names the
+ * oldest product version the store serves, and a product below it tells its player once per start to update. */
+export const MINIMUM_HEADER = 'X-Snapmap-Plus-Minimum';
+function withMinimum(response, env) {
+  const minimum = String(env.MODS_MINIMUM_VERSION || '').trim();
+  if (!/^\d+(\.\d+){0,3}$/.test(minimum)) return response;
+  try { response.headers.set(MINIMUM_HEADER, minimum); return response; }
+  catch {
+    const copy = new Response(response.body, response);
+    copy.headers.set(MINIMUM_HEADER, minimum);
+    return copy;
   }
 }
 
