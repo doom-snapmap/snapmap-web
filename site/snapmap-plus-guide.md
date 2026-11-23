@@ -20,8 +20,8 @@ the game's built-in editor UI. That gives you four things the stock editor can't
 - **Entities SnapMap was never built to place.** The DOOM engine contains far more object types than
   SnapMap's palette exposes. Snapmap+ can place and configure any of them.
 - **Mods.** New demons, props, sounds and whole arenas in DOOM's own Toybox, and small Lua scripts
-  that drive them. A map that uses mods brings them along: other Snapmap+ players are offered the
-  download when they open it. See [Mods](#mods) and [Mod scripts](#mod-scripts).
+  that drive them. A map that uses mods brings them along: other Snapmap+ players get the
+  content downloaded when they open it, with a progress line and no question. See [Mods](#mods) and [Mod scripts](#mod-scripts).
 
 Edits that use stock engine behavior and installed assets travel with the **map file itself**,
 including to console players. Features that supply new runtime resources need **Snapmap+ on the
@@ -615,21 +615,25 @@ folder from Windows while Snapmap+ is already running — no restart needed, it 
 right away.
 
 **Sharing a prefab:** select it and click **Export** in the details pane. A Save As dialog opens, proposes
-`<name>.zip`, and writes the prefab with every mod it uses into that one `.zip` wherever you choose. Send
-that file. On the other end, **Import** at the top of the list opens a file dialog: pick the `.zip` (or,
-if it was already extracted, the `.json` inside the extracted folder) and Snapmap+ adds the prefab to
-their list and installs the mods they do not have yet into their own mods folder, where every map of
-theirs can use them. Importing the same export twice changes nothing; an
-export whose prefab has the same name but different contents lands as `<name> (2)`. The console does the
-same with `sh_prefab export "<name>" "<path.zip>"` and `sh_prefab import "<path.zip or path.json>"`;
-`sh_prefab mods "<name>"` lists the mods a prefab needs and whether each is installed. A prefab name
-may not contain `..` or be a Windows device name such as `CON`.
+`<name>.zip`, and writes the prefab with the content of its objects into that one `.zip` wherever you
+choose. Send that file. On the other end, **Import** at the top of the list opens a file dialog: pick the
+`.zip` (or, if it was already extracted, the `.json` inside the extracted folder) and Snapmap+ adds the
+prefab to their list and keeps the content with it. Nothing is installed into their mods. Importing the
+same export twice changes nothing; an export whose prefab has the same name but different contents lands
+as `<name> (2)`. The console does the same with `sh_prefab export "<name>" "<path.zip>"` and
+`sh_prefab import "<path.zip or path.json>"`; `sh_prefab mods "<name>"` lists the mods a prefab needs
+and whether each is installed. A prefab name may not contain `..` or be a Windows device name such as
+`CON`. A prefab saved by an earlier Snapmap+ says "This prefab was saved by an earlier Snapmap+; run the
+Snapmap+ installer to update it."
 
 **Prefabs that use mods:** the list shows **Mods:** with their names, or **Needs mods:** when one is not
-installed, and the details pane lists each mod as Installed or Not installed. **Load / Place** checks
-first: a prefab whose mods you have places as any other and adds the mods to the open map (the Mods
-tab's **Remove from map** takes them out again); one that needs a mod you do not have is not placed, and
-the message names the mod. Placing a prefab never changes where the open map finds its other mods.
+on this computer, and the details pane lists each mod's state. **Load / Place** checks first: when the
+content of every mod is here (your own mod, or content an imported `.zip` brought), the prefab places
+as any other and the mod comes into the open map the way placed objects bring it in. A prefab of one
+object from a mod needs no extra step; **Use in this map** is for a mod with nothing to place. A prefab
+whose content is not here is not placed, and the message names what it needs: "This prefab was not
+placed: it needs door-kit, which is not on this computer. Ask its author for the prefab's .zip export."
+Placing a prefab never changes where the open map finds its other mods.
 
 ---
 
@@ -656,17 +660,21 @@ A rawmap you open is a new map: DOOM's own Save asks for a new name, so it
 does not replace the saved map it opened over. A save is refused when no map is
 open in the editor.
 
-**Rawmaps of maps that use mods.** Every save of such a map also writes a `.zip`
-beside the `.json` (for example `rawmap.zip` beside `rawmap.json`), and **Save
-Rawmap As...** offers `.zip` first. The `.zip` holds the map and every mod it
-uses: share that one file. Opening it installs its mods into
-`mods\maps\<the .zip's name>\`, the map's own folder of mods, and the map opens.
-The map remembers that folder: if you save it to My Maps, it reopens with its
-mods. To make one of those mods your own, use **Add to my mods** in the Mods
-tab (see [Mods](#mods)). A rawmap whose mod content you do not have is never
-opened without it: content the mod store holds downloads with a progress line,
-and the map opens; otherwise the message names each mod, and you can ask the
-map's author for the `.zip`.
+**Rawmaps of maps that use mods.** Every save of such a map also writes a `.zip` beside the `.json`
+(for example `rawmap.zip` beside `rawmap.json`), and **Save Rawmap As...** offers `.zip` first. The
+`.zip` holds the map and the content of the objects it places: share that one file. Opening it puts
+that content in Snapmap+'s content cache and the map opens. Nothing is installed into your mods, and
+the content serves only that map. If you save the map to My Maps it keeps its content. To make one of
+its mods your own, use **Add to my mods** under **Maps on this computer** in the Mods tab (see
+[Mods](#mods)). A `.zip` or prefab export saved by an earlier Snapmap+ is refused: "This export was
+saved by an earlier Snapmap+; run the Snapmap+ installer to update it." A mod of yours that is not
+built on this computer stops the export.
+
+A rawmap whose content you do not have is still opened. Content the mod store holds downloads with a
+progress line and no question, and then the map opens. A map whose content comes from a mod folder
+that is not on this computer opens with stand-ins for the missing objects and one sentence saying so
+(see [Playing maps that use mods](#playing-maps-that-use-mods)); you can ask the map's author for the
+`.zip`.
 
 Rawmaps are saved as compact JSON on one line. To save them with line breaks and
 indents, type `sh_pretty_on 1` in the console before you save. Type
@@ -701,44 +709,39 @@ tell before they open one.
 You do not need to install anything to play someone else's map. Open it as usual. If it uses mod
 content you do not have, the game downloads it from the mod store before the map starts, with no
 question, checks every file and starts the map; a player joining a lobby downloads it in the lobby, and
-the host's start waits for it. A map whose content you have starts at once, also offline.
+the host's start waits for it (see [Co-op](#co-op)). A map whose content you have starts at once, also
+offline.
 
 While the content downloads, the game's progress line shows which mod and how many megabytes, for
 example "Getting this map's mod content: Eternal Demons (1 of 1), 40 of 98 MB.", and the console
-shows the same. Content that cannot be had (removed from the mod store, or the store cannot be
-reached) does not stop the map: it plays without those objects, and one notice names them, for
-example "This map is playing without the Tyrant from Eternal Demons, which was removed from the mod
-store." A map saved before its content was sent to the mod store, whose mods you do not have, is not
-loaded, and the message names the mods.
+shows the same. Leaving the lobby or starting another map stops the download, and what arrived is
+kept for next time.
 
-The content a map downloads is kept in Snapmap+'s content cache and serves only the maps that name it,
-so it never changes your own maps or mods. Mod scripts run only inside the map that carries them and
-cannot read or change your files (see [Mod scripts](#mod-scripts)).
+Content that cannot be had does not stop the map. The objects stand in for the missing ones: they keep
+their place, their wires and their saves, and show as labelled bounds. One notice says why, for
+example "This map is playing without the Tyrant from Eternal Demons, which is not on this computer."
+For a map whose content comes from the mod store the notice also says what to do: "Connect to the
+internet and open the map again to get it." when you are offline, or ", which was removed from the mod
+store.", or ", which needs a newer Snapmap+; run the Snapmap+ installer to update." A map of your own,
+a rawmap, or a map saved before its content was sent to the mod store plays the same way when the
+mod's folder is not on this computer. Opening such a map in the editor works too.
 
-The Mods tab's setting **Play maps whose mods include scripts** is on by default. Turned off, a
-map whose mods include scripts is neither downloaded nor played: "This map's mods include scripts,
-which you turned off. To play it, open any map in the editor and turn on "Play maps whose mods
-include scripts" in the Mods tab of the Snapmap+ window." That holds for a map you downloaded while the setting was on, and for a rawmap or prefab ZIP
-you import or open. Your own maps always play.
+The content a map downloads is kept in Snapmap+'s content cache, `mods\.content\`, and serves only the
+maps that name it, so it never changes your own maps or mods. It is not a mod folder of yours; you
+see it under **Maps on this computer** in the Mods tab. Mod scripts run only inside the map that
+carries them and cannot read or change your files (see [Mod scripts](#mod-scripts)).
 
-A downloaded map's mods stay in `mods\maps\` until you remove them in the Mods tab.
-
-When a mod cannot be had, the map does not load, and the game says why:
-
-- its author unpublished it, or it was removed from the mod store;
-- the mod store could not be reached (try again later);
-- the map was never published and the mod's folder is gone: restore the folder from the Recycle
-  Bin, or load the map's rawmap ZIP;
-- the mod needs a file your copy of the game does not have.
-
-Opening such a map in the editor names the missing mod and what to do: restore its folder from the
-Recycle Bin, or play the map from My Maps to get the mod from the mod store.
+The setting **Play Maps Whose Mods Include Scripts**, in the Settings menu of the Snapmap+ window, is
+on by default. Turned off, a map whose mods include scripts is not played: "This map's mods include
+scripts, which you turned off. To play it, turn on "Play Maps Whose Mods Include Scripts" in the
+Settings menu of the Snapmap+ window." That holds for a map you downloaded while the setting was on,
+and for a rawmap or prefab ZIP you import or open. Your own maps always play.
 
 ### The Mods tab
 
-The **Mods** tab lists your mods. **Your mods** holds the ones in your own `mods\` folder; below it,
-one group per downloaded map holds the mods that map brought, under the map's name. Each row shows
-the mod's name and one icon:
+The **Mods** tab lists your mods. **Your mods** holds the ones in your own `mods\` folder. Below it,
+**Maps on this computer** lists the content of the maps you kept or played (see below). Each of your
+mods shows its name and one icon:
 
 - a **green check**: ready to use;
 - a **map icon**: the map open in the editor uses this mod;
@@ -754,15 +757,25 @@ The buttons at the top of the list, by their hover text:
 - **Refresh**: after you change a mod's files, build them again and bring the change into the game.
 - **Open mods folder**.
 - **New mod** (see [Making your first mod](#making-your-first-mod)).
-- **Install mods**: pick **Install mod folders...** or **Install mod ZIPs...** (a prefab's export ZIP
-  is one). You can pick several at once, or a folder that holds many mods. Snapmap+ copies each
-  into your own `mods\` folder and builds it; the game keeps running while it works, and the line
-  at the bottom of the list says how far it got.
+- **Install**: pick mod ZIPs, or a mod folder's `mod.json`. You can pick several at once.
+  Snapmap+ copies each mod into your own `mods\` folder and builds it; the game keeps running while
+  it works, and the line at the bottom of the list says how far it got.
 
-Below them, **Filter by name or folder...** narrows the list. At the bottom, the setting **Play maps
-whose mods include scripts** (on by default) decides whether Snapmap+ plays such maps at all: when
-it is off, a map, a rawmap or a prefab ZIP whose mods include scripts is refused before anything
-downloads or opens (see [Playing maps that use mods](#playing-maps-that-use-mods)).
+Below them, **Filter by name or folder...** narrows the list.
+
+**Maps on this computer** holds the content of the maps you kept or played, and how much room it
+takes. A map you download, import or open from a rawmap or a prefab ZIP never puts a mod folder in
+your `mods\`: its content is kept apart, in `mods\.content\`, and serves only the maps that use it. Each
+mod a map brought has a row with **Add to my mods**, which makes "<name> (my copy)", a new mod of your
+own with the objects that map has of it. You can use it in your own maps and edit it. **Remove content
+of maps you only played** clears the rest; maps you kept are not touched, and playing one of the
+others again gets its content back.
+
+The setting **Play Maps Whose Mods Include Scripts** is in the **Settings** menu of the Snapmap+
+window, not in the Mods tab. It is on by default. When it is off, a map, a rawmap or a prefab ZIP whose
+mods include scripts is refused before anything downloads or opens (see [Playing maps that use
+mods](#playing-maps-that-use-mods)). The same menu holds the backup and restore of your publishing
+key (see [Publishing a map that uses mods](#publishing-a-map-that-uses-mods)).
 
 **Refresh is the one action that reads your mods again.** Snapmap+ does not watch the folder: after
 you change a mod's files, press Refresh. It builds every mod whose files changed and brings the
@@ -793,10 +806,6 @@ Select one of your mods to read about it. The line under its name says how it is
 - **Files**: how many files it has and their size, with **Show the files**.
 - **Warnings**, when its build found something to check.
 - **Sharing**: how many of your published maps use it.
-
-A mod a downloaded map brought shows a short view instead: which map it came with, whether it runs
-scripts, and that it stays until you remove it. Its buttons are **Add to my mods**, which copies it into your
-own mods so your own maps can use it, and **Remove**.
 
 The buttons above the details are **Files** (browse the mod's files), **Use in this map** (only while
 a map is open in the editor; see [Using a mod in a map](#using-a-mod-in-a-map)) and **Uninstall**.
@@ -922,11 +931,11 @@ this computer's editor; maps made with it need nothing."
 
 Place one of the mod's objects from the Toybox. When you save, the map records the mod. In the
 editor every one of your mods offers its Toybox rows. In Play, a map gets exactly the mods it
-records, and a mod it does not record changes nothing in it. Your own maps always use your own
-mod folders as they are now.
+records, and a mod it does not record changes nothing in it. Your own maps in My Maps use your own
+mod folders as they are now; a published map plays the content it was published with.
 
-A mod that changes game files or sets console settings without adding objects can be used by the
-whole map: select it and click **Use in this map**. The map lists it when you save. Once the open
+A mod that changes game files or sets console settings without adding objects, or has nothing to
+place, can be used by the whole map: select it and click **Use in this map**. The map lists it when you save. Once the open
 map uses the selected mod, the same button reads **Remove from map**.
 
 ### The map window
@@ -953,25 +962,36 @@ upload, the game asks first ("Publishing uploads 212 MB of mod content that the 
 have yet. Publish?") and shows the progress; **No** leaves the map unpublished. Files identical to
 the game's own are never uploaded. A mod may be of any size and hold any number of files: a large
 one goes up in parts by itself, and a publish that was cut off sends only the parts the store does
-not have yet. A map over
+not have yet. A mod the map uses that is not on this computer stops the publish ("The map was not
+published: Snapmap+ cannot find the mod Eternal Demons on this computer. Build or install it in the
+Mods tab, or remove its objects, then publish again."). A map over
 SnapMap's own 10 MB map limit (the map service's, not Snapmap+'s) is refused before anything is
 sent.
 
-Plain saves never upload anything. Publishing the map again sends your mod as it is now; players
-of the map get the files it was published with. Unpublishing a map removes the map's claim from the mod
-store only. Deleting a map from My Maps does not, while its published copy stays available.
+Plain saves never upload anything. A published map plays the content it was published with, for
+everyone, you included. Your own maps in My Maps follow your mod folders as they are now, so a change
+you make to a mod reaches the published copy only when you publish again. Unpublishing a map removes
+the map's claim from the mod store only. Deleting a map from My Maps does not, while its published
+copy stays available.
+
+**Your publishing key.** The first time you publish a map with mod content, Snapmap+ makes a
+publishing key on this computer. It lets only you republish or unpublish your maps' mod content. The
+Snapmap+ window offers once to save a backup of it. The window's **Settings** menu always has **Save a
+Backup of Your Publishing Key...** and **Restore from a Backup...**: the backup is a file sealed with
+a passphrase you choose, and restoring it on another computer lets you keep republishing and
+unpublishing the maps you published.
 
 ### Sharing a map or prefab that uses mods
 
-If your map uses mods, share the rawmap `.zip`, not the `.json`: it holds the map and every mod it
-uses (see [Rawmaps](#rawmaps)). Your friend opens it with **File > Load Rawmap...**; its mods go
-into that map's own folder. A published map needs none of this: the game offers its mods when
-someone opens it.
+If your map uses mods, share the rawmap `.zip`, not the `.json`: it holds the map and the content of
+the objects it places (see [Rawmaps](#rawmaps)). Your friend opens it with **File > Load Rawmap...**
+and the map opens with that content. Nothing is installed into their mods. A published map needs none
+of this: the game downloads its content when someone opens it.
 
-A prefab that uses mods travels the same way: its **Export** writes one `.zip` with its mods (see
-[The Prefabs Tab](#the-prefabs-tab)), and importing it puts the mods in the other player's own mods
-folder. To share a mod on its own, send its folder or a ZIP of it; the other player uses
-**Install mods**.
+A prefab that uses mods travels the same way: its **Export** writes one `.zip` with the content of
+its objects (see [The Prefabs Tab](#the-prefabs-tab)), and importing it installs nothing into the other
+player's mods. To share a mod on its own, send its folder or a ZIP of it; the other player uses
+**Install**.
 
 ### Uninstalling a mod
 
@@ -980,9 +1000,14 @@ will do: if the open map uses the mod, the map is cleaned of it first, with the 
 from map; the mod's Toybox rows leave the editor; and its folder moves to the Windows Recycle Bin.
 When the editor's undo history has to be cleared, the confirmation says so. It also says how many of
 your saved maps use the mod: they will not open until you restore the folder from the Recycle Bin.
-For a downloaded map's mod the button reads **Remove**.
+**Uninstall** is only for your own mods. The content of maps you downloaded is not a mod of yours; it
+goes with **Remove content of maps you only played** (see [The Mods tab](#the-mods-tab)).
 
 ### When something goes wrong
+
+A map saved by an earlier Snapmap+ does not open, and an export or prefab from one is refused: the
+message reads "... was saved by an earlier Snapmap+; run the Snapmap+ installer to update it." The
+installer converts them.
 
 A mod with a problem gets a yellow triangle, and the details pane says what to fix. A problem in one
 mod never affects the others. If a change you made breaks your own mod, the mod is not used until
@@ -1015,7 +1040,7 @@ folder is a name in `mods\` or a full path.
 | `sh_mods choose "<game file>/<path>" "<mod name>"` | Pick whose edit the open map uses where two of its mods disagree; no name clears the choice. |
 | `sh_mods palette rebuild` | Rebuild the editor's Toybox rows (Refresh does this for you). |
 | `sh_mods copystock "<engine path>" "<file>"` | Write a game file's bytes to a file. |
-| `sh_mods export "<path.zip>"` | Write the open map and its mods to one ZIP. |
+| `sh_mods export "<path.zip>"` | Write the open map and the content of its objects to one ZIP. |
 | `sh_mods import "<path.zip>"` | Open such a ZIP as **Load Rawmap...** does. |
 | `sh_mods release "<published item id>"` | Drop this computer's claim of a published map's content on the mod store. |
 | `sh_mods retry` | Send queued claims and releases and repair what the store lost. |
@@ -1369,10 +1394,17 @@ returning is stopped after a few seconds, with the line above, so a mistake can 
 
 ### Co-op
 
-Scripts run on the host only. Players who join need the map's mods, as for any mod map, and run no
-scripts themselves: what the scripts do reaches them as the game's own movement, animation, damage
+Scripts run on the host only. Players who join need the map's mod content, as for any mod map, and run
+no scripts themselves: what the scripts do reaches them as the game's own movement, animation, damage
 and death do. Effects started with `fx` on an object show on every player's screen; put other
 visuals and sounds in the clips' md6 rows, which play on every machine.
+
+A player who joins a co-op lobby for a map whose content comes from the mod store downloads it in the
+lobby and stays there while it comes. The host sees "Waiting for this map's mod content: Sam 40%."
+and the host's Start waits until every player has it: "The match starts when every player has this
+map's mod content." A host whose own copy of the map is missing some of its content cannot host it:
+the game says "This map cannot be hosted: some of its mod content (Eternal Demons) is not on this
+computer, and every player needs all of it. Play the map once online to get it, then host it."
 
 ---
 
