@@ -12,7 +12,7 @@ this repository holds everything players see in a browser.
 | Path | Responsibility |
 |---|---|
 | [site/](site/README.md) | Jekyll source: landing page, player guide, changelog, privacy policy, Community pages. |
-| [api/](api/README.md) | Cloudflare Worker: GitHub Discussions, sign-in sessions, screenshot uploads. |
+| [api/](api/README.md) | Cloudflare Worker: GitHub Discussions, sign-in sessions, screenshot uploads and the anonymous mod store. |
 | [tests/](tests/README.md) | Worker unit and local-runtime tests. |
 | [docs/services.md](docs/services.md) | Hosted services, credentials and fork setup. |
 | [.github/](.github/workflows/) | `ci.yml` checks pull requests; `pages.yml` publishes the site. |
@@ -22,7 +22,7 @@ this repository holds everything players see in a browser.
 - The site is static and published by GitHub Pages on every push to `main`.
 - The changelog page reads the product's published GitHub Releases in the browser.
   Release notes are written and reviewed in snapmap-plus; nothing here duplicates them.
-- The Download button resolves the newest stable installer from the same Releases call.
+- The Download button resolves the newest stable installer by version from the same releases list (up to ten pages of 100).
 - Community pages talk to the Worker at `https://api.snapmapplus.com`, which stores
   posts as GitHub Discussions on this repository.
 - The in-app feedback relay is not here: it belongs to the product and files issues on
@@ -38,6 +38,7 @@ node tests/worker_quota_test.js
 node tests/worker_mods_test.js
 npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0
 node tests/worker_runtime_test.js build/worker-tests/node_modules/miniflare
+node tests/worker_contract_test.js build/worker-tests/node_modules/miniflare
 ```
 
 Preview the site with a local Jekyll build of `site/`. Deploying the Worker is a

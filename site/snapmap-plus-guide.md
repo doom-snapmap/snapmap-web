@@ -94,8 +94,8 @@ off** says so, and the game runs without Snapmap+ for that session: run the inst
 installs the release that matches your DOOM or tells you that none does yet. When one feature cannot
 find what it needs in your game, only that feature is off: a line at the bottom of the Snapmap+
 window names it ("... is unavailable in this session"), and everything else works. When the two
-Snapmap+ files do not match each other, the window says only "Reinstall Snapmap+": run
-`snapmap-plus update`.
+Snapmap+ files do not match each other, the window shows "Reinstall Snapmap+" and says to run the
+Snapmap+ installer again and restart DOOM: run `snapmap-plus update`.
 
 
 ---
@@ -627,11 +627,9 @@ may not contain `..` or be a Windows device name such as `CON`.
 
 **Prefabs that use mods:** the list shows **Mods:** with their names, or **Needs mods:** when one is not
 installed, and the details pane lists each mod as Installed or Not installed. **Load / Place** checks
-first: if the mod store has the missing mods, the game asks whether to download them, installs them in
-your own mods folder, then places the prefab and adds the mods to the open map (the Mods tab's **Remove
-from map** takes them out again); if the store does not have them, nothing is placed and the message
-names each mod and asks for the prefab's export. A prefab whose mods you already have places as any
-other. Placing a prefab never changes where the open map finds its other mods.
+first: a prefab whose mods you have places as any other and adds the mods to the open map (the Mods
+tab's **Remove from map** takes them out again); one that needs a mod you do not have is not placed, and
+the message names the mod. Placing a prefab never changes where the open map finds its other mods.
 
 ---
 
@@ -665,10 +663,10 @@ uses: share that one file. Opening it installs its mods into
 `mods\maps\<the .zip's name>\`, the map's own folder of mods, and the map opens.
 The map remembers that folder: if you save it to My Maps, it reopens with its
 mods. To make one of those mods your own, use **Add to my mods** in the Mods
-tab (see [Mods](#mods)). A rawmap whose mods you do not have is never opened
-without them: when the mod store has them, the game offers to download them;
-otherwise the message names each one, and you can ask the map's author for the
-`.zip`.
+tab (see [Mods](#mods)). A rawmap whose mod content you do not have is never
+opened without it: content the mod store holds downloads with a progress line,
+and the map opens; otherwise the message names each mod, and you can ask the
+map's author for the `.zip`.
 
 Rawmaps are saved as compact JSON on one line. To save them with line breaks and
 indents, type `sh_pretty_on 1` in the console before you save. Type
@@ -700,21 +698,22 @@ tell before they open one.
 
 ### Playing maps that use mods
 
-You do not need to install anything to play someone else's map. Open it as usual. If it uses mods
-you do not have, the game asks once, for example "This map needs 1 mod: Hell Guards (1.2 MB).
-Download and install now?". **Yes** downloads only what you approved, checks every file and starts
-the map. **No** leaves the map unloaded. Joining a lobby asks the same way. A map whose mods you
-have starts at once.
+You do not need to install anything to play someone else's map. Open it as usual. If it uses mod
+content you do not have, the game downloads it from the mod store before the map starts, with no
+question, checks every file and starts the map; a player joining a lobby downloads it in the lobby, and
+the host's start waits for it. A map whose content you have starts at once, also offline.
 
-While the mods download, the game's progress line shows which mod, how many megabytes and the
-percent, for example "Downloading Tyrant (1 of 1): 40.0 of 98.4 MB, 40%.", and the console shows
-the same. A download still running after two seconds asks once "Keep downloading?": **No** cancels
-it and installs nothing more, and the map is not loaded. A mod may be of any size.
+While the content downloads, the game's progress line shows which mod and how many megabytes, for
+example "Getting this map's mod content: Eternal Demons (1 of 1), 40 of 98 MB.", and the console
+shows the same. Content that cannot be had (removed from the mod store, or the store cannot be
+reached) does not stop the map: it plays without those objects, and one notice names them, for
+example "This map is playing without the Tyrant from Eternal Demons, which was removed from the mod
+store." A map saved before its content was sent to the mod store, whose mods you do not have, is not
+loaded, and the message names the mods.
 
-The mods a map downloads are that map's own: they go into `mods\maps\<map title>\` and are used only
-by that map, so they never change your own maps or another map's mods. When the map's mods include
-scripts, the question says so: "These mods include scripts (15 files). Scripts run only inside this
-map and cannot read or change your files." (see [Mod scripts](#mod-scripts)).
+The content a map downloads is kept in Snapmap+'s content cache and serves only the maps that name it,
+so it never changes your own maps or mods. Mod scripts run only inside the map that carries them and
+cannot read or change your files (see [Mod scripts](#mod-scripts)).
 
 The Mods tab's setting **Play maps whose mods include scripts** is on by default. Turned off, a
 map whose mods include scripts is neither downloaded nor played: "This map's mods include scripts,
@@ -948,17 +947,19 @@ after a Play round. A published copy of the map changes only when you publish ag
 
 ### Publishing a map that uses mods
 
-Publish from DOOM's editor as usual. Before the map goes up, Snapmap+ uploads the mods it uses to
-the mod store, so other players can download them. Files identical to the game's own are never
-uploaded. A mod may be of any size and hold any number of files: a large one goes up in parts by
-itself, and a publish that was cut off sends only the parts the store does not have yet. The first
-time, the game asks once whether you agree to upload; **No** leaves the map unpublished. A map over
+Publish from DOOM's editor as usual. Publishing a map with mod content sends what the mod store
+lacks before the map is published, so other players can download it. When there is anything to
+upload, the game asks first ("Publishing uploads 212 MB of mod content that the mod store does not
+have yet. Publish?") and shows the progress; **No** leaves the map unpublished. Files identical to
+the game's own are never uploaded. A mod may be of any size and hold any number of files: a large
+one goes up in parts by itself, and a publish that was cut off sends only the parts the store does
+not have yet. A map over
 SnapMap's own 10 MB map limit (the map service's, not Snapmap+'s) is refused before anything is
 sent.
 
 Plain saves never upload anything. Publishing the map again sends your mod as it is now; players
-of the map get the files it was published with. Unpublishing a map releases its mods on the mod
-store. Deleting a map from My Maps does not, while its published copy stays available.
+of the map get the files it was published with. Unpublishing a map removes the map's claim from the mod
+store only. Deleting a map from My Maps does not, while its published copy stays available.
 
 ### Sharing a map or prefab that uses mods
 
@@ -1004,7 +1005,6 @@ folder is a name in `mods\` or a full path.
 | `sh_mods rescan` (or `refresh`) | The Mods tab's Refresh: build changed folders and bring the changes into the running game. |
 | `sh_mods new "<name>"` | Make a new mod folder. |
 | `sh_mods build "<folder>"` | Check one folder and build it. |
-| `sh_mods rebuild "<folder>"` | Build one folder again, then rescan. |
 | `sh_mods install "<folder>"` | Copy a mod folder into `mods\` and build it; a folder without `mod.json` installs every mod below it. |
 | `sh_mods verify "<folder>"` | Check one mod's files against their recorded hashes. |
 | `sh_mods doctor [verify]` | Explain every mod's state and any conflicts; `verify` also checks every file. |
@@ -1017,10 +1017,9 @@ folder is a name in `mods\` or a full path.
 | `sh_mods copystock "<engine path>" "<file>"` | Write a game file's bytes to a file. |
 | `sh_mods export "<path.zip>"` | Write the open map and its mods to one ZIP. |
 | `sh_mods import "<path.zip>"` | Open such a ZIP as **Load Rawmap...** does. |
-| `sh_mods push "<mod folder>" "<ref>"` | Upload a mod to the mod store by hand. |
-| `sh_mods release "<ref>"` | Release an upload on the mod store. |
-| `sh_mods retry` | Retry uploads that failed and wait in the queue. |
-| `sh_mods cancel` | Stop the running upload. |
+| `sh_mods release "<published item id>"` | Drop this computer's claim of a published map's content on the mod store. |
+| `sh_mods retry` | Send queued claims and releases and repair what the store lost. |
+| `sh_mods cancel` | Stop the running transfer. |
 
 ---
 
@@ -1917,8 +1916,9 @@ Sending it files a `crash`-labeled issue the same way, and repeat crashes at the
 onto one issue rather than filing duplicates.
 
 Nothing is sent unless you click Send. The only other network requests Snapmap+ makes are to the mod
-store, and only for what you ask for: uploading the mods of a map you publish (after you agree once)
-and downloading the mods of a map you chose to play.
+store: uploading the mod content of a map you publish (you are asked first when it uploads anything new),
+downloading the mod content of a map you chose to play, and one anonymous note to the store, with no
+information about you, when a map you play asks for a mod file its published content does not carry.
 
 **Reporting without the app.** If you open an issue on GitHub yourself, say which DOOM build you are
 on: run `snapmap-plus status` in a terminal and paste its `Game:` line (for example

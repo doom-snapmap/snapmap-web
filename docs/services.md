@@ -19,6 +19,7 @@ on Workers Paid from the same code (below).
 | R2 | Screenshot uploads | `MEDIA` binding | Uploads and media retrieval fail. |
 | R2 (mod store) | The Snapmap+ mod store, bucket `snapmap-plus-mods`: the units published maps claim, each file stored once by its SHA-256 in packs; billed per use for storage, Class A writes and Class B reads, with free egress | `MODS` binding | Players without a map's content load it with stand-ins and one notice; content already on their computer and vanilla maps are unaffected. |
 | SQLite Durable Objects (mod index and checker) | Index of units, blobs, packs, map claims and publishing keys (`MOD_REGISTRY`); the check of each upload, one object per unit (`MOD_CHECKER`); per-key and per-address limits use `WRITE_QUOTAS` | `MOD_REGISTRY` and `MOD_CHECKER` bindings and their `v2-mod-registry` and `v3-mod-checker` migrations; optional secrets `MODS_ADDRESS_KEY` and `MODS_ADMIN_TOKEN` | Mod store routes fail closed with HTTP 503. |
+| Staging Worker (optional) | `snapmap-plus-community-staging` on workers.dev with its own KV namespace, buckets `snapmap-plus-media-staging` and `snapmap-plus-mods-staging` and Durable Object namespaces, for mod-store tests; deployed with `npx wrangler deploy -c wrangler.staging.toml` | `api/wrangler.staging.toml` | No test store; the production Worker is unaffected. |
 | Workers Cron Trigger | Daily purge of units no claim has named for 24 hours, abandoned uploads in parts and objects no row names | `[triggers]` in `api/wrangler.toml` | Unclaimed units stay stored and served until a purge runs. |
 | Turnstile | Optional write challenge | Worker secret `TURNSTILE_SECRET` and matching site setup | The Worker skips the challenge when the secret is absent. |
 
@@ -54,22 +55,23 @@ account-specific IDs and origin constants in `api/worker.js` and
 The account is on Workers Free (owner, 2026-11-17). The API, the mod store included, runs on Free
 and on Workers Paid from the same code, and nothing in it depends on Free's limits being there.
 The Worker only moves bytes; the work that reads every byte of a mod upload runs in Durable
-Objects, which have 30 s of CPU a request on either plan, and a large upload is checked in parts of
-about 512 MiB, each a request of its own.
+Objects, which have 30 s of CPU a request on either plan. An upload is checked in a Durable Object that
+reads it back from R2 and hashes it: an archive is at most 95 MiB, and a file larger than one request,
+sent in parts, is read back whole in one checker call.
 
 ### What Free limits, and what a player sees when a daily allowance runs out
 
 | Free allowance (per day) | What reaches it | What the store answers | What the product does today |
 |---|---|---|---|
-| 100,000 Worker requests, for the whole account (staging and workers.dev included), reset at 00:00 UTC | every API call, the Community pages too; a mod publish is about 20, a download 2 | Cloudflare answers before the Worker with its error 1027 page (the HTTP status is not documented) and the whole API is down until 00:00 UTC | for a 429 or 5xx a publish says "The map was not published" with the reason, keeps the map and leaves the upload in the retry queue (retried at the next launch and after the next store call that works); another status is an unexpected answer and the publish is refused the same way; a download asks again later. The site's Community pages stop too. |
-| 100,000 Durable Object requests, 5 million rows read, 100,000 rows written, 5 GB stored | every mod-store call is one or two; a publish of a unit of N new files writes about 3N + 20 rows (5N + 25 before R-DS6; `tests/worker_rows_test.js`), a download of a unit 2 | 503, "The mod store is unavailable right now; try again later.", with `Retry-After` until the next UTC day | the same as a 429: nothing is lost, the upload stays queued, the map stays on the author's machine |
+| 100,000 Worker requests, for the whole account (staging and workers.dev included), reset at 00:00 UTC | every API call, the Community pages too; a mod publish is about 20, a download 2 | Cloudflare answers before the Worker with its error 1027 page (the HTTP status is not documented) and the whole API is down until 00:00 UTC | for a 429 or 5xx a publish waits out the store's `Retry-After` for up to two minutes, then publishes the map and queues what it could not send, which every start sends; a refusal the store words (a 4xx) is said in one sentence and the map is not published; a download plays the map with stand-ins for what it could not get and one notice, and gets it at the next open. The site's Community pages stop too. |
+| 100,000 Durable Object requests, 5 million rows read, 100,000 rows written, 5 GB stored | every mod-store call is one or two; a publish of a unit of N new files writes about 3N + 20 rows (5N + 25 before R-DS6; `tests/worker_rows_test.js`), a download of a unit 2 | 503, "The mod store is unavailable right now; try again later.", with `Retry-After` until the next UTC day when the failure names a daily allowance, otherwise 60 seconds | the same as a 429: nothing is lost, the upload stays queued, the map stays on the author's machine |
 | 10 ms of CPU a Worker request | the Worker's own work (3 to 6 ms an upload request, up to about 70 ms piping a 4 GB download, which Free has let through) | | |
 
 The store never leaves half a state behind at a cap: an upload in parts keeps its parts for a day
-and resumes, a claim is one transaction, a staged upload is packed later. The product should, and
-does not yet, honour `Retry-After`, finish a refused publish by itself once the store answers again,
-and say "the mod store is busy" rather than "could not be reached" for a 429 or 503 (the product's
-own work, not this repository's).
+and resumes, a claim is one transaction, a staged upload is packed later. The product honours
+`Retry-After` (a publish waits up to two minutes, a download retries four times), sends a publish's
+queued claim at every start, and says "not on this computer" when it is offline and "could not be
+reached" when the store did not answer.
 
 ### Switching to Workers Paid
 

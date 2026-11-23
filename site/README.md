@@ -23,7 +23,7 @@ reads the product's published GitHub Releases in the browser (`assets/site.js`),
 whose bodies are the reviewed `CHANGELOG.md` entries from the
 [snapmap-plus](https://github.com/doom-snapmap/snapmap-plus) repository, and
 renders them with the same grammar. Betas appear as prereleases. The Download
-button resolves the newest stable installer from the same call.
+button resolves the newest stable installer by version from the same releases list (up to ten pages of 100).
 
 Community pages call the [API Worker](../api/README.md) at
 `https://api.snapmapplus.com`; keep `WORKER` in `assets/community.js` aligned with

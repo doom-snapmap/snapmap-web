@@ -8,11 +8,11 @@ Serves the website's Community pages through GitHub Discussions on this reposito
 
 - `worker.js` defines the HTTP API, authentication, discussion operations and media handling.
 - `quota.js` and `quota_store.js` coordinate write limits across a user's sessions, and mod store limits per hashed client address.
-- `mods_store.js` defines the `/mods/*` routes, uploads in parts, the check of each build archive and the scheduled purge.
-- `mods_dist.js` defines authors' signing keys and the check of a signed request.
-- `mods_pack.js` holds the content-addressed storage: skeletons, packs, serving plans and the packer.
-- `mods_registry.js` and `mods_registry_store.js` hold the mod store index (builds, blobs, packs, anonymous claims, uploads in parts) and the per-build checker.
-- `wrangler.toml` binds `SESSIONS` KV, `MEDIA` and `MODS` R2, the SQLite `WRITE_QUOTAS`, `MOD_REGISTRY` and `MOD_CHECKER` Durable Objects, the `MODS_BLOCKED` variable and the daily purge trigger; `wrangler.staging.toml` is the same Worker on its own resources.
+- `mods_store.js` defines the `/mods/*` routes, uploads in parts, the checks of each unit's archive and the scheduled purge.
+- `mods_publisher.js` defines publishing keys, the first-come binding of an account name to a key and the check of a signed request.
+- `mods_pack.js` holds the content-addressed storage: packs, unit archives and serving plans.
+- `mods_registry.js` and `mods_registry_store.js` hold the mod store index (units, blobs, packs, map claims, publishers, uploads in parts) and the `ModChecker` that checks each unit's uploads.
+- `wrangler.toml` binds `SESSIONS` KV, `MEDIA` and `MODS` R2, the SQLite `WRITE_QUOTAS`, `MOD_REGISTRY` and `MOD_CHECKER` Durable Objects and the daily purge trigger; `wrangler.staging.toml` is the same Worker on its own resources.
 - `request_body.js` bounds request bodies before parsing or uploading.
 
 ## Working here
@@ -33,15 +33,15 @@ Malformed JSON or UTF-8 returns 400; oversize bodies return 413. Health is expos
 at `GET /`. Preview locally before a maintainer deploys. See the
 [service inventory](../docs/services.md) and [website source](../site/README.md).
 
-Deploy from this directory with `npx wrangler deploy` after `npx wrangler login`. Secrets (`APP_ID`, `APP_PRIVATE_KEY`, `CLIENT_SECRET`, optional `GITHUB_TOKEN` and `TURNSTILE_SECRET`) are set once with `npx wrangler secret put` and survive redeploys.
+Deploy from this directory with `npx wrangler deploy` after `npx wrangler login`. Secrets (`APP_ID`, `APP_PRIVATE_KEY`, `CLIENT_SECRET`, optional `GITHUB_TOKEN`, `TURNSTILE_SECRET`, `MODS_ADDRESS_KEY` and `MODS_ADMIN_TOKEN`) are set once with `npx wrangler secret put` and survive redeploys. One optional setting is a variable, not a secret: `MODS_MINIMUM_VERSION`, dot-separated numbers such as `1.0.0`. When it is set, every `/mods/*` answer carries `X-Snapmap-Plus-Minimum: <version>`, the oldest product version the store serves; a product below it tells its player once per start to update.
 
 From the repository root, run `node tests/worker_body_test.js`,
 `node tests/worker_quota_test.js` and `node tests/worker_mods_test.js` with Node 22.13 or newer. The local
 Cloudflare runtime checks are `node tests/worker_runtime_test.js <miniflare-module-path>` and
 `node tests/worker_contract_test.js <miniflare-module-path>` (the product's client, `tests/contract`);
-it uses Miniflare 4.20260730.0 and never calls GitHub or deployed storage. Add a size in
-GiB after the module path (`... <miniflare-module-path> 1.2`) to also upload, check and
-read back a generated build of that size in parts through the runtime.
+it uses Miniflare 4.20260730.0 and never calls GitHub or deployed storage.
+`tests/worker_rows_test.js`, which CI does not run, takes the module path, a file count and the Worker root:
+`node tests/worker_rows_test.js <miniflare-module-path> [files] [worker root]`.
 
 ## HTTP routes
 
@@ -65,7 +65,8 @@ read back a generated build of that size in parts through the runtime.
 | `POST /mods/unit/:hash/asked`, `POST /mods/asked` | Report a file a unit lacked, or list those reports for a publisher's claims. |
 | `POST /mods/admin/reset`, `/stats`, `/block`, `/unblock`, `/release-ref`, `/forget-key` | The maintainer's actions (hidden without their secret). |
 
-Community write routes require a session; `/mods/*` reads are anonymous and its writes are signed by a publishing key.
+Community write routes require a session; `/mods/*` reads are anonymous, and its writes are signed by a publishing key except the parts of an upload in parts and a player's `POST /mods/unit/:hash/asked`, which are anonymous.
+Every `/mods/*` answer may carry `X-Snapmap-Plus-Minimum: <version>` (see `MODS_MINIMUM_VERSION` above).
 Read `worker.js` for payloads, limits and the additional ownership or moderator checks on editing and deletion.
 
 ## Mod store
@@ -79,7 +80,7 @@ browser callers get the same allowlist as the rest of the API.
 
 ### Publishing a map
 
-The product (`modcache.c` `sh_cache_publish_unit`, `modnet.c`) publishes each unit the map's rows name that the store
+The product (`modclaim.c`, `modcache.c` `sh_cache_publish_unit`, `modnet.c`) publishes each unit the map's rows name that the store
 lacks: `POST /mods/unit/<hash>/begin` with the manifest's bytes answers `{held: true}` or the blobs the store lacks,
 `{missing, partSize, oneRequest}`; `PUT /mods/unit/<hash>/archive` sends them as stored ZIPs of `unit.json` and those
 files, each at most 95 MiB (several archives may carry one unit; the answer says `{held}` or what is still missing); a
@@ -87,7 +88,7 @@ file larger than one request goes in parts of `PART_SIZE` (16 MiB) through `/mod
 whether the store now holds every file. Then `POST /mods/map/claim {ref, units, secret, rev}` names the map's units:
 `rev` 1 makes a claim, a known `(ref, secret)` is replaced only at its stored rev + 1 (409 `{rev}` otherwise), every unit
 must be held (409 `{missing}`), and a unit moderation removed is left out (451 `{removed}`; the claim holds the rest).
-`POST /mods/map/release {ref, secret, rev}` removes it. Whoever authored a mod, a publisher uploads the units the store
+`POST /mods/map/release {ref, secret, rev}` removes it at the claim's stored rev + 1 and answers 204; 404 when no claim has that item and secret, 409 `{rev}` when the rev is stale. Whoever authored a mod, a publisher uploads the units the store
 lacks: every byte is checked, so authorship does not matter for map content.
 
 ### Publishing keys and names
@@ -135,14 +136,21 @@ hash and the shape of `SPEC-distribution` 3.4 (exact keys, format 1, paths lower
 folders, files sorted and unique, one size per SHA-256); an archive's every entry stored, hashed and its CRC-32
 computed, `unit.json` equal to the begun manifest, every other entry a file the manifest lists with its SHA-256, size
 and CRC-32, nothing else, a Lua script source text; a blob in parts by its SHA-256. A refused upload is deleted. The
-store imposes no limit of its own on a unit (its size, its files, one file's size, the units one claim names); what
-remains is one request body (100 MB on the Free and Pro plans, hence 95 MiB archives and parts) and R2's multipart rules.
+store sets no limit of its own on a unit's total size. What bounds a unit is one request body (100 MB on the Free and
+Pro plans, hence 95 MiB archives and 16 MiB parts), R2's multipart rules (a file in parts is at most 10,000 parts, about
+160 GiB), the manifest, which arrives in one request of at most 16 MiB and so limits a unit's files, and the claim, also
+one request of at most 16 MiB; a status request names at most 4,096 units.
 
 ### Limits
 
-Per hour, every write counts against its publishing key (the SHA-256 of the key names its quota object) and against the
-client's hashed address (`WRITE_QUOTAS`): 1,024 begins, 64 GiB soft (an upload of any size is admitted while the hour is
-below it), 256 claim calls; reads count 20,000 per address and fail open. A refusal is 429 with `Retry-After`. The
+Per hour, every signed write counts against its publishing key (the SHA-256 of the key names its quota object) and against
+the client's hashed address (`WRITE_QUOTAS`): 1,024 begins, 64 GiB of uploaded bytes (soft: an upload of any size is
+admitted while the hour is below it; an archive counts its length, the start of an upload in parts counts the file's
+size, its parts and completion count nothing), 256 claim calls (a claim, a release or an asked report). A begin, a claim
+and a release are counted against their publishing key only after the signature checks, so such a request its key did
+not sign spends nothing of that key's hour; an archive, whose signature is checked once it has arrived, is counted as it
+starts. The asked report, which is unsigned, counts against the address only. Reads count 20,000 per address
+and fail open. `POST /mods/unit/<hash>/complete` reads at most 64 KiB. A refusal is 429 with `Retry-After`. The
 numbers are the owner's to set (D45).
 
 ### Moderation and the maintainer
