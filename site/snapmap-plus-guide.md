@@ -725,6 +725,15 @@ store.", or ", which needs a newer Snapmap+; run the Snapmap+ installer to updat
 a rawmap, or a map saved before its content was sent to the mod store plays the same way when the
 mod's folder is not on this computer. Opening such a map in the editor works too.
 
+No map is refused for its mod content. If your folder of a mod is here but no longer has an object the
+map places, that object stands in beside the folder, and the notice says "This map is playing without
+the Tyrant from Eternal Demons, which your folder of the mod no longer has." A mod the map uses as a
+whole, with nothing placed from it, loads without it when its content is not here: "This map is playing
+without Eternal Demons, which is not on this computer." The one map that does not load is one that
+places objects whose stand-ins Snapmap+ could not write: "This map was not loaded: Snapmap+ could not
+write the stand-ins for its mod content that is not on this computer. Free some disk space, then open
+it again." (in the editor it reads "This map was not opened: ...").
+
 The content a map downloads is kept in Snapmap+'s content cache, `mods\.content\`, and serves only the
 maps that name it, so it never changes your own maps or mods. It is not a mod folder of yours; you
 see it under **Maps on this computer** in the Mods tab. Mod scripts run only inside the map that
@@ -734,7 +743,9 @@ The setting **Play Maps Whose Mods Include Scripts**, in the Settings menu of th
 on by default. Turned off, a map whose mods include scripts is not played: "This map's mods include
 scripts, which you turned off. To play it, turn on "Play Maps Whose Mods Include Scripts" in the
 Settings menu of the Snapmap+ window." That holds for a map you downloaded while the setting was on,
-and for a rawmap or prefab ZIP you import or open. Your own maps always play.
+and for a rawmap or prefab ZIP you import or open. Your own maps always play. While it is off, the
+scripts of content that came from elsewhere never run, whatever way the map was opened; the scripts of
+your own mod folders always do.
 
 ### The Mods tab
 
@@ -847,7 +858,8 @@ Crates\
 ```
 
 Each folder holds one kind of file, already in the game's formats: `materials\`, `images\`,
-`meshes\`, `animations\`, `effects\`, `environments\`, `particles\`, `entities\` (entity
+`meshes\`, `collision\` (an md6 mesh's collision models, at the mesh's path:
+`collision\<mesh path>\collision\<name>.bmodel` and `.bcm`), `animations\`, `effects\`, `environments\`, `particles\`, `entities\` (entity
 definitions), `sounds\` (sound decls and Wwise banks), `scripts\`, `movies\`, `programs\`,
 `map-modules\`, `virtual-textures\`, `atlases\`, `decls\<kind>\` for every other kind of decl (the
 Toybox rows go in `decls\snapeditorentitydef\`), and `native\` for the game's own files you change.
@@ -934,7 +946,11 @@ this computer's editor; maps made with it need nothing."
 
 Place one of the mod's objects from the Toybox. When you save, the map records the mod. In the
 editor every one of your mods offers its Toybox rows. In Play, a map gets exactly the mods it
-records, and a mod it does not record changes nothing in it. Your own maps in My Maps use your own
+records, and a mod it does not record changes nothing in it. Only a mod the open map records applies
+its `requirements`, in the editor, in Play and with no map open: the Toybox rows of a mod the map does
+not record appear without them, and placing one makes the map record the mod and apply them. Saving
+a map writes, for each mod it records, the name each placed object has in your Toybox, so a notice on
+another computer names an absent object as you named it. Your own maps in My Maps use your own
 mod folders as they are now; a published map plays the content it was published with.
 
 A mod that changes game files or sets console settings without adding objects, or has nothing to
@@ -965,9 +981,9 @@ upload, the game asks first ("Publishing uploads 212 MB of mod content that the 
 have yet. Publish?") and shows the progress; **No** leaves the map unpublished. Files identical to
 the game's own are never uploaded. A mod may be of any size and hold any number of files: a large
 one goes up in parts by itself, and a publish that was cut off sends only the parts the store does
-not have yet. A mod the map uses that is not on this computer stops the publish ("The map was not
-published: Snapmap+ cannot find the mod Eternal Demons on this computer. Build or install it in the
-Mods tab, or remove its objects, then publish again."). A map over
+not have yet. A mod the map uses that is not on this computer does not stop the publish: afterwards one notice
+tells you that players will see the map without its objects ("Players will see this map without the
+Marauder from Eternal Demons: its content is not on this computer or in the mod store."). A map over
 SnapMap's own 10 MB map limit (the map service's, not Snapmap+'s) is refused before anything is
 sent.
 
@@ -1002,15 +1018,17 @@ player's mods. To share a mod on its own, send its folder or a ZIP of it; the ot
 will do: if the open map uses the mod, the map is cleaned of it first, with the same list as Remove
 from map; the mod's Toybox rows leave the editor; and its folder moves to the Windows Recycle Bin.
 When the editor's undo history has to be cleared, the confirmation says so. It also says how many of
-your saved maps use the mod: they will not open until you restore the folder from the Recycle Bin.
+your saved maps use the mod: they will open without its objects until you restore it from the Recycle
+Bin. When another folder of the same mod stays installed, the confirmation says so ("Another folder of
+this mod, <folder>, stays installed; maps that use the mod open with it.").
 **Uninstall** is only for your own mods. The content of maps you downloaded is not a mod of yours; it
 goes with **Remove content of maps you only played** (see [The Mods tab](#the-mods-tab)).
 
 ### When something goes wrong
 
 A map saved by an earlier Snapmap+ does not open, and an export or prefab from one is refused: the
-message reads "... was saved by an earlier Snapmap+; run the Snapmap+ installer to update it." The
-installer converts them.
+message reads "... was saved by an earlier Snapmap+; run the Snapmap+ installer to update it." This
+release does not convert them yet; the installer leaves them as they are.
 
 A mod with a problem gets a yellow triangle, and the details pane says what to fix. A problem in one
 mod never affects the others. If a change you made breaks your own mod, the mod is not used until
@@ -1395,7 +1413,9 @@ The sentence names the mod, the file and line, what went wrong and what to do. T
 Scripts are sandboxed text. A script cannot read or write files, start programs, reach the network,
 the clipboard or the registry, or see your saves or other maps. It cannot run compiled code. It acts
 on the map's objects and the game's own content, and it may read and set the game's console
-variables and decls; what it sets there is put back when the map ends. It sees no other mod's
+variables and decls; what it sets there is put back when the map ends, unless you, the console or another mod changed it
+after the script did (that value stays), and a setting a quit or crash in the middle of a map left in
+the game's saved settings is put back the next time DOOM starts. It sees no other mod's
 scripts and cannot share values with them. Nothing it does outlives the map or reaches the editor. A script that runs on and on without
 returning is stopped after a few seconds, with the line above, so a mistake can never hang the game.
 
@@ -1409,9 +1429,11 @@ visuals and sounds in the clips' md6 rows, which play on every machine.
 A player who joins a co-op lobby for a map whose content comes from the mod store downloads it in the
 lobby and stays there while it comes. The host sees "Waiting for this map's mod content: Sam 40%."
 and the host's Start waits until every player has it: "The match starts when every player has this
-map's mod content." A host whose own copy of the map is missing some of its content cannot host it:
-the game says "This map cannot be hosted: some of its mod content (Eternal Demons) is not on this
-computer, and every player needs all of it. Play the map once online to get it, then host it."
+map's mod content. Still getting it: Sam." A host whose own copy of the map is missing some of its
+content that a player could get cannot host it yet: the game says "This map cannot be hosted yet: some
+of its mod content (Eternal Demons) is not on this computer. Open the map once online to get it, then
+host it." (when this computer is offline: "...: Eternal Demons is not on this computer. Connect to the
+internet and open the map once to get it, then host it.").
 
 ---
 
