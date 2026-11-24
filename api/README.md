@@ -33,13 +33,14 @@ Malformed JSON or UTF-8 returns 400; oversize bodies return 413. Health is expos
 at `GET /`. Preview locally before a maintainer deploys. See the
 [service inventory](../docs/services.md) and [website source](../site/README.md).
 
-Deploy from this directory with `npx wrangler deploy` after `npx wrangler login`. Secrets (`APP_ID`, `APP_PRIVATE_KEY`, `CLIENT_SECRET`, optional `GITHUB_TOKEN`, `TURNSTILE_SECRET`, `MODS_ADDRESS_KEY` and `MODS_ADMIN_TOKEN`) are set once with `npx wrangler secret put` and survive redeploys. One optional setting is a variable, not a secret: `MODS_MINIMUM_VERSION`, dot-separated numbers such as `1.0.0`. When it is set, every `/mods/*` answer carries `X-Snapmap-Plus-Minimum: <version>`, the oldest product version the store serves; a product below it tells its player once per start to update.
+Deploy from this directory with `npx wrangler deploy` after `npx wrangler login`. Secrets (`APP_ID`, `APP_PRIVATE_KEY`, `CLIENT_SECRET`, optional `GITHUB_TOKEN`, `TURNSTILE_SECRET`, `MODS_ADDRESS_KEY` and `MODS_ADMIN_TOKEN`) are set once with `npx wrangler secret put` and survive redeploys. One optional setting is a variable, not a secret: `MODS_MINIMUM_VERSION`, dot-separated numbers such as `1.0.0`. When it is set, every `/mods/*` answer carries `X-Snapmap-Plus-Minimum: <version>`, the oldest product version the store serves; a product below it tells its player once per start to update. `MODS_DELETE_DELAY_MS` is a staging variable only (see "Storage and the deletion delay"); production leaves it unset.
 
 From the repository root, run `node tests/worker_body_test.js`,
 `node tests/worker_quota_test.js` and `node tests/worker_mods_test.js` with Node 22.13 or newer. The local
 Cloudflare runtime checks are `node tests/worker_runtime_test.js <miniflare-module-path>` and
-`node tests/worker_contract_test.js <miniflare-module-path>` (the product's client, `tests/contract`);
-it uses Miniflare 4.20260730.0 and never calls GitHub or deployed storage.
+`node tests/worker_contract_test.js <miniflare-module-path>` (the product's client, `tests/contract`) and
+`node tests/worker_purge_test.js <miniflare-module-path>` (an unpublish and its purge leave nothing behind);
+they use Miniflare 4.20260730.0 and never call GitHub or deployed storage.
 `tests/worker_rows_test.js`, which CI does not run, takes the module path, a file count and the Worker root:
 `node tests/worker_rows_test.js <miniflare-module-path> [files] [worker root]`.
 
@@ -63,7 +64,7 @@ it uses Miniflare 4.20260730.0 and never calls GitHub or deployed storage.
 | `POST /mods/blob/:sha/parts`, `PUT /mods/blob/:sha/parts/:n`, `POST /mods/blob/:sha/complete` | Upload one file larger than one request in parts. |
 | `POST /mods/map/claim`, `/mods/map/release` | Make, replace or release a published map's claim of units (signed, with its secret and rev). |
 | `POST /mods/unit/:hash/asked`, `POST /mods/asked` | Report a file a unit lacked, or list those reports for a publisher's claims. |
-| `POST /mods/admin/reset`, `/stats`, `/block`, `/unblock`, `/release-ref`, `/forget-key` | The maintainer's actions (hidden without their secret). |
+| `POST /mods/admin/reset`, `/stats`, `/purge`, `/block`, `/unblock`, `/release-ref`, `/forget-key` | The maintainer's actions (hidden without their secret). |
 
 Community write routes require a session; `/mods/*` reads are anonymous, and its writes are signed by a publishing key except the parts of an upload in parts and a player's `POST /mods/unit/:hash/asked`, which are anonymous.
 Every `/mods/*` answer may carry `X-Snapmap-Plus-Minimum: <version>` (see `MODS_MINIMUM_VERSION` above).
@@ -128,6 +129,20 @@ A unit no claim names records the store-clock time it lost its last claim (or it
 cron then deletes it, the blobs no other unit names, and packs no blob row points into. A begin of an unclaimed unit
 restarts its delay. An object found missing marks its blobs broken (missing to every unit) until an upload repairs
 them. The daily purge also aborts uploads in parts untouched for a day and deletes objects no row names once a day old.
+A pack that still holds a blob another unit names stays whole: the purged unit's other bytes in it are dead space
+(`packBytes` above `liveBytes` in the stats) until its last blob goes.
+
+The delay is `MODS_DELETE_DELAY_MS` when a deployment sets it (a positive whole number of milliseconds) and 24 hours
+otherwise. Only `wrangler.staging.toml` sets it (60 seconds, so an unpublish and its purge can be shown in one sitting);
+`wrangler.toml` never does. `POST /mods/admin/purge` runs the cron's purge at once. The day an abandoned upload in parts
+and an unnamed object wait is not configurable, so on staging those still clear a day later.
+
+What an unpublish leaves: the map's claim row and its links to units go at the release; each unit, its links to blobs,
+its asked paths, the blobs no other unit names and the packs nothing points into go at the first purge after the delay,
+their objects deleted from R2 and so off the delete queue. Publishing keys and their names stay (forget-key removes
+them). The hourly limit counters (`WRITE_QUOTAS`, below) are not store rows: each is one row per kind of limit in the
+quota object of one hashed address or one hashed key, overwritten each hour, naming no unit, blob or claim, so an
+unpublish has nothing there to clean; a Worker cannot list those objects, so the stats do not count them.
 
 ### The checks
 
@@ -163,8 +178,14 @@ The admin routes take `Authorization: Bearer <MODS_ADMIN_TOKEN>` and answer 404 
 - `POST /mods/admin/release-ref {ref}` releases every claim of one published item, at its publisher's request (D42).
 - `POST /mods/admin/forget-key {key}` deletes a publishing key's record and its name binding, freeing the name for the
   next key that presents it; the key's claims stay, since their secrets authorise them (SPEC 4.4).
-- `POST /mods/admin/stats` says what the store holds; `POST /mods/admin/reset` deletes every object in the `MODS`
-  bucket, aborts every upload in parts and empties the index.
+- `POST /mods/admin/stats` says what the store holds: units (held, pending, claimed, unclaimed), blobs, packs and their
+  bytes, claims, `claimUnitRows` (claims' links to units), `unitBlobRows` (units' links to blobs), publishers, names,
+  blocked units, asked paths, uploads in parts and `dead` (objects queued for deletion).
+- `POST /mods/admin/purge` runs the daily cron's purge now, with its own bounds (the body is ignored), and answers
+  `{deleted: {units, blobs, packs, dead, uploads, queued, orphans}, delayMs, stats}`: the rows deleted, the delete-queue
+  entries whose objects were deleted (`queued` of them left by earlier requests), the abandoned uploads aborted, the
+  unnamed objects swept, the deletion delay applied and the stats afterwards. A purge deletes no claim row: a release does.
+- `POST /mods/admin/reset` deletes every object in the `MODS` bucket, aborts every upload in parts and empties the index.
 
 The retired routes of earlier stores (`/mods/build/*`, `/mods/bundle/*`, `/mods/author/*`, `/mods/claim`,
 `/mods/release`, `/mods/missing`, `PUT /mods/blob/<sha>`) answer 410 with "This version of Snapmap+ cannot use the mod
@@ -184,4 +205,6 @@ other route under 7 ms.
 workers.dev, with its own KV namespace, buckets (`snapmap-plus-media-staging`,
 `snapmap-plus-mods-staging`) and Durable Object namespaces, never the custom domain:
 `npx wrangler deploy -c wrangler.staging.toml`. Point the product's `mods.store` setting at its
-workers.dev address to publish and play against it.
+workers.dev address to publish and play against it. Its deletion delay is 60 seconds (`MODS_DELETE_DELAY_MS`): after an
+unpublish, wait a minute and call `POST /mods/admin/purge`. Run the purge only once a publish has claimed its units; a
+publish slower than the delay between its begin and its claim can lose an unclaimed unit to a purge run meanwhile.

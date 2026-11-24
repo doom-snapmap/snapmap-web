@@ -13,7 +13,7 @@
  *
  * A unit is "pending" from its begin (its manifest is known, some blobs are not held yet) and
  * "held" once every blob it names is. A unit no map claim names records unclaimed_at (the store's
- * clock) and is served and kept for DELETE_DELAY_MS, then deleted at the first purge; a claim
+ * clock) and is served and kept for DELETE_DELAY_MS (deleteDelayMs), then deleted at the first purge; a claim
  * within the delay clears it (D40). A blob no unit names is deleted with it, and a pack no blob
  * row points into goes to the delete queue.
  *
@@ -23,6 +23,14 @@
  * grow; nothing here caps units, blobs, claims or units per claim. */
 
 export const DELETE_DELAY_MS = 86400000;     // D40: an unclaimed unit is kept and served this long
+/* The deletion delay a deployment uses: MODS_DELETE_DELAY_MS when it is a positive whole number of
+ * milliseconds (a staging copy sets it short so a purge can be shown at once), else D40's 24 hours.
+ * Production never sets it. */
+export function deleteDelayMs(env) {
+  const raw = env ? env.MODS_DELETE_DELAY_MS : undefined;
+  const value = typeof raw === 'string' && /^\d{1,16}$/.test(raw.trim()) ? Number(raw.trim()) : raw;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : DELETE_DELAY_MS;
+}
 export const UPLOAD_IDLE_MS = 86400000;      // an upload in parts untouched this long is abandoned
 export const ASKED_MAX = 256;                // D44: asked paths kept per unit
 export const SCHEMA_VERSION = 5;
@@ -161,8 +169,8 @@ function goodBlob(storage, sha) {
 }
 
 /* Blob rows left packs ({ pack id -> [count, bytes] }): each pack's counts change once, and a pack goes when no blob
- * row points into it. Returns the objects queued. */
-function unlinkFromPacks(storage, left, now) {
+ * row points into it. Returns the objects queued; `tally.packs` (when given) counts the packs deleted. */
+function unlinkFromPacks(storage, left, now, tally = null) {
   const queued = [];
   for (const [packId, [count, bytes]] of left) {
     storage.sql.exec('UPDATE pack SET live = live - ?, live_bytes = live_bytes - ? WHERE id = ?', count, bytes, packId);
@@ -170,6 +178,7 @@ function unlinkFromPacks(storage, left, now) {
     if (pack && pack.live <= 0) {
       storage.sql.exec('DELETE FROM pack WHERE id = ?', packId);
       queued.push(...bury(storage, [pack.object], now));
+      if (tally) tally.packs++;
     }
   }
   return queued;
@@ -180,8 +189,9 @@ function leaving(left, packId, size) {
   left.set(packId, [was[0] + 1, was[1] + size]);
 }
 
-/* Deletes the blob rows of `shas` that no unit names any more. Returns the objects queued. */
-function dropUnnamedBlobs(storage, shas, now) {
+/* Deletes the blob rows of `shas` that no unit names any more. Returns the objects queued; `tally`
+ * (when given) counts the blobs and packs deleted. */
+function dropUnnamedBlobs(storage, shas, now, tally = null) {
   const left = new Map();
   for (const sha of new Set(shas)) {
     if (one(storage, 'SELECT 1 AS hit FROM unit_blob WHERE sha = ? LIMIT 1', sha)) continue;
@@ -189,8 +199,9 @@ function dropUnnamedBlobs(storage, shas, now) {
     if (!blob) continue;
     storage.sql.exec('DELETE FROM blob WHERE sha = ?', sha);
     leaving(left, blob.pack, blob.size);
+    if (tally) tally.blobs++;
   }
-  return unlinkFromPacks(storage, left, now);
+  return unlinkFromPacks(storage, left, now, tally);
 }
 
 /* The SHA-256s a unit names that the store does not hold whole. */
@@ -412,25 +423,27 @@ export function commitBlob(storage, sha, size, crc, object, now) {
   });
 }
 
-/* Drops one unit's row and what only it named. Inside a transaction. Returns the objects queued. */
-function dropUnit(storage, u, now) {
+/* Drops one unit's row and what only it named. Inside a transaction. Returns the objects queued;
+ * `tally` (when given) counts the blobs and packs deleted. */
+function dropUnit(storage, u, now, tally = null) {
   const shas = rows(storage, 'SELECT sha FROM unit_blob WHERE unit = ?', u.id).map(r => r.sha);
   storage.sql.exec('DELETE FROM unit_blob WHERE unit = ?', u.id);
   storage.sql.exec('DELETE FROM unit WHERE id = ?', u.id);
   storage.sql.exec('DELETE FROM asked WHERE unit = ?', u.hash);
-  return [...dropUnnamedBlobs(storage, shas, now), ...bury(storage, [u.manifest_object], now)];
+  return [...dropUnnamedBlobs(storage, shas, now, tally), ...bury(storage, [u.manifest_object], now)];
 }
 
-/* Deletes the units no claim has named for DELETE_DELAY_MS (held, or pending since their begin).
- * Rows go first, so they stop being served before their objects are deleted. Returns
- * { units, objects }. */
-export function purgeUnits(storage, now, limit) {
+/* Deletes the units no claim has named for `delay` ms (DELETE_DELAY_MS unless the deployment sets
+ * another, deleteDelayMs): held, or pending since their begin. Rows go first, so they stop being
+ * served before their objects are deleted. Returns { units, blobs, packs, objects, delayMs }. */
+export function purgeUnits(storage, now, limit, delay = DELETE_DELAY_MS) {
   return storage.transactionSync(() => {
     const doomed = rows(storage, 'SELECT id, hash, manifest_object FROM unit WHERE claims <= 0 AND unclaimed_at IS NOT NULL AND unclaimed_at <= ? ' +
-      'ORDER BY unclaimed_at LIMIT ?', now - DELETE_DELAY_MS, limit);
+      'ORDER BY unclaimed_at LIMIT ?', now - delay, limit);
     const objects = [];
-    for (const u of doomed) objects.push(...dropUnit(storage, u, now));
-    return { units: doomed.length, objects };
+    const tally = { blobs: 0, packs: 0 };
+    for (const u of doomed) objects.push(...dropUnit(storage, u, now, tally));
+    return { units: doomed.length, blobs: tally.blobs, packs: tally.packs, objects, delayMs: delay };
   });
 }
 
@@ -673,7 +686,9 @@ export function abandonUploads(storage, now, limit, all = false) {
 
 /* ---------------- accounting and reset ---------------- */
 
-/* What the store holds. `unclaimed` counts units in their deletion delay. */
+/* What the store holds. `unclaimed` counts units in their deletion delay; `claimUnitRows` and
+ * `unitBlobRows` count the rows linking claims to units and units to blobs, so a row left behind by
+ * an unpublish or a purge shows. */
 export function storeStats(storage) {
   const u = one(storage, "SELECT count(*) AS units, coalesce(sum(state = 'held'), 0) AS held, coalesce(sum(state = 'pending'), 0) AS pending, " +
     'coalesce(sum(claims > 0), 0) AS claimed, coalesce(sum(claims <= 0), 0) AS unclaimed, coalesce(sum(size), 0) AS unitBytes FROM unit');
@@ -681,7 +696,8 @@ export function storeStats(storage) {
   const packs = one(storage, 'SELECT count(*) AS packs, coalesce(sum(size), 0) AS bytes, coalesce(sum(live_bytes), 0) AS live FROM pack');
   return { units: u.units, held: u.held, pending: u.pending, claimed: u.claimed, unclaimed: u.unclaimed, unitBytes: u.unitBytes,
     blobs: blobs.blobs, blobBytes: blobs.bytes, brokenBlobs: blobs.broken, packs: packs.packs, packBytes: packs.bytes, liveBytes: packs.live,
-    claims: one(storage, 'SELECT count(*) AS n FROM map_claim').n, publishers: one(storage, 'SELECT count(*) AS n FROM publisher').n,
+    claims: one(storage, 'SELECT count(*) AS n FROM map_claim').n, claimUnitRows: one(storage, 'SELECT count(*) AS n FROM map_claim_unit').n,
+    unitBlobRows: one(storage, 'SELECT count(*) AS n FROM unit_blob').n, publishers: one(storage, 'SELECT count(*) AS n FROM publisher').n,
     names: one(storage, 'SELECT count(*) AS n FROM publisher_name').n, blocked: one(storage, 'SELECT count(*) AS n FROM blocked').n,
     asked: one(storage, 'SELECT count(*) AS n FROM asked').n, uploads: one(storage, 'SELECT count(*) AS n FROM upload').n,
     dead: one(storage, 'SELECT count(*) AS n FROM dead').n };

@@ -52,6 +52,12 @@ class_name = "ModChecker"
 tag = "v3-mod-checker"
 new_sqlite_classes = ["ModChecker"]
 
+# Staging only: an unclaimed unit is kept 60 seconds, not D40's 24 hours, so an unpublish and the
+# purge that follows (POST /mods/admin/purge) can be shown in one sitting. Production's wrangler.toml
+# never sets it. A publish slower than this between its begin and its claim can lose its unit to a
+# purge run meanwhile; run the purge only after the claim.
+[vars]
+MODS_DELETE_DELAY_MS = "60000"
 
 [triggers]
 crons = ["23 4 * * *"]

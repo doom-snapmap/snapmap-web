@@ -3,7 +3,7 @@ import {
   initializeRegistry, unitStatus, unitRow, unitServed, beginUnit, unitBlobs, commitUnitArchive, completeUnit, blobWanted,
   commitBlob, blobLocation, markBroken, purgeUnits, claimUnits, releaseClaim, claimRev, releaseRef, reportAsked, listAsked,
   publisherSeen, forgetKey, publisherRow, blockUnit, unblockUnit, uploadSession, openUpload, recordPart, closeUpload,
-  abandonUploads, deadObjects, forgetDead, unnamedObjects, storeStats, resetRegistry,
+  abandonUploads, deadObjects, forgetDead, unnamedObjects, storeStats, resetRegistry, deleteDelayMs,
 } from './mods_registry_store.js';
 import { beginIn, checkUnitArchiveIn, checkBlobIn, archivePlanIn, askedIn } from './mods_store.js';
 import { meteredStorage } from './sql_meter.js';
@@ -30,7 +30,7 @@ export class ModRegistry extends DurableObject {
   commitBlob(sha, size, crc, object) { return commitBlob(this.s, sha, size, crc, object, Date.now()); }
   blobLocation(sha) { return blobLocation(this.s, sha); }
   markBroken(object) { return markBroken(this.s, object, Date.now()); }
-  purgeUnits(limit) { return purgeUnits(this.s, Date.now(), limit); }
+  purgeUnits(limit) { return purgeUnits(this.s, Date.now(), limit, deleteDelayMs(this.env)); }
   claim(request) { return claimUnits(this.s, request, Date.now()); }
   release(request) { return releaseClaim(this.s, request, Date.now()); }
   claimRev(ref, secretHash) { return claimRev(this.s, ref, secretHash); }

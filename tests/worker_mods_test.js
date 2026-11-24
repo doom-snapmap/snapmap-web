@@ -676,6 +676,18 @@ test('the deletion delay: an unclaimed unit is kept and served 24 hours, a claim
   assert.equal(stats.blobs, 2);
 });
 
+test('the deletion delay is MODS_DELETE_DELAY_MS only when it is a positive whole number, else 24 hours', async () => {
+  const { deleteDelayMs, DELETE_DELAY_MS } = await registryModule;
+  assert.equal(DELETE_DELAY_MS, DAY);
+  for (const unset of [undefined, {}, { MODS_DELETE_DELAY_MS: '' }, { MODS_DELETE_DELAY_MS: '0' }, { MODS_DELETE_DELAY_MS: '-5' },
+    { MODS_DELETE_DELAY_MS: '1.5' }, { MODS_DELETE_DELAY_MS: '60s' }, { MODS_DELETE_DELAY_MS: 0 }, { MODS_DELETE_DELAY_MS: NaN }]) {
+    assert.equal(deleteDelayMs(unset), DAY, JSON.stringify(unset));
+  }
+  assert.equal(deleteDelayMs({ MODS_DELETE_DELAY_MS: '60000' }), 60000);
+  assert.equal(deleteDelayMs({ MODS_DELETE_DELAY_MS: ' 60000\n' }), 60000);
+  assert.equal(deleteDelayMs({ MODS_DELETE_DELAY_MS: 60000 }), 60000);
+});
+
 test('a remix by another publisher claims the same unit; each claim keeps it; a deleted unit is uploaded again', async () => {
   const env = await modsEnv();
   const author = makeKey(), player = makeKey();

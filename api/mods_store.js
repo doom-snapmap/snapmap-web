@@ -958,15 +958,18 @@ async function deleteObjects(env, objects) {
   for (let i = 0; i < keys.length; i += 1000) await env.MODS.delete(keys.slice(i, i + 1000));
 }
 
-/* Deletes objects the registry queued, then tells it so; what fails stays queued for the purge. */
+/* Deletes objects the registry queued, then tells it so; what fails stays queued for the purge.
+ * Returns how many left the queue (0 when the deletion failed). */
 async function deleteQueued(env, objects) {
   const keys = (objects || []).filter(Boolean);
-  if (!keys.length) return;
+  if (!keys.length) return 0;
   try {
     await deleteObjects(env, keys);
     await registry(env, 'forgetDead', keys);
+    return keys.length;
   } catch (error) {
     console.log('mods: deleting ' + keys.length + ' object(s) failed; they stay queued:', String(error && error.message).slice(0, 200));
+    return 0;
   }
 }
 
@@ -1364,6 +1367,15 @@ async function adminStats(req, env) {
   return reply(await registry(env, 'stats'));
 }
 
+/* POST /mods/admin/purge: runs the daily cron's purge now (purgeMods, with its own bounds; the body
+ * is ignored) and answers what it deleted, the deletion delay this deployment uses and what the
+ * store holds afterwards. */
+async function adminPurge(req, env) {
+  await discard(req);
+  const { delayMs, ...deleted } = await purgeMods(env);
+  return reply({ deleted, delayMs, stats: await registry(env, 'stats') });
+}
+
 /* POST /mods/admin/block {"unit", "reason"}: moderation removes a unit (5.19). */
 async function adminBlock(req, env) {
   const body = await readRequestJson(req);
@@ -1464,7 +1476,7 @@ async function routeMods(req, env, path) {
   }
   const open = { '/mods/units': postUnits, '/mods/map/claim': postClaim, '/mods/map/release': postRelease, '/mods/asked': postAskedList }[path];
   if (open) return req.method === 'POST' ? open(req, env, path) : notAllowed(req, 'POST');
-  const admin = { '/mods/admin/reset': adminReset, '/mods/admin/stats': adminStats, '/mods/admin/block': adminBlock,
+  const admin = { '/mods/admin/reset': adminReset, '/mods/admin/stats': adminStats, '/mods/admin/purge': adminPurge, '/mods/admin/block': adminBlock,
     '/mods/admin/unblock': adminUnblock, '/mods/admin/release-ref': adminReleaseRef, '/mods/admin/forget-key': adminForgetKey }[path];
   if (admin) {
     if (req.method !== 'POST') return notAllowed(req, 'POST');
@@ -1494,27 +1506,33 @@ async function abortUploads(env, rounds, all = false) {
 
 /* Deletes the units past their deletion delay (D40), abandoned uploads in parts, what the delete
  * queue still holds and objects no row names. Bounded per run; the next run continues. The daily
- * cron runs it. */
+ * cron runs it, and so does POST /mods/admin/purge. Returns what it deleted: units, blobs and packs
+ * (rows), dead (delete-queue entries whose objects were deleted), uploads (abandoned uploads in
+ * parts), queued (of `dead`, the entries an earlier request left), orphans (objects no row named)
+ * and delayMs (the deletion delay the registry applied). */
 export async function purgeMods(env, { batch = PURGE_BATCH, rounds = PURGE_ROUNDS, sweepPages = SWEEP_PAGES, now = Date.now() } = {}) {
-  let units = 0;
+  let units = 0, blobs = 0, packs = 0, dead = 0, delayMs = null;
   for (let i = 0; i < rounds; i++) {
     const doomed = await registry(env, 'purgeUnits', batch);
-    await deleteQueued(env, doomed.objects);
+    delayMs = doomed.delayMs ?? delayMs;
+    dead += await deleteQueued(env, doomed.objects);
     units += doomed.units;
+    blobs += doomed.blobs || 0;
+    packs += doomed.packs || 0;
     if (doomed.units < batch) break;
   }
   const uploads = await abortUploads(env, rounds);
   let queued = 0;
   for (let i = 0; i < rounds; i++) {
-    const dead = await registry(env, 'deadObjects', 1000);
-    if (!dead.length) break;
-    await deleteQueued(env, dead);
-    queued += dead.length;
+    const waiting = await registry(env, 'deadObjects', 1000);
+    if (!waiting.length) break;
+    queued += await deleteQueued(env, waiting);
   }
+  dead += queued;
   const orphans = await sweepOrphans(env, sweepPages, now);
-  console.log('mods purge: deleted ' + units + ' units, ' + uploads + ' abandoned uploads, ' + queued + ' queued objects and ' +
-    orphans + ' objects no row names');
-  return { units, uploads, queued, orphans };
+  console.log('mods purge: deleted ' + units + ' units, ' + blobs + ' blobs, ' + packs + ' packs, ' + uploads + ' abandoned uploads, ' +
+    dead + ' queued objects and ' + orphans + ' objects no row names');
+  return { units, blobs, packs, dead, uploads, queued, orphans, delayMs };
 }
 
 /* Deletes objects in the bucket that no row names and that are older than a day: what a request that
