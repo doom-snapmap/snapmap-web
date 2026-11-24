@@ -693,8 +693,8 @@ it off to preserve that map.
 
 A **mod** adds content SnapMap does not offer: campaign demons such as the Cyberdemon, Hell Guards
 and the Spider Mastermind, props, doors, sounds, whole arenas as modules, and scripts that drive
-them. A mod is a folder in `%LOCALAPPDATA%\snapmap-plus\mods\` holding a small `mod.json` and an
-`assets\` folder of game files. Its new objects appear in the Toybox with a name and a description,
+them. A mod is a folder in `%LOCALAPPDATA%\snapmap-plus\mods\` holding a small `mod.json` and
+folders of game files named for what they are. Its new objects appear in the Toybox with a name and a description,
 and they play like any other.
 
 ![DOOM's Toybox showing the Hell Guard, Cyberdemon and Spider Mastermind tiles added by mods](images/mods-toybox-demons.jpg)
@@ -840,27 +840,30 @@ That is the whole loop: change a file, save, Refresh.
 ```
 Crates\
   mod.json
-  assets\
-    generated\decls\entitydef\mods\Crates\big_crate.decl
-    generated\decls\snapeditorentitydef\mods\Crates\big_crate.decl
-    ...
+  entities\big_crate.decl
+  decls\snapeditorentitydef\big_crate.decl
+  materials\  images\  meshes\  animations\  effects\  sounds\  scripts\  ...
   README.txt
 ```
 
-`assets\` mirrors the game's own resource paths, and every file is already in the game's formats.
-Snapmap+ does not convert models, textures or sounds from other games; that is the job of
-Doomforge, the companion import tool.
+Each folder holds one kind of file, already in the game's formats: `materials\`, `images\`,
+`meshes\`, `animations\`, `effects\`, `environments\`, `particles\`, `entities\` (entity
+definitions), `sounds\` (sound decls and Wwise banks), `scripts\`, `movies\`, `programs\`,
+`map-modules\`, `virtual-textures\`, `atlases\`, `decls\<kind>\` for every other kind of decl (the
+Toybox rows go in `decls\snapeditorentitydef\`), and `native\` for the game's own files you change.
+A file in any other folder is a mistake the build names. Snapmap+ does not convert models, textures
+or sounds from other games; that is the job of Doomforge, the companion import tool.
 
-- **New files** go under `mods\<your folder's name>\`, and in your files you write
-  `mods/<your folder's name>/...` to name them, as in `entityDef = "mods/Crates/big_crate";`. When
-  you press Refresh, Snapmap+ files them under the mod's own name, so they never collide with the
-  game's files or another mod's. The folder name is yours: rename the folder whenever you like.
-  The example crate's files already sit under that name, a short code of eight characters; you
-  never need to type it.
-- **To change a game file**, put your edited copy of it at the game's own path. Snapmap+ records
-  what your copy changes, and a map that uses the mod gets the game's file with your changes. Two
-  mods that add to the same list both apply. A model or image at a game path with other bytes is
-  refused: put it under `mods\<your folder's name>\` and point your files at it.
+- **Your own files** are named by their place in the folder: in your files you write
+  `entities/big_crate`, `materials/crate_rust`, `effects/sparks`, and Toybox text as
+  `#str_big_crate_name`. Snapmap+ keeps the mod's names apart from the game's and from every other
+  mod's; you never write anything for that. The folder name is yours: rename the folder whenever you
+  like. A name that begins like one of your folders but is the game's is written `native:` before
+  it (`native:effects/explosion`).
+- **To change a game file**, put your edited copy of it in `native\` at the game's own path
+  (`native\generated\decls\entitydef\...`). Snapmap+ records what your copy changes, and a map that
+  uses the mod gets the game's file with your changes. Two mods that add to the same list both
+  apply. A model or image in `native\` replaces the game's file only in the maps that use the mod.
 - **Unchanged copies of game files** cost nothing: they are read from each player's own game, never
   stored or uploaded. `sh_mods copystock "<engine path>" "<file>"` writes a game file out so you
   can start from it.
@@ -868,8 +871,8 @@ Doomforge, the companion import tool.
   in the campaign (a model, its skeleton and clips, an effect's particles, a screen), Snapmap+
   brings it along from the player's own game, so the object loads whole in SnapMap, and sets the
   console settings it needs by itself. The details pane lists them under what it borrows.
-- **Other files** beside `mod.json` and `assets\`, such as a README or your notes, are fine. They
-  are never built or shared.
+- **Other files** beside `mod.json`, such as a README or your notes, and folders whose name starts
+  with `.` are fine. They are never built or shared.
 
 `mod.json` is the part you write:
 
@@ -901,18 +904,18 @@ A mistake in `scenes` or `hud` fails the build, and the Mods tab names the block
 member of its own to `mod.json`, `"snapmap-plus"`, when it builds the folder. Leave it alone; the
 rest of the file is yours.
 
-**Sounds.** A sound decl under `generated\decls\sound\mods\<your folder's name>\` can play any of the
-game's sounds by name. A sound bank of your own, built with Wwise, goes in
-`assets\sound\soundbanks\pc\` named `<your folder's name>_<name>.bnk`; Refresh renames it for the mod
-and keeps every file that names it in step. A changed bank is heard after you restart DOOM.
+**Sounds.** A sound decl in `sounds\` is named for the event it plays: `sounds\hit.decl` plays the
+event `play_hit`, so a bank of your own, built with Wwise and put in `sounds\` too, names that event
+`play_hit`; Snapmap+ keeps your events apart from the game's and other mods'. To play one of the
+game's sounds, name its event (`soundShader = "play_arcade_ui_17";`). A changed bank is heard after
+you restart DOOM.
 
 **Modules.** A mod can carry whole modules, such as a multiplayer map's arena. A module has no tile
 in the Toybox: a map or a module prefab that names it loads it, and it then moves, saves and plays
 like a stock module. A prefab of rooms built from mod modules carries the mod like any prefab.
 
 **Virtual textures.** A mod can carry its own virtual-texture board: the pages its lit materials
-(a demon's body, its weapon, a prop) stream their detail from, under
-`assets\virtualtextures\mods\<your folder's name>\`. Its materials read that board with the game's
+(a demon's body, its weapon, a prop) stream their detail from, in its `virtual-textures\` folder. Its materials read that board with the game's
 own demon render programs, as the game's demons read the game's board, on Vulkan and on OpenGL;
 nothing of it goes into the game's own board. DOOM has room for a limited number of boards on one
 map (about 26 to 28 at once). A map whose mods need more draws the rest with plain textures and
