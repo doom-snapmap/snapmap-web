@@ -39,6 +39,7 @@ node tests/worker_mods_test.js
 npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0
 node tests/worker_runtime_test.js build/worker-tests/node_modules/miniflare
 node tests/worker_contract_test.js build/worker-tests/node_modules/miniflare
+node tests/worker_purge_test.js build/worker-tests/node_modules/miniflare
 ```
 
 Preview the site with a local Jekyll build of `site/`. Deploying the Worker is a

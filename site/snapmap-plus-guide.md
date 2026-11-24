@@ -61,15 +61,13 @@ A few practical notes:
   `uninstall`, `status` — right there, no terminal needed.
 - **Updating later:** run `snapmap-plus update` — it updates both Snapmap+ and `snapmap-plus.exe`
   itself. You never need to re-download anything from the site.
-- **Your mods and maps come along.** Every install and update converts what an earlier Snapmap+
-  left on this computer so it keeps working: every mod folder in `mods\`, every map you saved, your
-  rawmap and your prefabs. Your old editor tweaks and custom strings (the `overrides` and `strings`
-  folders of earlier versions and of the original SnapHak) become one mod named **My overrides**, and
-  those two folders go to the Recycle Bin. A map file the installer changes keeps a copy of itself
-  as it was beside it. A mod folder it converts but cannot build yet is still converted: the Mods
-  tab shows it with what to fix. If you later copy in a mod folder from an earlier version, the Mods
-  tab says so; run the installer again and it converts that folder too. Files beside a mod's
-  `mod.json` and `assets\` folder are left alone.
+- **Mods and maps from an earlier Snapmap+.** This release does not convert them yet. The installer
+  leaves what an earlier version left on this computer as it is: mod folders in an earlier shape, the
+  old `overrides` and `strings` folders, and maps saved in an earlier shape. A map, rawmap export or
+  prefab saved by an earlier Snapmap+ does not open ("This map was saved by an earlier Snapmap+; run
+  the Snapmap+ installer to update it."), and the Mods tab lists a mod folder made for an earlier
+  version with "This mod was made for an earlier version of Snapmap+. This version does not read it
+  yet."
 - **Coming from the original SnapHak?** The installer notices it in your DOOM folder and removes
   its files; Snapmap+ replaces it. Your maps and prefabs are copied from `%USERPROFILE%\snaphak`
   into Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`).
@@ -492,7 +490,8 @@ the list — letting your normal SnapMap logic reach entities that aren't SnapMa
 
 **`sh_target_any`** (a DOOM console command — press **~** to open the console) is a second way to wire
 this up, without touching decl text at all.
-While it's toggled on, entities that would normally need a `targets` list become valid endpoints for the
+While it's toggled on, the editor's palette also shows the campaign-only and normally hidden placeable
+entities, and entities that would normally need a `targets` list become valid endpoints for the
 native wire tool — so you can drag a wire from a logic node straight to one, the same way you'd wire two
 ordinary SnapMap logic nodes together, instead of typing an ID into a `targets` list by hand. Run
 `sh_target_any` again to turn it back off and return to normal SnapMap logic wiring.
@@ -566,7 +565,7 @@ directly, or by turning on `sh_target_any` and wiring it up with the native wire
 The Prefabs tab saves a group of entities so you can reuse it later, or share it with someone else
 running Snapmap+.
 
-**Creating one:** select the entities in the SnapMap editor, then click **Create from selection**. Give
+**Creating one:** select the entities in the SnapMap editor, then click **Create from Selection**. Give
 it a name, and it's added to the list. **Your cursor must be hovering one of the selected objects when
 you do this** — whichever object that is becomes the one centered on your cursor when you later paste
 the prefab back in. SnapMap anchors the prefab on the line through the **centre of your view**, not on
@@ -589,7 +588,7 @@ placed prefab brings in AI Navigation boxes, Snapmap+ updates the navmesh by its
 it, just as **View > Update Navmesh** would.
 
 **Blueprint prefabs:** a prefab can also be whole rooms. In Blueprint mode, select one or more modules
-and click **Create from selection**: the modules are saved together with every object inside them, their
+and click **Create from Selection**: the modules are saved together with every object inside them, their
 door and cap slots, the wires and references that stay inside the set, and the map variables those
 objects use (a wire that leaves the set is dropped and counted in the details). These prefabs carry a
 **Blueprint** badge in the list, and the details pane shows a top-down footprint of the modules with the
@@ -650,7 +649,7 @@ All rawmap actions are in the **File** menu:
 | **Load Rawmap...** | Pick a rawmap file (`.json` or `.zip`). Snapmap+ asks whether to open it now; **Open** opens it in the editor as a new map and discards unsaved edits, **Cancel** opens nothing. If the file cannot be opened, the message says why. |
 | **Save Rawmap** | Write the map you are editing to the **Save Path**, including unsaved edits. |
 | **Save Rawmap As...** | Pick a file and write the map you are editing to it. Later **Save Rawmap** clicks go to the same file. |
-| **Open *file* Again** | Open the last rawmap you loaded again, for example after you change it in a text editor. It names the file, and it is grey until you have loaded one. |
+| **Open *file* Again** | Open the last rawmap you loaded again, for example after you change it in a text editor. It names the file; until you have loaded one it reads **Open Rawmap Again** and is grey. |
 | **Keep This Save Path** | Ticked after **Save Rawmap As...**. Untick it to send saves back to the default file. Opening another map also sends saves back to the default file. |
 
 Under these options, **Load Path** and **Save Path** show the files Snapmap+
@@ -755,11 +754,12 @@ The buttons at the top of the list, by their hover text:
 - **Show only the mods that need attention** (the yellow triangle; shown only when a mod needs it).
 - **This map**: the open map's details and the mods it uses (see [The map window](#the-map-window)).
 - **Refresh**: after you change a mod's files, build them again and bring the change into the game.
-- **Open mods folder**.
-- **New mod** (see [Making your first mod](#making-your-first-mod)).
 - **Install**: pick mod ZIPs, or a mod folder's `mod.json`. You can pick several at once.
   Snapmap+ copies each mod into your own `mods\` folder and builds it; the game keeps running while
   it works, and the line at the bottom of the list says how far it got.
+- **New mod** (see [Making your first mod](#making-your-first-mod)).
+
+The mods folder's path, at the bottom of the list, opens it in Explorer.
 
 Below them, **Filter by name or folder...** narrows the list.
 
@@ -1016,7 +1016,7 @@ back on. When several mods need attention, the yellow triangle at the top of the
 those.
 
 A mod folder made for an earlier version of Snapmap+, copied in by hand, reads "This mod was made
-for an earlier version of Snapmap+. Run the Snapmap+ installer again and it converts it."
+for an earlier version of Snapmap+. This version does not read it yet."
 
 ### Mod console commands
 
@@ -1050,10 +1050,10 @@ folder is a name in `mods\` or a full path.
 
 ## Mod scripts
 
-A mod can carry **scripts**: small files of Lua code that make its objects do things during Play. A
-script can move and turn the mod's own objects, heal players, drive the mod's own demons (walk, turn,
-aim, fire, attack), deal damage with the mod's own damage decls, play its effects and sounds, and
-talk to SnapMap logic through **Script nodes** and the map's variables.
+A mod can carry **scripts**: small files of Lua code that make objects do things during Play. A
+script can move and turn the map's objects, heal players, drive demons (walk, turn, aim, fire,
+attack), deal damage with its mod's damage decls or the game's, play effects and sounds, and talk to
+SnapMap logic through **Script nodes** and the map's variables.
 
 Scripts run only during Play, only on the host of a game, and only for the mods the map uses. They
 never run in the editor.
@@ -1065,13 +1065,11 @@ A script is a text file ending in `.lua` in the mod's `scripts` folder:
 ```
 door-logic\
   mod.json
-  assets\
-    mods\door-logic\scripts\door.lua        an entry file: it runs when the map starts
-    mods\door-logic\scripts\lib\count.lua   a library: it runs only when a script asks for it
+  scripts\door.lua        an entry file: it runs when the map starts
+  scripts\lib\count.lua   a library: it runs only when a script asks for it
 ```
 
-Write it under your folder's name, as every other new file; Refresh files it under the mod. Every
-entry file starts with the line
+Every entry file starts with the line
 
 ```lua
 api = 1
@@ -1079,8 +1077,10 @@ api = 1
 
 which says the file is written for version 1 of the scripting calls. Comments may come before it.
 Entry files run once when the map starts, in name order; then the `on.map_start` handlers run. A
-library is loaded with `local count = require("count")` for `scripts\lib\count.lua`, once, and only
-from the same mod. `mod.json` says nothing about scripts.
+library is loaded with `local count = require("count")` for `scripts\lib\count.lua`, once, from the
+same mod; a name the mod has no file for loads the library of that name Snapmap+ ships, if any (the
+Enemy SDK's `enemy_sdk`, `enemy_snapmap`, `enemy_target`, `enemy_locomotion`, `enemy_weapon` and
+`enemy_probe`). `mod.json` says nothing about scripts.
 
 Press **Refresh** after every change. Refresh checks each script without running it: a mistake shows
 on the mod's row at once, with the file and line. A script changed during Play runs from the next
@@ -1115,7 +1115,7 @@ named `open_door`, and the wire opens the door. Name the handler's first value a
 or it hides the `node` call.
 
 **A pickup that spins and heals (an object that thinks).** The mod has an entityDef
-`generated\decls\entitydef\mods\spin-heal\pickups\spin_heal.decl` (a prop) with a Toybox row for it, as the example crate has,
+`entities\pickups\spin_heal.decl` (a prop) with a Toybox row for it, as the example crate has,
 and this script:
 
 ```lua
@@ -1153,21 +1153,21 @@ on.think("ai/brute", function(self)
   local d = self:distance(p)
   if d < 120 then
     self.state.busy = true
-    self:anim_state("melee")
+    self:animation_state("melee")
   elseif self:can_see(p) and now() > (self.state.next_throw or 0) then
     self.state.busy = true
     self.state.next_throw = now() + 3
-    self:anim_state("throw")
+    self:animation_state("throw")
   else
     self:move_to_entity(p)
   end
 end)
 
-on.anim("ai/brute", "throw", function(self)
+on.animation("ai/brute", "throw", function(self)
   self:fire("brute/rock", "hand_r", self:enemy())
 end)
 
-on.anim("ai/brute", "attack_done", function(self)
+on.animation("ai/brute", "attack_done", function(self)
   self.state.busy = false
 end)
 ```
@@ -1193,19 +1193,22 @@ an entityDef of the mod (it also covers entityDefs that inherit it); names compa
 | `on.damage(name, fn(self, hit))` | when it takes damage: `hit.amount`, `hit.attacker`, `hit.inflictor`, `hit.damage` (the damage decl), `hit.location` (the body zone), `hit.direction` |
 | `on.death(name, fn(self, hit))` | once, when it dies |
 | `on.pain(name, fn(self, reaction, damage, attacker))` | when a demon starts a pain reaction, such as `PAIN_FALTER` |
-| `on.anim(name, notify, fn(self))` | on an md6 row `ae_notify "<notify>"` of its animations |
+| `on.animation(name, notify, fn(self))` | on an md6 row `ae_notify "<notify>"` of its animations |
 | `on.frame_event(name, command, fn(self, args))` | on an md6 row `ae_notify "<command>:<a>:<b>"`; `args` is `{a, b}` |
 | `on.projectile(name, fn(self, p, decl, origin, dir))` | for every projectile the object launches |
 | `on.input(node name, fn(node, activator))` | when a wire reaches a Script node with that name |
+| `on.signal(event, fn(...))` | when any object of the map fires that SnapMap event, such as `"ai_killed"` |
 | `on.map_start(fn)` | once, after the entry files ran |
 | `on.map_end(fn)` | once, when the map ends |
 
 ### Calls
 
 Positions are tables `{x = ..., y = ..., z = ...}`; wherever a position is asked for, an object stands
-for its own position. Names are the mod's own, without the folder. A call that changes an object
-works only on the mod's own objects (placed from its entityDefs or spawned by its scripts), except
-that any script may heal a player. Reading works on any object. An object that is gone answers `nil`.
+for its own position. Names are the mod's own, without the folder; `native("...")` names the game's
+own content where a call takes it. Calls read and change any object of the map. An object that is
+gone answers `nil`. The tables below are the calls most scripts use; `docs/capabilities.md` in the
+Snapmap+ sources lists every one (`e:get`, `e:set`, `e:run_event`, `e:signal`, `console_variable`,
+`decl` and the rest).
 
 **Time and the log**
 
@@ -1223,19 +1226,19 @@ that any script may heal a player. Reading works on any object. An object that i
 
 | Call | What it does |
 |---|---|
-| `spawn(def, pos, [yaw])` | Spawns one of the mod's entityDefs and returns it. |
+| `spawn(def, pos, [yaw])` | Spawns an entityDef of the mod, or the game's with `native("...")`, and returns it. |
 | `players()` | The players in the game, as a list. |
 | `entities_near(pos, radius)` | The objects within `radius`, nearest first. |
 | `trace(from, to, [radius], [ignore])` | The first thing on the line: `{pos, normal, fraction, entity}`, or `nil`. A radius makes the line thick. |
-| `nav_ground(pos)` | The floor under a point. |
+| `ground_below(pos)` | The floor under a point. |
 | `difficulty()` | The game's difficulty, 0 (easiest) to 4 (Nightmare). |
-| `e:pos()`, `e:set_pos(pos)` | Its position. |
+| `e:position()`, `e:set_position(pos)` | Its position. |
 | `e:yaw()`, `e:set_yaw(degrees)` | Its heading. |
 | `e:axis()` | Its forward, left and up directions. |
 | `e:velocity()`, `e:set_velocity(v)` | Its speed and direction of movement. |
-| `e:health()`, `e:set_health(n)` | Its health. `set_health` heals a player; on the mod's own objects it can also lower health, but not to 0 (use `damage`, so the death plays). |
+| `e:health()`, `e:set_health(n)` | Its health. `set_health` heals a player; on a demon it can also lower health, but not to 0 (use `damage`, so the death plays). |
 | `e:alive()` | Whether it is alive. |
-| `e:def()` | Its entityDef's name. |
+| `e:definition()` | Its entityDef's name. |
 | `e:distance(other)` | The distance to another object or a position. |
 | `e:is_player()` | Whether it is a player. |
 | `e:remove()` | Removes it. |
@@ -1246,13 +1249,13 @@ that any script may heal a player. Reading works on any object. An object that i
 
 | Call | What it does |
 |---|---|
-| `e:anim_state(node, [via])` | Moves its animWeb to that node, through `via` if given. |
-| `e:anim_force(node, [blend])` | Jumps to that node, blending over `blend` seconds. |
-| `e:anim_current()` | The node it is in now. |
-| `e:anim_finished()` | Whether the node asked for has finished. |
-| `e:anim_event(name)` | Whether a step of the last request happened: `DEST_BLEND_START`, `DEST_REACHED`, `VIA_BLEND_IN_START`, `VIA_BLEND_OUT_START` or `FINISHED`. |
+| `e:animation_state(node, [via])` | Moves its animWeb to that node, through `via` if given. |
+| `e:force_animation(node, [blend])` | Jumps to that node, blending over `blend` seconds. |
+| `e:current_animation()` | The node it is in now. |
+| `e:animation_finished()` | Whether the node asked for has finished. |
+| `e:animation_event(name)` | Whether a step of the last request happened: `DEST_BLEND_START`, `DEST_REACHED`, `VIA_BLEND_IN_START`, `VIA_BLEND_OUT_START` or `FINISHED`. |
 
-**Demons** (only on the mod's own demons; the first command takes the demon over for the map)
+**Demons** (on any demon; the first command takes the demon over for the map)
 
 | Call | What it does |
 |---|---|
@@ -1270,8 +1273,8 @@ that any script may heal a player. Reading works on any object. An object that i
 | `ai:path_length(pos)`, `ai:can_reach(pos)`, `ai:path_points(pos)` | The walking route to a point. The game works it out in the background, so a call may answer "searching": ask again next frame. |
 | `ai:find_position({...})`, `ai:firing_position({...})` | A good place to go near a target (the settings table names the target, the distances and the kind of place). |
 | `ai:spline_clear(target, spline, seconds, [flags])` | Whether a curved path ahead is free. |
-| `ai:anim_valid(node, tests, [side])` | Whether an animation would end in a good place. |
-| `ai:anim_force_via(dest, via, [blend])` | Plays `via`, then goes to `dest`. |
+| `ai:animation_fits(node, tests, [side])` | Whether an animation would end in a good place. |
+| `ai:force_animation_via(dest, via, [blend])` | Plays `via`, then goes to `dest`. |
 | `ai:trigger(on)`, `ai:trigger_pulled()`, `ai:weapon_ready()` | Holds or releases its weapon's trigger; whether it is held; whether the weapon can fire again. |
 | `ai:equip(index)` | Equips an item of its inventory. |
 | `ai:laser(tag, on)`, `ai:laser_state(tag, on)`, `ai:laser_sweep(name)` | Its aiming lasers. |
@@ -1281,8 +1284,8 @@ that any script may heal a player. Reading works on any object. An object that i
 | `ai:pain_string(text or nil)` | Picks which of its pain animations play. |
 | `ai:block_pain(reaction, seconds)` | Holds back one pain reaction for a time. |
 
-**Combat, effects and sound** (with the mod's own decls; an attacker is one of the mod's own objects,
-and without one the damage comes from the world)
+**Combat, effects and sound** (with the mod's own decls, or the game's with `native("...")`; without an
+attacker the damage comes from the world)
 
 | Call | What it does |
 |---|---|
@@ -1290,8 +1293,8 @@ and without one the damage comes from the world)
 | `hitscan(from, dir, damage, [range], [attacker])` | A shot along a line; returns `{pos, normal, entity}` or `nil`. |
 | `radius_damage(pos, damage, [attacker])` | Damage around a point, with the decl's own radius. |
 | `explode(pos, damage, [effect], [attacker])` | An explosion with an effect. |
-| `fx(e, condition)`, `fx_stop(e, condition)` | Starts or stops an effect of the object's own fx decl. |
-| `fx(effect, pos, [dir])`, `fx_move(e, pos, [dir])`, `fx_stop(e)` | Places, moves and removes an effect of the mod. |
+| `play_effect(e, condition)`, `stop_effect(e, condition)` | Starts or stops an effect of the object's own fx decl. |
+| `play_effect(effect, pos, [dir])`, `move_effect(e, pos, [dir])`, `stop_effect(e)` | Places, moves and removes an effect of the mod. |
 | `sound(e, sound, [channel])` | Plays a sound on an object; `channel` is `any`, `voice`, `body`, `weapon` or `item`. |
 | `e:tag(joint)` | A joint's position and forward direction. |
 | `e:pain()` | The pain reaction a demon is in, or `nil`. |
@@ -1371,14 +1374,15 @@ The sentence names the mod, the file and line, what went wrong and what to do. T
 - `"x" is not a function here` — a call misspelled; check the name of the call;
 - `"move_to" needs a position (a table with x, y and z), got nothing` — each call says what it needs,
   which value it was given, and what it accepts;
-- `"spawn" can only use this mod's own content; "x" belongs to another mod`, or `... not the game's
-  "x"` — scripts name only their own mod's content;
-- `"set_health" can only heal a player; hurt players with damage(...)`, and `... cannot take health
-  to 0; kill with damage(...) so the death plays`;
+- `"x" can only use this mod's own content; "y" belongs to another mod`, or `... not the game's
+  "y"` — a script names its own mod's content, and the game's only where a call takes it;
+- `"set_health" can only heal a player; hurt players with damage(...) and this mod's damage decl`,
+  and `... cannot take health to 0; kill with damage(...) so the death plays`;
 - `"wait" can only be used inside run(function() ... end)`;
-- `"x" works only on this mod's own demons`, or `... can only <do this to> this mod's own entities;
-  this one is not`;
-- `took too long ..., so this mod's scripts stopped for this map. Look for a loop that does not end.`;
+- `"x" works only on a demon, and this entity is not one`, or `"steer" can only steer projectiles
+  this mod's entities launched; this one is not`;
+- `ran for more than 5 seconds in one call without returning, so this mod's scripts stopped for this
+  map. Look for a loop that does not end, or spread long work over several frames with after or run`;
 - `the file could not be read, so this mod's scripts did not run. Press Refresh in the Mods tab and
   play the map again.` — a script was edited after the last Refresh;
 - your own `error("...")` text, as you wrote it.
@@ -1386,17 +1390,17 @@ The sentence names the mod, the file and line, what went wrong and what to do. T
 ### What scripts cannot do
 
 Scripts are sandboxed text. A script cannot read or write files, start programs, reach the network,
-the clipboard or the registry, or see your settings, saves or other maps. It cannot run compiled
-code. It can name and change only its own mod's content and objects (players: healing, and damage
-through the mod's damage decls). It sees no other mod's scripts and cannot share values with them.
-Nothing it does outlives the map or reaches the editor. A script that runs on and on without
+the clipboard or the registry, or see your saves or other maps. It cannot run compiled code. It acts
+on the map's objects and the game's own content, and it may read and set the game's console
+variables and decls; what it sets there is put back when the map ends. It sees no other mod's
+scripts and cannot share values with them. Nothing it does outlives the map or reaches the editor. A script that runs on and on without
 returning is stopped after a few seconds, with the line above, so a mistake can never hang the game.
 
 ### Co-op
 
 Scripts run on the host only. Players who join need the map's mod content, as for any mod map, and run
 no scripts themselves: what the scripts do reaches them as the game's own movement, animation, damage
-and death do. Effects started with `fx` on an object show on every player's screen; put other
+and death do. Effects started with `play_effect` on an object show on every player's screen; put other
 visuals and sounds in the clips' md6 rows, which play on every machine.
 
 A player who joins a co-op lobby for a map whose content comes from the mod store downloads it in the
@@ -1834,7 +1838,7 @@ list, organized by what each command is for. (Not repeated here: `sh` and its bu
 | `sh_type <type or enum> [-v]` | Print the fields of an idTech class, or the values of an enum. Add `-v` to also see each field's byte offset and size. |
 | `sh_validclasses <inherit>` | List the engine-valid classnames for a given inherit — the same list that fills the Classname dropdown in the [Entity State Panel](#the-entity-state-panel). |
 | `sh_event info <name>` / `sh_event list [filter]` | Print an engine event's number and arguments, or list every event (optionally those matching the filter). |
-| `sh_dumpmap <name>` | Dump the currently generated `.map` (including SnapMap's own auto-generated version) to a file, for debugging. Works in the SnapMap menu as well as in the editor. The name is **game-relative**, not a Windows path: a bare name lands in `<game dir>\base\mapdumps\<name>.map`, and the `.map` extension is always forced. Dumping the same name twice never overwrites — repeats become `<name>_2.map`, `<name>_3.map`, and so on. Pass a name containing a `/` (e.g. `arena/pass1`) to choose your own subfolder under `base\`; it is created for you. The command prints the full path it wrote. |
+| `sh_dumpmap <name>` | Dump the currently generated `.map` (including SnapMap's own auto-generated version) to a file, for debugging. Works in the SnapMap menu as well as in the editor. The name is **game-relative**, not a Windows path: a bare name lands in `<game dir>\snapmap-plus\mapdumps\<name>.map`, and the `.map` extension is always forced. Dumping the same name twice never overwrites — repeats become `<name>_2.map`, `<name>_3.map`, and so on. Pass a name containing a `/` (e.g. `arena/pass1`) to choose your own subfolder under `<game dir>\snapmap-plus\`; it is created for you, and a name with `..` is refused. The command prints the full path it wrote. |
 
 ### Rawmaps and prefabs
 
@@ -1859,6 +1863,8 @@ list, organized by what each command is for. (Not repeated here: `sh` and its bu
 |---|---|
 | `sh_gridsize [x y z]` | Print the selected Grid Room's size, or resize it. See [Resizing Grid Rooms](#resizing-grid-rooms). |
 | `sh_navmesh` | Show the baked AI navigation the current map uses, room by room, and why anything was left out. `sh_navmesh reads` counts what reading the map has cost; `sh_navmesh detail` adds the bake's internal state. See [AI navigation on Blocking Boxes](#ai-navigation-on-blocking-boxes). |
+| `sh_particles` | Count what Snapmap+'s simulated particle motion has drawn since the start: particles moved, against the scene's surfaces, died on a surface, children drawn at their parent. |
+| `sh_staticmodels` | What the static model guard has done since the start: render models rebuilt after a reloaded static model, drawn empty, and reloads moved to process heap 0. |
 | `sh_perf` | Show where Snapmap+ spends frame time, such as reading the map and building navigation previews. `sh_perf reset` sets the counters to zero. `sh_perf read` times reading the open map whole and entity by entity. |
 
 ### Compiling assets
@@ -1879,17 +1885,6 @@ Five toggles for your own player, mainly useful while testing a map solo:
 | `noPlayerDeath` | You can't die. |
 | `noPlayerKill` | You can't be killed outright. |
 | `noTarget` | Enemies ignore you. |
-
-**String Set commands.** A map can carry a behaviour as plain map data: a **Set (String)** logic node
-whose value starts with `smp:`. When a signal reaches the node, Snapmap+ runs the command on the player
-who caused it, on the host of the game; without Snapmap+ the node only stores the string, so the map
-plays everywhere.
-
-| Command | What it does |
-|---|---|
-| `smp:event <eventName> [args...]` | Fires any engine event on the activating player, for example `smp:event forcePraetorHandsAndBody 1`. `sh_event info <name>` shows what arguments it takes. A command the game refuses prints one line and does nothing. |
-| `smp:doomhands <0\|1>` | Switches the player's Doom hands on or off and rebuilds the hands and body. |
-| `sh_smp "smp:<command> ..."` | Runs a String Set command on the first player while you playtest. `sh_smp on`, `off` and `status` switch String Set commands for the session (on by default). |
 
 ### Cvars
 
@@ -1949,8 +1944,9 @@ onto one issue rather than filing duplicates.
 
 Nothing is sent unless you click Send. The only other network requests Snapmap+ makes are to the mod
 store: uploading the mod content of a map you publish (you are asked first when it uploads anything new),
-downloading the mod content of a map you chose to play, and one anonymous note to the store, with no
-information about you, when a map you play asks for a mod file its published content does not carry.
+with the claim of the map signed by your publishing key and, later, the list of files players asked
+for; downloading the mod content of a map you chose to play; and one anonymous note to the store, with
+no information about you, when a map you play asks for a mod file its published content does not carry.
 
 **Reporting without the app.** If you open an issue on GitHub yourself, say which DOOM build you are
 on: run `snapmap-plus status` in a terminal and paste its `Game:` line (for example

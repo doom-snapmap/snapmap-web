@@ -67,6 +67,10 @@ they use Miniflare 4.20260730.0 and never call GitHub or deployed storage.
 | `POST /mods/unit/:hash/asked`, `POST /mods/asked` | Report a file a unit lacked, or list those reports for a publisher's claims. |
 | `POST /mods/admin/reset`, `/stats`, `/purge`, `/block`, `/unblock`, `/release-ref`, `/forget-key` | The maintainer's actions (hidden without their secret). |
 
+The `GET` reads of a unit, its archive and a blob also answer `HEAD`; a method a route does not take is
+answered 405 with an `Allow` header. `GET /community/discussions` takes `category`, `after` and `sort`
+(`top` or `active`), and `/community/search` takes `q` (at least 2 characters; text past 200 is cut).
+
 Community write routes require a session; `/mods/*` reads are anonymous, and its writes are signed by a publishing key except the parts of an upload in parts and a player's `POST /mods/unit/:hash/asked`, which are anonymous.
 Every `/mods/*` answer may carry `X-Snapmap-Plus-Minimum: <version>` (see `MODS_MINIMUM_VERSION` above).
 Read `worker.js` for payloads, limits and the additional ownership or moderator checks on editing and deletion.
