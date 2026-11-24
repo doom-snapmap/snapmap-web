@@ -205,6 +205,7 @@ async function modsEnv(extra = {}) {
     commitUnitArchive: (h, o, n, b) => r.commitUnitArchive(s, h, o, n, b, now()), completeUnit: h => r.completeUnit(s, h, now()),
     blobWanted: (sha, n) => r.blobWanted(s, sha, n), commitBlob: (sha, n, c, o) => r.commitBlob(s, sha, n, c, o, now()),
     blobLocation: sha => r.blobLocation(s, sha), markBroken: o => r.markBroken(s, o, now()), purgeUnits: l => r.purgeUnits(s, now(), l),
+    compactionPlan: l => r.compactionPlan(s, l), switchPack: q => r.switchPack(s, q, now()), dueDead: l => r.dueDead(s, now(), l),
     claim: q => r.claimUnits(s, q, now()), release: q => r.releaseClaim(s, q, now()), claimRev: (a, b) => r.claimRev(s, a, b),
     releaseRef: ref => r.releaseRef(s, ref, now()), reportAsked: (h, p) => r.reportAsked(s, h, p, now()), listAsked: c => r.listAsked(s, c),
     publisherSeen: (k, n, f) => r.publisherSeen(s, k, n, f, now()), publisher: k => r.publisherRow(s, k), forgetKey: k => r.forgetKey(s, k),
@@ -674,6 +675,45 @@ test('the deletion delay: an unclaimed unit is kept and served 24 hours, a claim
   const stats = await (await admin(env, 'stats')).json();
   assert.equal(stats.units, 1);
   assert.equal(stats.blobs, 2);
+});
+
+test('compaction: slack is counted where blobs leave or arrive twice; a switch checks what was copied; the old object waits a delay', async () => {
+  const r = await registryModule;
+  const s = sqliteStorage();
+  r.initializeRegistry(s);
+  const h = c => c.repeat(64);
+  const S = h('5'), A1 = h('a'), C1 = h('c');
+  const unit = (hash, files) => ({ hash, manifest: '{}', mlen: 2, size: 0, files, rootKind: 'entity', rootName: 'x' });
+  const blob = (sha, at, size) => ({ sha, size, crc: 1, at, hlen: 40, hdr: '' });
+  const packA = 'pack/' + h('1') + '/' + '0'.repeat(32), packC = 'pack/' + h('3') + '/' + '0'.repeat(32);
+  r.beginUnit(s, unit(h('1'), [[A1, 10], [S, 100]]), 0);
+  assert.equal(r.commitUnitArchive(s, h('1'), packA, 500, [blob(A1, 60, 10), blob(S, 110, 100)], 0).held, true);
+  r.beginUnit(s, unit(h('2'), [[S, 100]]), 0);
+  /* A blob that arrives twice is slack in the later pack. */
+  r.beginUnit(s, unit(h('3'), [[C1, 7], [S, 100]]), 0);
+  r.commitUnitArchive(s, h('3'), packC, 400, [blob(C1, 60, 7), blob(S, 107, 100)], 0);
+  assert.equal(r.storeStats(s).slackBytes, 140);
+  /* Unit 1 purged: A1's header and bytes are slack in packA, which S keeps. */
+  r.claimUnits(s, { ref: 'm', units: [h('2'), h('3')], secretHash: h('e'), rev: 1, id: 'f'.repeat(32) }, 0);
+  assert.equal(r.purgeUnits(s, DAY + 1, 10).units, 1);
+  assert.equal(r.storeStats(s).slackBytes, 140 + 50);
+  const plan = r.compactionPlan(s, 10);
+  const a = plan.find(p => p.object === packA);
+  assert.deepEqual(a.blobs, [{ sha: S, at: 110, hlen: 40, size: 100 }]);
+  const newA = packA + '.' + 'b'.repeat(32);
+  /* A copy of what the pack no longer holds is not switched in: it is queued for deletion. */
+  const stale = packA + '.' + 'd'.repeat(32);
+  assert.deepEqual(r.switchPack(s, { pack: a.pack, object: packA, newObject: stale, newSize: 140, blobs: [{ sha: S, at: 999, newAt: 0 }] }, DAY, 1000),
+    { switched: false, freed: 0, discard: [stale] });
+  assert.equal(r.blobLocation(s, S).object, packA);
+  const done = r.switchPack(s, { pack: a.pack, object: packA, newObject: newA, newSize: 140, blobs: [{ sha: S, at: 110, newAt: 0 }] }, DAY, 1000);
+  assert.deepEqual(done, { switched: true, freed: 360, discard: [] });
+  assert.deepEqual(r.blobLocation(s, S), { object: newA, at: 40, size: 100, crc: 1 });
+  assert.deepEqual(r.unnamedObjects(s, [packA, newA]), [], 'the old object is named while it waits');
+  assert.equal(r.dueDead(s, DAY + 999, 10), 0);
+  assert.equal(r.dueDead(s, DAY + 1000, 10), 1);
+  assert.ok(r.deadObjects(s, 10).includes(packA));
+  assert.equal(r.storeStats(s).slackBytes, 140, "packC's copy of S is still slack until it is compacted");
 });
 
 test('the deletion delay is MODS_DELETE_DELAY_MS only when it is a positive whole number, else 24 hours', async () => {

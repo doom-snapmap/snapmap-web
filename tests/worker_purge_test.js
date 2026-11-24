@@ -1,8 +1,9 @@
 'use strict';
 /* The mod store's cleanup under Miniflare (the real Worker, its Durable Objects and R2): a map
  * published, unpublished and purged through POST /mods/admin/purge leaves no unit, blob, pack, claim,
- * link row or queued object behind and an empty bucket; a file another unit still names survives;
- * a unit claimed again within its deletion delay is kept. The delay is MODS_DELETE_DELAY_MS, set
+ * link row or queued object behind and an empty bucket; a file another unit still names survives,
+ * and the pack it shared is compacted to it (the live unit's archive byte-identical, the old object
+ * deleted a delay later); a unit claimed again within its deletion delay is kept. The delay is MODS_DELETE_DELAY_MS, set
  * short here as on staging; without it the purge keeps D40's 24 hours. */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -133,7 +134,8 @@ async function objects(mf) {
 /* Every row and object the store keeps for content, empty. Publishers and their names stay by design
  * (they go with forget-key, not with an unpublish). */
 function assertEmpty(s, where) {
-  for (const field of ['units', 'held', 'pending', 'blobs', 'packs', 'packBytes', 'claims', 'claimUnitRows', 'unitBlobRows', 'asked', 'uploads', 'dead']) {
+  for (const field of ['units', 'held', 'pending', 'blobs', 'packs', 'packBytes', 'claims', 'claimUnitRows', 'unitBlobRows', 'asked', 'uploads', 'dead',
+    'deadLater', 'slackPacks', 'slackBytes']) {
     assert.equal(s[field], 0, where + ': ' + field + ' is ' + s[field]);
   }
 }
@@ -179,16 +181,42 @@ async function shared(mf) {
   assert.deepEqual(begunB.missing, [sha(Buffer.from('entityDef b'))], 'b uploads only its own file');
   await claim(mf, key, 'map-a', [a.hash], SECRET_A, 1);
   await claim(mf, key, 'map-b', [b.hash], SECRET_B, 1);
+  const archiveOf = async (unit, range) => {
+    const r = await mf.dispatchFetch('http://local.test/mods/unit/' + unit.hash + '/archive', range ? { headers: { Range: range } } : {});
+    assert.equal(r.status, range ? 206 : 200);
+    return Buffer.from(await r.arrayBuffer());
+  };
+  const before = await archiveOf(b);
+  const firstHalf = await archiveOf(b, 'bytes=0-' + (Math.floor(before.length / 2) - 1));   // a ranged download in flight
+  const [packA] = (await objects(mf)).filter(k => k.startsWith('pack/' + a.hash + '/'));
+  assert.ok(packA, "a's archive is a pack");
   await release(mf, key, 'map-a', SECRET_A, 2);
   await sleep(DELAY + 500);
   const res = await purge(mf);
   assert.equal(res.deleted.units, 1);
   assert.equal(res.deleted.blobs, 1, 'only a.decl goes');
   assert.equal(res.deleted.packs, 0, "a's pack still holds the shared file");
+  /* a's pack held a.decl's bytes, which nothing uses now: it is compacted to the shared file alone. */
+  assert.equal(res.deleted.compacted.packs, 1);
+  assert.ok(res.deleted.compacted.bytes > 0);
   const s = res.stats;
   assert.equal(s.units, 1); assert.equal(s.blobs, 2); assert.equal(s.packs, 2); assert.equal(s.claims, 1); assert.equal(s.dead, 0);
   assert.equal(s.claimUnitRows, 1); assert.equal(s.unitBlobRows, 2);
-  assert.ok(s.packBytes > s.liveBytes, "a.decl's bytes are dead space in a's pack until the shared file goes too");
+  assert.equal(s.slackBytes, 0, 'no byte nothing uses is left in a pack');
+  assert.equal(s.slackPacks, 0);
+  assert.equal(s.deadLater, 1, "a's old pack is kept for the delay");
+  let keys = await objects(mf);
+  const compacted = keys.find(k => k.startsWith(packA + '.'));
+  assert.ok(compacted, 'the compacted pack keeps the old key and adds a suffix: ' + keys.join(' '));
+  assert.ok(keys.includes(packA), 'the old pack stays while a download may still read it');
+  /* The compacted pack is exactly the shared file's stored entry: its local header, then its bytes. */
+  const name = Buffer.from('images/shared.bimage');
+  const entry = zip([{ name: 'images/shared.bimage', data: common }]).subarray(0, 30 + name.length + common.length);
+  const stored = Buffer.from(await (await (await mf.getR2Bucket('MODS')).get(compacted)).arrayBuffer());
+  assert.deepEqual(stored, entry);
+  /* The live unit reads byte for byte as before, whole and as the rest of a ranged download. */
+  assert.deepEqual(await archiveOf(b), before);
+  assert.deepEqual(Buffer.concat([firstHalf, await archiveOf(b, 'bytes=' + firstHalf.length + '-')]), before);
   assert.deepEqual(await status(mf, [a.hash, b.hash]), { [a.hash]: 'missing', [b.hash]: 'held' });
   let got = await mf.dispatchFetch('http://local.test/mods/blob/' + sha(common));
   assert.equal(got.status, 200);
@@ -196,6 +224,16 @@ async function shared(mf) {
   got = await mf.dispatchFetch('http://local.test/mods/blob/' + sha(Buffer.from('entityDef a')));
   assert.equal(got.status, 404);
   await got.arrayBuffer();
+  /* After the delay the old pack object is deleted. */
+  await sleep(DELAY + 500);
+  const later = await purge(mf);
+  assert.equal(later.deleted.released, 1);
+  assert.equal(later.deleted.queued, 1);
+  assert.equal(later.stats.deadLater, 0); assert.equal(later.stats.dead, 0); assert.equal(later.stats.slackBytes, 0);
+  keys = await objects(mf);
+  assert.equal(keys.length, 2, 'the compacted pack and b\'s pack: ' + keys.join(' '));
+  assert.ok(keys.includes(compacted) && !keys.includes(packA));
+  assert.deepEqual(await archiveOf(b), before);
   /* b unpublished too: everything goes. */
   await release(mf, key, 'map-b', SECRET_B, 2);
   await sleep(DELAY + 500);

@@ -39,7 +39,8 @@ From the repository root, run `node tests/worker_body_test.js`,
 `node tests/worker_quota_test.js` and `node tests/worker_mods_test.js` with Node 22.13 or newer. The local
 Cloudflare runtime checks are `node tests/worker_runtime_test.js <miniflare-module-path>` and
 `node tests/worker_contract_test.js <miniflare-module-path>` (the product's client, `tests/contract`) and
-`node tests/worker_purge_test.js <miniflare-module-path>` (an unpublish and its purge leave nothing behind);
+`node tests/worker_purge_test.js <miniflare-module-path>` (an unpublish and its purge leave nothing behind, and a
+shared pack is compacted with the live unit byte-identical);
 they use Miniflare 4.20260730.0 and never call GitHub or deployed storage.
 `tests/worker_rows_test.js`, which CI does not run, takes the module path, a file count and the Worker root:
 `node tests/worker_rows_test.js <miniflare-module-path> [files] [worker root]`.
@@ -110,8 +111,8 @@ completion). No clock takes part: claims are ordered by `rev`, and an upload is 
 `api/mods_registry_store.js` holds the index in one `MOD_REGISTRY` Durable Object (SQLite): units (`pending` from their
 begin, `held` once every blob is), the blobs each names, blobs, packs, map claims and the units they name, publishers and
 their names, asked paths (at most 256 per unit), blocked units and the delete queue. A checked unit archive is kept as
-it is as a pack (`pack/<unit>/<32 hex>`): each file's bytes follow the local header it arrived with, so no bytes move
-again, and a file the store holds already is dead space in the later pack. A blob uploaded in parts is a pack of one
+it is as a pack (`pack/<unit>/<32 hex>`): each file's bytes follow the local header it arrived with, and are moved
+again only when the purge compacts the pack (below). A blob uploaded in parts is a pack of one
 (`blob/<sha>/<32 hex>`). The archive route writes `unit.json` and the unit's files in the order their bytes lie in the
 packs, reusing each stored header, so one answer reads a few long R2 ranges whatever the unit's file count
 (`api/mods_pack.js`).
@@ -129,8 +130,21 @@ A unit no claim names records the store-clock time it lost its last claim (or it
 cron then deletes it, the blobs no other unit names, and packs no blob row points into. A begin of an unclaimed unit
 restarts its delay. An object found missing marks its blobs broken (missing to every unit) until an upload repairs
 them. The daily purge also aborts uploads in parts untouched for a day and deletes objects no row names once a day old.
-A pack that still holds a blob another unit names stays whole: the purged unit's other bytes in it are dead space
-(`packBytes` above `liveBytes` in the stats) until its last blob goes.
+
+A pack that loses a blob while it keeps others, and a pack holding a blob that arrived twice (the later copy is
+unused), holds slack: bytes nothing uses any more. `pack_slack` counts them (`slackBytes` in the stats), and the same
+purge compacts such a pack: it copies the pack's live blobs, each with its stored local header and in the order they
+lay, R2 range to R2 object, to the old key with `.<32 hex>` added (so a unit's archive, which orders its files by pack
+key and offset, stays byte for byte the same), checks the copy's size, and switches the blob rows in one transaction
+that first confirms the pack still holds exactly what was copied (otherwise the copy is deleted). The old object is
+kept for the deletion delay (`dead_later`, `deadLater` in the stats), since a download already under way reads the
+locations it was planned with, and is deleted by the first purge after it. A run compacts at most 10 packs and makes at
+most 150 range reads; a pack needing more ranges than that is logged and keeps its slack counted. A pack with a broken
+blob waits for its repair. After a purge `slackBytes` is 0.
+
+`packBytes` minus `liveBytes` is then structure, not slack: `liveBytes` counts the files' bytes, while a pack also holds
+each file's ZIP local header (kept so the archive route serves it as uploaded), and an uploaded archive's pack also its
+`unit.json` entry and central directory until a compaction rewrites it. A fresh pack is not rewritten for those.
 
 The delay is `MODS_DELETE_DELAY_MS` when a deployment sets it (a positive whole number of milliseconds) and 24 hours
 otherwise. Only `wrangler.staging.toml` sets it (60 seconds, so an unpublish and its purge can be shown in one sitting);
@@ -139,7 +153,8 @@ and an unnamed object wait is not configurable, so on staging those still clear 
 
 What an unpublish leaves: the map's claim row and its links to units go at the release; each unit, its links to blobs,
 its asked paths, the blobs no other unit names and the packs nothing points into go at the first purge after the delay,
-their objects deleted from R2 and so off the delete queue. Publishing keys and their names stay (forget-key removes
+their objects deleted from R2 and so off the delete queue; a pack another unit still uses is compacted by that purge,
+and its old object deleted by the first purge a delay later. Publishing keys and their names stay (forget-key removes
 them). The hourly limit counters (`WRITE_QUOTAS`, below) are not store rows: each is one row per kind of limit in the
 quota object of one hashed address or one hashed key, overwritten each hour, naming no unit, blob or claim, so an
 unpublish has nothing there to clean; a Worker cannot list those objects, so the stats do not count them.
@@ -180,11 +195,14 @@ The admin routes take `Authorization: Bearer <MODS_ADMIN_TOKEN>` and answer 404 
   next key that presents it; the key's claims stay, since their secrets authorise them (SPEC 4.4).
 - `POST /mods/admin/stats` says what the store holds: units (held, pending, claimed, unclaimed), blobs, packs and their
   bytes, claims, `claimUnitRows` (claims' links to units), `unitBlobRows` (units' links to blobs), publishers, names,
-  blocked units, asked paths, uploads in parts and `dead` (objects queued for deletion).
+  blocked units, asked paths, uploads in parts, `dead` (objects queued for deletion), `deadLater` (compacted packs' old
+  objects in their delay) and `slackBytes` in `slackPacks` packs (bytes nothing uses, which the next purge compacts).
 - `POST /mods/admin/purge` runs the daily cron's purge now, with its own bounds (the body is ignored), and answers
-  `{deleted: {units, blobs, packs, dead, uploads, queued, orphans}, delayMs, stats}`: the rows deleted, the delete-queue
-  entries whose objects were deleted (`queued` of them left by earlier requests), the abandoned uploads aborted, the
-  unnamed objects swept, the deletion delay applied and the stats afterwards. A purge deletes no claim row: a release does.
+  `{deleted: {units, blobs, packs, dead, uploads, queued, orphans, compacted: {packs, bytes}, released}, delayMs, stats}`:
+  the rows deleted, the delete-queue entries whose objects were deleted (`queued` of them left by earlier requests), the
+  abandoned uploads aborted, the unnamed objects swept, the packs compacted and the bytes that freed, the old pack
+  objects whose delay passed (queued and deleted in the same run), the deletion delay applied and the stats afterwards.
+  A purge deletes no claim row: a release does.
 - `POST /mods/admin/reset` deletes every object in the `MODS` bucket, aborts every upload in parts and empties the index.
 
 The retired routes of earlier stores (`/mods/build/*`, `/mods/bundle/*`, `/mods/author/*`, `/mods/claim`,

@@ -8,8 +8,11 @@
  * stored once however many units carry them. A blob lives in a pack: an R2 object holding one or
  * more blobs, each after the ZIP local header it arrived with (hlen bytes, hdr in hex), or alone
  * with no header (an upload in parts). An uploaded unit archive (stored entries, the product's
- * modzip form) is checked and then kept as it is as a pack: no bytes are moved again. A blob that
- * arrives twice (two publishers racing) is dead space in the later pack.
+ * modzip form) is checked and then kept as it is as a pack. A blob that arrives twice (two
+ * publishers racing) is slack in the later pack, as are the bytes of a blob deleted from a pack that
+ * other blobs keep: pack_slack counts them, and the purge compacts such a pack (a copy of its live
+ * blobs, each with its header and in its order, under a new key; the old object is deleted a delay
+ * later, in dead_later, so a download that read the old location still finds it).
  *
  * A unit is "pending" from its begin (its manifest is known, some blobs are not held yet) and
  * "held" once every blob it names is. A unit no map claim names records unclaimed_at (the store's
@@ -43,7 +46,7 @@ const RETIRED_TABLES = ['mod_claim_bundle', 'mod_bundle_blob', 'mod_bundle', 'mo
   'dist_version', 'dist_unit', 'map_claim_row'];
 /* Tables whose shape changed with schema 4 or 5 (blob keyed by its SHA-256 alone): dropped when an older schema is
  * found. */
-const RESHAPED_TABLES = ['blob', 'pack', 'upload', 'asked', 'dead'];
+const RESHAPED_TABLES = ['blob', 'pack', 'upload', 'asked', 'dead', 'pack_slack', 'dead_later'];
 
 const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
@@ -90,13 +93,20 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS blocked (hash TEXT PRIMARY KEY, reason TEXT NOT NULL, created INTEGER NOT NULL)',
   /* R2 objects no row names any more, to delete. */
   'CREATE TABLE IF NOT EXISTS dead (object TEXT PRIMARY KEY, queued INTEGER NOT NULL)',
+  /* Packs holding bytes no blob row uses any more (bytes: headers and data of the blobs that left or
+   * arrived twice): the purge compacts them. Added with no schema bump: an existing store keeps its rows. */
+  'CREATE TABLE IF NOT EXISTS pack_slack (pack INTEGER PRIMARY KEY, bytes INTEGER NOT NULL)',
+  /* The objects of compacted packs, kept until `after` (the deletion delay) so a download that read the
+   * old location finds it, then moved to the delete queue. */
+  'CREATE TABLE IF NOT EXISTS dead_later (object TEXT PRIMARY KEY, after INTEGER NOT NULL)',
 ];
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
 /* Every object this store writes: an uploaded unit archive (a pack), a blob uploaded in parts (a
- * pack of one), a large manifest. */
-const OBJECT = /^(pack\/[0-9a-f]{64}\/[0-9a-f]{32}|blob\/[0-9a-f]{64}\/[0-9a-f]{32}|manifest\/[0-9a-f]{64}\/[0-9a-f]{32})$/;
+ * pack of one), a large manifest. A compacted pack keeps its old key and adds .<32 hex>, so it sorts
+ * where the old one did (a unit's archive orders its files by pack key). */
+const OBJECT = /^((pack|blob)\/[0-9a-f]{64}\/[0-9a-f]{32}(\.[0-9a-f]{32})?|manifest\/[0-9a-f]{64}\/[0-9a-f]{32})$/;
 const KEY_RE = /^[A-Za-z0-9_-]{87}$/;        // base64url of a 65-byte P-256 public point, unpadded
 
 function rows(storage, query, ...bindings) {
@@ -158,7 +168,18 @@ export function unnamedObjects(storage, keys) {
     one(storage, 'SELECT 1 AS hit FROM pack WHERE object = ?', key) ||
     one(storage, 'SELECT 1 AS hit FROM upload WHERE object = ?', key) ||
     one(storage, 'SELECT 1 AS hit FROM unit WHERE manifest_object = ?', key) ||
-    one(storage, 'SELECT 1 AS hit FROM dead WHERE object = ?', key)));
+    one(storage, 'SELECT 1 AS hit FROM dead WHERE object = ?', key) ||
+    one(storage, 'SELECT 1 AS hit FROM dead_later WHERE object = ?', key)));
+}
+
+/* The compacted packs' old objects whose delay has passed go to the delete queue. Returns how many. */
+export function dueDead(storage, now, limit) {
+  return storage.transactionSync(() => {
+    const due = rows(storage, 'SELECT object FROM dead_later WHERE after <= ? ORDER BY after LIMIT ?', now, limit).map(r => r.object);
+    for (const object of due) storage.sql.exec('DELETE FROM dead_later WHERE object = ?', object);
+    bury(storage, due, now);
+    return due.length;
+  });
 }
 
 /* ---------------- blobs and packs ---------------- */
@@ -172,21 +193,32 @@ function goodBlob(storage, sha) {
  * row points into it. Returns the objects queued; `tally.packs` (when given) counts the packs deleted. */
 function unlinkFromPacks(storage, left, now, tally = null) {
   const queued = [];
-  for (const [packId, [count, bytes]] of left) {
+  for (const [packId, [count, bytes, occupied]] of left) {
     storage.sql.exec('UPDATE pack SET live = live - ?, live_bytes = live_bytes - ? WHERE id = ?', count, bytes, packId);
     const pack = one(storage, 'SELECT object, live FROM pack WHERE id = ?', packId);
     if (pack && pack.live <= 0) {
       storage.sql.exec('DELETE FROM pack WHERE id = ?', packId);
+      storage.sql.exec('DELETE FROM pack_slack WHERE pack = ?', packId);
       queued.push(...bury(storage, [pack.object], now));
       if (tally) tally.packs++;
+    } else if (pack) {
+      addSlack(storage, packId, occupied);
     }
   }
   return queued;
 }
 
-function leaving(left, packId, size) {
-  const was = left.get(packId) || [0, 0];
-  left.set(packId, [was[0] + 1, was[1] + size]);
+/* `bytes` of pack `packId` no blob row uses any more: the purge compacts it. */
+function addSlack(storage, packId, bytes) {
+  if (bytes > 0) {
+    storage.sql.exec('INSERT INTO pack_slack (pack, bytes) VALUES (?, ?) ON CONFLICT(pack) DO UPDATE SET bytes = bytes + excluded.bytes', packId, bytes);
+  }
+}
+
+/* A blob row left pack `packId`: [count, data bytes, bytes it occupied there (header and data)]. */
+function leaving(left, packId, size, hlen) {
+  const was = left.get(packId) || [0, 0, 0];
+  left.set(packId, [was[0] + 1, was[1] + size, was[2] + hlen + size]);
 }
 
 /* Deletes the blob rows of `shas` that no unit names any more. Returns the objects queued; `tally`
@@ -195,10 +227,10 @@ function dropUnnamedBlobs(storage, shas, now, tally = null) {
   const left = new Map();
   for (const sha of new Set(shas)) {
     if (one(storage, 'SELECT 1 AS hit FROM unit_blob WHERE sha = ? LIMIT 1', sha)) continue;
-    const blob = one(storage, 'SELECT pack, size FROM blob WHERE sha = ?', sha);
+    const blob = one(storage, 'SELECT pack, size, hlen FROM blob WHERE sha = ?', sha);
     if (!blob) continue;
     storage.sql.exec('DELETE FROM blob WHERE sha = ?', sha);
-    leaving(left, blob.pack, blob.size);
+    leaving(left, blob.pack, blob.size, blob.hlen);
     if (tally) tally.blobs++;
   }
   return unlinkFromPacks(storage, left, now, tally);
@@ -235,19 +267,19 @@ function promote(storage, shas, now) {
 function recordPack(storage, object, size, blobs, now) {
   storage.sql.exec('INSERT INTO pack (object, size, live, live_bytes, created) VALUES (?, ?, 0, 0, ?)', object, size, now);
   const packId = one(storage, 'SELECT id FROM pack WHERE object = ?', object).id;
-  let live = 0, liveBytes = 0;
+  let live = 0, liveBytes = 0, slack = 0;
   const discard = [];
   const added = [];
   const left = new Map();
   for (const b of blobs) {
     if (!HEX64.test(b.sha) || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.at) || !Number.isSafeInteger(b.hlen) ||
         !Number.isSafeInteger(b.crc) || typeof b.hdr !== 'string') throw new Error('bad blob');
-    const blob = one(storage, 'SELECT broken, pack, size FROM blob WHERE sha = ?', b.sha);
-    if (blob && !blob.broken) continue;
+    const blob = one(storage, 'SELECT broken, pack, size, hlen FROM blob WHERE sha = ?', b.sha);
+    if (blob && !blob.broken) { slack += b.hlen + b.size; continue; }   // held already: its copy here is slack
     if (blob) {
       storage.sql.exec('UPDATE blob SET size = ?, crc = ?, pack = ?, at = ?, hlen = ?, hdr = ?, broken = 0 WHERE sha = ?',
         b.size, b.crc, packId, b.at, b.hlen, b.hdr, b.sha);
-      leaving(left, blob.pack, blob.size);
+      leaving(left, blob.pack, blob.size, blob.hlen);
     } else {
       storage.sql.exec('INSERT INTO blob (sha, size, crc, pack, at, hlen, hdr) VALUES (?, ?, ?, ?, ?, ?, ?)',
         b.sha, b.size, b.crc, packId, b.at, b.hlen, b.hdr);
@@ -256,7 +288,7 @@ function recordPack(storage, object, size, blobs, now) {
     added.push(b.sha);
   }
   discard.push(...unlinkFromPacks(storage, left, now));
-  if (live) storage.sql.exec('UPDATE pack SET live = ?, live_bytes = ? WHERE id = ?', live, liveBytes, packId);
+  if (live) { storage.sql.exec('UPDATE pack SET live = ?, live_bytes = ? WHERE id = ?', live, liveBytes, packId); addSlack(storage, packId, slack); }
   else { storage.sql.exec('DELETE FROM pack WHERE id = ?', packId); discard.push(...bury(storage, [object], now)); }
   return { packId, discard, added };
 }
@@ -273,6 +305,51 @@ export function markBroken(storage, object, now) {
     console.log('mods: ' + object + ' is missing; ' + n + ' blob(s) wait for a repair');
     void now;
     return { blobs: n };
+  });
+}
+
+/* ---------------- compaction ---------------- */
+
+/* Up to `limit` packs that hold slack, with their blobs in the order they lie: [{ pack, object, size,
+ * slack, blobs: [{ sha, at, hlen, size }] }]. A pack with a broken blob (its object is missing) waits
+ * for its repair. Finding a pack's blobs scans the blob table (no index by pack): once per call. */
+export function compactionPlan(storage, limit) {
+  const packs = rows(storage, 'SELECT s.pack AS id, s.bytes AS slack, p.object AS object, p.size AS size, p.live AS live ' +
+    'FROM pack_slack s JOIN pack p ON p.id = s.pack ORDER BY s.pack LIMIT ?', limit);
+  if (!packs.length) return [];
+  const blobs = new Map(packs.map(p => [p.id, []]));
+  const broken = new Set();
+  for (const b of rows(storage, 'SELECT sha, pack, at, hlen, size, broken FROM blob WHERE pack IN (' + packs.map(() => '?').join(', ') +
+    ') ORDER BY pack, at', ...packs.map(p => p.id))) {
+    if (b.broken) broken.add(b.pack);
+    blobs.get(b.pack).push({ sha: b.sha, at: b.at, hlen: b.hlen, size: b.size });
+  }
+  return packs.filter(p => !broken.has(p.id) && blobs.get(p.id).length === p.live)
+    .map(p => ({ pack: p.id, object: p.object, size: p.size, slack: p.slack, blobs: blobs.get(p.id) }));
+}
+
+/* A compacted copy of pack `pack` (its object `object`) is stored as `newObject` (`newSize` bytes),
+ * each of `blobs` ([{ sha, at, newAt }]) at newAt. The switch happens only if the pack still holds
+ * exactly those blobs at those places; otherwise nothing changes and the copy is queued for deletion.
+ * The old object is kept until `now + delay`, so a download that read its location still finds it.
+ * Returns { switched, freed, discard }. */
+export function switchPack(storage, { pack, object, newObject, newSize, blobs }, now, delay = DELETE_DELAY_MS) {
+  checkObject(object);
+  checkObject(newObject);
+  if (!Number.isSafeInteger(pack) || !Number.isSafeInteger(newSize) || newSize < 0 || !Array.isArray(blobs)) throw new Error('bad switch');
+  return storage.transactionSync(() => {
+    const p = one(storage, 'SELECT object, size, live FROM pack WHERE id = ?', pack);
+    const same = p && p.object === object && p.live === blobs.length && new Set(blobs.map(b => b.sha)).size === blobs.length &&
+      blobs.every(b => {
+        const row = one(storage, 'SELECT pack, at, broken FROM blob WHERE sha = ?', b.sha);
+        return row && row.pack === pack && row.at === b.at && !row.broken && Number.isSafeInteger(b.newAt);
+      });
+    if (!same) return { switched: false, freed: 0, discard: bury(storage, [newObject], now) };
+    for (const b of blobs) storage.sql.exec('UPDATE blob SET at = ? WHERE sha = ?', b.newAt, b.sha);
+    storage.sql.exec('UPDATE pack SET object = ?, size = ? WHERE id = ?', newObject, newSize, pack);
+    storage.sql.exec('DELETE FROM pack_slack WHERE pack = ?', pack);
+    storage.sql.exec('INSERT INTO dead_later (object, after) VALUES (?, ?) ON CONFLICT(object) DO NOTHING', object, now + delay);
+    return { switched: true, freed: p.size - newSize, discard: [] };
   });
 }
 
@@ -688,7 +765,8 @@ export function abandonUploads(storage, now, limit, all = false) {
 
 /* What the store holds. `unclaimed` counts units in their deletion delay; `claimUnitRows` and
  * `unitBlobRows` count the rows linking claims to units and units to blobs, so a row left behind by
- * an unpublish or a purge shows. */
+ * an unpublish or a purge shows. `slackBytes` (in `slackPacks` packs) are bytes no blob uses any more,
+ * which the next purge compacts away; `deadLater` counts compacted packs' old objects in their delay. */
 export function storeStats(storage) {
   const u = one(storage, "SELECT count(*) AS units, coalesce(sum(state = 'held'), 0) AS held, coalesce(sum(state = 'pending'), 0) AS pending, " +
     'coalesce(sum(claims > 0), 0) AS claimed, coalesce(sum(claims <= 0), 0) AS unclaimed, coalesce(sum(size), 0) AS unitBytes FROM unit');
@@ -700,15 +778,17 @@ export function storeStats(storage) {
     unitBlobRows: one(storage, 'SELECT count(*) AS n FROM unit_blob').n, publishers: one(storage, 'SELECT count(*) AS n FROM publisher').n,
     names: one(storage, 'SELECT count(*) AS n FROM publisher_name').n, blocked: one(storage, 'SELECT count(*) AS n FROM blocked').n,
     asked: one(storage, 'SELECT count(*) AS n FROM asked').n, uploads: one(storage, 'SELECT count(*) AS n FROM upload').n,
-    dead: one(storage, 'SELECT count(*) AS n FROM dead').n };
+    dead: one(storage, 'SELECT count(*) AS n FROM dead').n, deadLater: one(storage, 'SELECT count(*) AS n FROM dead_later').n,
+    slackPacks: one(storage, 'SELECT count(*) AS n FROM pack_slack').n,
+    slackBytes: one(storage, 'SELECT coalesce(sum(bytes), 0) AS n FROM pack_slack').n };
 }
 
 /* Empties the whole index (the maintainer's reset, after deleting every stored object). */
 export function resetRegistry(storage) {
   return storage.transactionSync(() => {
     const counts = {};
-    for (const table of ['map_claim_unit', 'map_claim', 'unit_blob', 'unit', 'blob', 'pack', 'upload', 'asked', 'dead',
-      'publisher_name', 'publisher', 'blocked']) {
+    for (const table of ['map_claim_unit', 'map_claim', 'unit_blob', 'unit', 'blob', 'pack', 'pack_slack', 'upload', 'asked', 'dead',
+      'dead_later', 'publisher_name', 'publisher', 'blocked']) {
       counts[table] = one(storage, 'SELECT count(*) AS n FROM ' + table).n;
       storage.sql.exec('DELETE FROM ' + table);
     }

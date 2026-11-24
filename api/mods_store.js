@@ -35,6 +35,8 @@ const IMMUTABLE = 'public, max-age=31536000, immutable';
 const PURGE_BATCH = 500;
 const PURGE_ROUNDS = 20;
 const SWEEP_PAGES = 200;                  // 200,000 objects listed per daily run
+const COMPACT_PACKS = 10;                 // packs compacted per purge run
+const COMPACT_RANGES = 150;               // R2 range reads the compaction makes per purge run
 const ORPHAN_AGE_MS = 86400000;          // an object no row names is deleted once it is a day old
 const READ_CHUNK = 1024 * 1024;           // the check reads an upload back this much at a time
 const REF_MAX = 256;
@@ -1504,6 +1506,49 @@ async function abortUploads(env, rounds, all = false) {
   return count;
 }
 
+/* Compacts packs that hold slack (bytes of blobs deleted from them, or of a blob that arrived twice):
+ * each is copied, its live blobs only, each with its stored header and in the order they lay, to a new
+ * object (the old key with .<32 hex>, so a unit's archive still orders its files the same way and
+ * reads byte for byte the same). The pack ranges are piped R2 to R2, the Worker touching no byte. The
+ * registry switches the rows only if the pack still holds what was copied, and keeps the old object
+ * for the deletion delay. Bounded: COMPACT_PACKS packs and COMPACT_RANGES range reads a run; a pack
+ * needing more ranges than that waits (its slack stays counted). Returns { packs, bytes }. */
+async function compactPacks(env) {
+  const plan = await registry(env, 'compactionPlan', COMPACT_PACKS);
+  let packs = 0, bytes = 0, reads = 0;
+  for (const c of plan) {
+    const ranges = [];
+    const blobs = [];
+    let at = 0;
+    for (const b of c.blobs) {
+      const length = b.hlen + b.size;
+      const last = ranges[ranges.length - 1];
+      if (last && last[1] + last[2] === b.at) last[2] += length;
+      else ranges.push([c.object, b.at, length]);
+      blobs.push({ sha: b.sha, at: b.at, newAt: at });
+      at += length;
+    }
+    if (ranges.length > COMPACT_RANGES) { console.log('mods: pack ' + c.object + ' needs ' + ranges.length + ' ranges to compact; it waits'); continue; }
+    if (reads + ranges.length > COMPACT_RANGES) break;
+    reads += ranges.length;
+    const newObject = c.object.replace(/\.[0-9a-f]{32}$/, '') + '.' + randomHex(16);
+    try {
+      const body = planStream(env, ranges, new Uint8Array(0), 0, at, object => registry(env, 'markBroken', object));
+      const stored = await env.MODS.put(newObject, body);
+      if (!stored || stored.size !== at) throw new Error('the copy is ' + (stored ? stored.size : 'missing') + ' bytes, not ' + at);
+    } catch (error) {
+      console.log('mods: compacting ' + c.object + ' failed:', String(error && error.message).slice(0, 200));
+      try { await deleteObjects(env, [newObject]); } catch { /* The sweep deletes an object no row names. */ }
+      continue;
+    }
+    const switched = await registry(env, 'switchPack', { pack: c.pack, object: c.object, newObject, newSize: at, blobs });
+    if (!switched.switched) { await deleteQueued(env, switched.discard); continue; }
+    packs++;
+    bytes += switched.freed;
+  }
+  return { packs, bytes };
+}
+
 /* Deletes the units past their deletion delay (D40), abandoned uploads in parts, what the delete
  * queue still holds and objects no row names. Bounded per run; the next run continues. The daily
  * cron runs it, and so does POST /mods/admin/purge. Returns what it deleted: units, blobs and packs
@@ -1521,7 +1566,14 @@ export async function purgeMods(env, { batch = PURGE_BATCH, rounds = PURGE_ROUND
     packs += doomed.packs || 0;
     if (doomed.units < batch) break;
   }
+  const compacted = await compactPacks(env);
   const uploads = await abortUploads(env, rounds);
+  let released = 0;
+  for (let i = 0; i < rounds; i++) {
+    const n = await registry(env, 'dueDead', 1000);
+    released += n;
+    if (n < 1000) break;
+  }
   let queued = 0;
   for (let i = 0; i < rounds; i++) {
     const waiting = await registry(env, 'deadObjects', 1000);
@@ -1531,8 +1583,9 @@ export async function purgeMods(env, { batch = PURGE_BATCH, rounds = PURGE_ROUND
   dead += queued;
   const orphans = await sweepOrphans(env, sweepPages, now);
   console.log('mods purge: deleted ' + units + ' units, ' + blobs + ' blobs, ' + packs + ' packs, ' + uploads + ' abandoned uploads, ' +
-    dead + ' queued objects and ' + orphans + ' objects no row names');
-  return { units, blobs, packs, dead, uploads, queued, orphans, delayMs };
+    dead + ' queued objects and ' + orphans + ' objects no row names; compacted ' + compacted.packs + ' packs (' + compacted.bytes +
+    ' bytes freed), ' + released + ' old pack objects past their delay');
+  return { units, blobs, packs, dead, uploads, queued, orphans, compacted, released, delayMs };
 }
 
 /* Deletes objects in the bucket that no row names and that are older than a day: what a request that
