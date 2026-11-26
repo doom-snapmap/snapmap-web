@@ -1,8 +1,14 @@
 'use strict';
+/* The mod store's unit routes (SPEC-distribution section 10) against in-memory R2, SQLite-backed
+ * Durable Object doubles and the Worker itself: begin, archive upload, parts, status, the manifest,
+ * blob and archive reads with ranges, claims with signatures and revs, release, the deletion delay
+ * and purge, remixes, moderation, forget-key, the first-come name, asked paths, per-key limits and
+ * the retired routes. */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { createHash } = require('node:crypto');
+const zlib = require('node:zlib');
+const { createHash, generateKeyPairSync, sign: nodeSign } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { test } = require('node:test');
 
@@ -10,37 +16,26 @@ const root = path.join(__dirname, '..');
 const dataURL = source => 'data:text/javascript;base64,' + Buffer.from(source).toString('base64');
 const read = name => fs.readFileSync(path.join(root, 'api', name), 'utf8');
 const bodyURL = dataURL(read('request_body.js'));
-const modsURL = dataURL(read('mods_store.js').replace('./request_body.js', bodyURL));
+const packURL = dataURL(read('mods_pack.js'));
+const publisherURL = dataURL(read('mods_publisher.js'));
+const modsURL = dataURL(read('mods_store.js').replace('./request_body.js', bodyURL).replace('./mods_pack.js', packURL)
+  .replace('./mods_publisher.js', publisherURL));
 const workerURL = dataURL(read('worker.js').replace('./request_body.js', bodyURL).replace('./mods_store.js', modsURL)
-  .replace("export { CommunityQuota } from './quota.js';", '').replace("export { ModRegistry } from './mods_registry.js';", ''));
+  .replace("export { CommunityQuota } from './quota.js';", '').replace("export { ModRegistry, UnitRegistry, ModChecker } from './mods_registry.js';", ''));
 const modsModule = import(modsURL);
 const workerModule = import(workerURL);
 const quotaModule = import(dataURL(read('quota_store.js')));
 const registryModule = import(dataURL(read('mods_registry_store.js')));
+const packModule = import(packURL);
 
 const DAY = 86400000;
 const HOUR = 3600000;
-const MIB = 1024 * 1024;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+
+const MIB = 1024 * 1024;
 
 /* ---------------- workerd stream primitives absent from Node ---------------- */
 
-if (!crypto.DigestStream) {
-  crypto.DigestStream = class DigestStream extends WritableStream {
-    constructor() {
-      const hash = createHash('sha256');
-      let resolve, reject;
-      const digest = new Promise((ok, fail) => { resolve = ok; reject = fail; });
-      digest.catch(() => {});
-      super({
-        write(chunk) { hash.update(chunk); },
-        close() { const out = hash.digest(); resolve(out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength)); },
-        abort(reason) { reject(reason); },
-      });
-      this.digest = digest;
-    }
-  };
-}
 if (!globalThis.FixedLengthStream) {
   globalThis.FixedLengthStream = class FixedLengthStream extends TransformStream {
     constructor(length) {
@@ -53,6 +48,21 @@ if (!globalThis.FixedLengthStream) {
         },
         flush() { if (seen !== length) throw new Error('stream shorter than declared'); },
       });
+      this.readable.declaredLength = length;
+    }
+  };
+}
+
+/* workerd's streaming SHA-256 (crypto.DigestStream), over node:crypto. */
+if (!globalThis.crypto.DigestStream) {
+  globalThis.crypto.DigestStream = class DigestStream extends WritableStream {
+    constructor(algorithm) {
+      assert.equal(algorithm, 'SHA-256');
+      const h = createHash('sha256');
+      let resolve;
+      const digest = new Promise(r => { resolve = r; });
+      super({ write(chunk) { h.update(chunk); }, close() { const d = h.digest(); resolve(d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength)); } });
+      this.digest = digest;
     }
   };
 }
@@ -75,24 +85,92 @@ function sqliteStorage() {
   };
 }
 
+/* Like R2, a stream of declared length is committed once that many bytes have arrived,
+ * even if the stream fails afterwards (miniflare shows the same). */
 function memoryBucket() {
+  async function readPut(key, stream) {
+    const chunks = [];
+    let got = 0;
+    const reader = stream.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        got += value.byteLength;
+      }
+    } catch (error) {
+      if (stream.declaredLength !== undefined && got === stream.declaredLength) {
+        objects.set(key, { bytes: new Uint8Array(Buffer.concat(chunks)), uploaded: new Date() });
+      }
+      throw error;
+    }
+    return new Uint8Array(Buffer.concat(chunks));
+  }
   const objects = new Map();
+  const uploads = new Map();
   const log = [];
+  let etagCounter = 0;
+  /* R2 multipart: parts of one size but the last, joined by complete() in part order. */
+  function multipart(key, uploadId) {
+    return {
+      key, uploadId,
+      async uploadPart(partNumber, value) {
+        log.push(['part', key, partNumber]);
+        const upload = uploads.get(uploadId);
+        if (!upload) throw new Error('uploadPart: no such upload');
+        const chunks = [];
+        const reader = value.getReader();
+        for (;;) { const { value: chunk, done } = await reader.read(); if (done) break; chunks.push(chunk); }
+        const etag = 'e' + (++etagCounter);
+        upload.parts.set(partNumber, { bytes: new Uint8Array(Buffer.concat(chunks)), etag });
+        return { partNumber, etag };
+      },
+      async abort() { log.push(['abort', key]); if (!uploads.delete(uploadId)) throw new Error('abort: no such upload'); },
+      async complete(parts) {
+        log.push(['complete', key]);
+        const upload = uploads.get(uploadId);
+        if (!upload) throw new Error('complete: no such upload');
+        const joined = [];
+        for (const { partNumber, etag } of parts) {
+          const part = upload.parts.get(partNumber);
+          if (!part || part.etag !== etag) throw new Error('complete: a part does not match its etag');
+          joined.push(part.bytes);
+        }
+        uploads.delete(uploadId);
+        objects.set(key, { bytes: new Uint8Array(Buffer.concat(joined)), uploaded: new Date(), httpMetadata: upload.httpMetadata });
+        return meta(key, objects.get(key));
+      },
+    };
+  }
   const meta = (key, o) => ({ key, size: o.bytes.byteLength, uploaded: o.uploaded, httpEtag: '"x"', httpMetadata: o.httpMetadata });
   return {
-    objects, log,
+    objects, log, uploads,
+    async createMultipartUpload(key, options = {}) {
+      log.push(['create', key]);
+      const uploadId = 'u' + (++etagCounter);
+      uploads.set(uploadId, { key, parts: new Map(), httpMetadata: options.httpMetadata });
+      return multipart(key, uploadId);
+    },
+    resumeMultipartUpload(key, uploadId) { return multipart(key, uploadId); },
     async head(key) { log.push(['head', key]); const o = objects.get(key); return o ? meta(key, o) : null; },
-    async get(key) {
+    async get(key, options = {}) {
       log.push(['get', key]);
       const o = objects.get(key);
       if (!o) return null;
       let cancelled = false;
-      const body = new ReadableStream({ start(c) { c.enqueue(o.bytes); c.close(); }, cancel() { cancelled = true; } });
-      return { ...meta(key, o), body, get cancelled() { return cancelled; } };
+      const r = options.range;
+      const bytes = r ? o.bytes.subarray(r.offset, r.offset + (r.length ?? o.bytes.byteLength - r.offset)) : o.bytes;
+      /* Several chunks, as R2 streams them, so readers that join or cut chunks are exercised. */
+      const body = new ReadableStream({ start(c) {
+        for (let at = 0; at < bytes.byteLength; at += 65536) c.enqueue(bytes.slice(at, at + 65536));
+        c.close();
+      }, cancel() { cancelled = true; } });
+      return { ...meta(key, o), body, arrayBuffer: async () => bytes.slice().buffer, get cancelled() { return cancelled; } };
     },
     async put(key, value, options = {}) {
       log.push(['put', key]);
-      const bytes = value instanceof Uint8Array ? value : new Uint8Array(await new Response(value).arrayBuffer());
+      const bytes = value instanceof Uint8Array ? value : await readPut(key, value);
       if (options.sha256 && sha(bytes) !== options.sha256) throw new Error('put: The SHA-256 checksum you specified did not match');
       objects.set(key, { bytes, uploaded: new Date(), httpMetadata: options.httpMetadata });
       return meta(key, objects.get(key));
@@ -106,55 +184,60 @@ function memoryBucket() {
       const start = cursor ? Number(cursor) : 0;
       const page = keys.slice(start, start + limit);
       const truncated = start + limit < keys.length;
-      return { objects: page.map(key => ({ key })), truncated, cursor: truncated ? String(start + limit) : undefined };
+      return { objects: page.map(key => ({ key, uploaded: objects.get(key).uploaded })), truncated, cursor: truncated ? String(start + limit) : undefined };
     },
   };
 }
 
 async function modsEnv(extra = {}) {
   const { initializeQuota, consumeModQuota } = await quotaModule;
-  const registry = await registryModule;
+  const r = await registryModule;
   const clock = { offset: 0, now() { return Date.now() + this.offset; } };
   const quotaObjects = new Map();
   const names = [];
-  const storage = sqliteStorage();
-  registry.initializeRegistry(storage);
-  const env = {
-    clock, names, registryStorage: storage,
+  const s = sqliteStorage();
+  r.initializeRegistry(s);
+  const now = () => clock.now();
+  /* The methods of mods_registry.js UnitRegistry, on the same functions, with the test's clock. */
+  const methods = {
+    unitStatus: h => r.unitStatus(s, h), unitRow: h => r.unitRow(s, h), unitServed: (h, b) => r.unitServed(s, h, b),
+    beginUnit: u => r.beginUnit(s, u, now()), unitBlobs: h => r.unitBlobs(s, h),
+    commitUnitArchive: (h, o, n, b) => r.commitUnitArchive(s, h, o, n, b, now()), completeUnit: h => r.completeUnit(s, h, now()),
+    blobWanted: (sha, n) => r.blobWanted(s, sha, n), commitBlob: (sha, n, c, o) => r.commitBlob(s, sha, n, c, o, now()),
+    blobLocation: sha => r.blobLocation(s, sha), markBroken: o => r.markBroken(s, o, now()), purgeUnits: l => r.purgeUnits(s, now(), l),
+    compactionPlan: l => r.compactionPlan(s, l), switchPack: q => r.switchPack(s, q, now()), dueDead: l => r.dueDead(s, now(), l),
+    claim: q => r.claimUnits(s, q, now()), release: q => r.releaseClaim(s, q, now()), claimRev: (a, b) => r.claimRev(s, a, b),
+    releaseRef: ref => r.releaseRef(s, ref, now()), reportAsked: (h, p) => r.reportAsked(s, h, p, now()), listAsked: c => r.listAsked(s, c),
+    publisherSeen: (k, n, f) => r.publisherSeen(s, k, n, f, now()), publisher: k => r.publisherRow(s, k), forgetKey: k => r.forgetKey(s, k),
+    block: (h, why) => r.blockUnit(s, h, why, now()), unblock: h => r.unblockUnit(s, h),
+    uploadSession: (sha, n) => r.uploadSession(s, sha, n), openUpload: q => r.openUpload(s, q, now()),
+    recordPart: (sha, n, u, p, e) => r.recordPart(s, sha, n, u, p, e, now()), closeUpload: (sha, n, u) => r.closeUpload(s, sha, n, u),
+    abandonUploads: l => r.abandonUploads(s, now(), l), deadObjects: l => r.deadObjects(s, l), forgetDead: o => r.forgetDead(s, o),
+    unnamedObjects: k => r.unnamedObjects(s, k), stats: () => r.storeStats(s),
+    meta: (key, value) => {
+      if (value !== undefined) { s.sql.exec('INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value)); return true; }
+      return s.sql.exec('SELECT value FROM store_meta WHERE key = ?', key).toArray()[0]?.value ?? null;
+    },
+  };
+  const stub = Object.fromEntries(Object.entries(methods).map(([k, f]) => [k, async (...a) => structuredClone(f(...a))]));
+  return {
+    clock, names, storage: s,
     MODS: memoryBucket(),
-    MODS_BLOCKED: '[]',
+    MODS_ADMIN_TOKEN: 'admin-token',
     WRITE_QUOTAS: {
       idFromName(name) { names.push(name); return name; },
       get(name) {
-        if (!quotaObjects.has(name)) { const s = sqliteStorage(); initializeQuota(s); quotaObjects.set(name, s); }
-        const s = quotaObjects.get(name);
-        return { consumeMods: async entries => consumeModQuota(s, entries, clock.now()) };
+        if (!quotaObjects.has(name)) { const q = sqliteStorage(); initializeQuota(q); quotaObjects.set(name, q); }
+        const q = quotaObjects.get(name);
+        return { consumeMods: async entries => consumeModQuota(q, entries, clock.now()) };
       },
     },
-    MOD_REGISTRY: {
-      idFromName(name) { assert.equal(name, 'registry'); return name; },
-      get() {
-        return {
-          missing: async hashes => registry.missingBlobs(storage, hashes),
-          noteBlob: async (hash, size) => registry.noteBlob(storage, hash, size, clock.now()),
-          registerBundle: async (hash, files) => registry.registerBundle(storage, hash, files, clock.now()),
-          bundleServed: async hash => registry.bundleServed(storage, hash, clock.now()),
-          blobClaimed: async hash => registry.blobClaimed(storage, hash),
-          claim: async request => registry.claimBundles(storage, request, clock.now()),
-          release: async (id, hash) => registry.releaseClaim(storage, id, hash),
-          purgeBundles: async limit => registry.purgeBundles(storage, clock.now(), limit),
-          purgeBlobs: async limit => registry.purgeBlobs(storage, clock.now(), limit),
-          reset: async () => registry.resetRegistry(storage),
-          finishBlobs: async hashes => registry.finishBlobs(storage, hashes),
-        };
-      },
-    },
+    UNIT_REGISTRY: { idFromName(name) { assert.equal(name, 'registry'); return name; }, get() { return stub; } },
     ...extra,
   };
-  return env;
 }
 
-/* ---------------- request helpers ---------------- */
+/* ---------------- requests ---------------- */
 
 const ADDRESS = '203.0.113.7';
 
@@ -166,811 +249,774 @@ async function fetchWorker(env, request) {
   return (await workerModule).default.fetch(request, env);
 }
 
-function putBlobRequest(bytes, hash = sha(bytes), headers = {}) {
-  return call('PUT', '/mods/blob/' + hash, { body: bytes, headers: {
-    'Content-Type': 'application/octet-stream', 'Content-Length': String(bytes.byteLength), ...headers } });
+/* A publishing key as the product makes one (SPEC 4.2): P-256, the raw point base64url. */
+function makeKey() {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const jwk = publicKey.export({ format: 'jwk' });
+  const point = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]);
+  return { privateKey, pub: point.toString('base64url') };
 }
 
-function postJson(route, value, headers = {}) {
-  return call('POST', route, { body: JSON.stringify(value), headers: { 'Content-Type': 'application/json', ...headers } });
+/* The three headers of a signed request (SPEC 4.3). */
+function signed(key, method, route, body, name = '') {
+  const header = name ? encodeURIComponent(name) : '';
+  const message = 'snapmap-plus/request/1\n' + method + '\n' + route + '\n' + header + '\n' + sha(body || Buffer.alloc(0));
+  const signature = nodeSign('sha256', Buffer.from(message), { key: key.privateKey, dsaEncoding: 'ieee-p1363' });
+  const h = { 'X-Publisher-Key': key.pub, 'X-Publisher-Signature': signature.toString('base64url') };
+  if (header) h['X-Publisher-Name'] = header;
+  return h;
 }
 
-/* Independent canonicalizer: sorted keys at every level, files sorted by path, no whitespace. */
+function signedCall(key, method, route, body, { headers = {}, name = '' } = {}) {
+  const bytes = body === undefined ? Buffer.alloc(0) : Buffer.from(body);
+  return call(method, route, { body: method === 'GET' ? undefined : bytes, headers: { ...signed(key, method, route, bytes, name), ...headers } });
+}
+
+function signedJson(key, route, value, opts = {}) {
+  return signedCall(key, 'POST', route, JSON.stringify(value), { ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) } });
+}
+
+/* ---------------- units, written as the product's modunit.c and modzip.c write them ---------------- */
+
+/* The canonical manifest (SPEC 3.4): keys sorted, no whitespace. */
 function canonical(value) {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
-  if (value !== null && typeof value === 'object') {
-    return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}';
-  }
+  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}';
   return JSON.stringify(value);
 }
 
-function bundleOf(manifest) {
-  const copy = { ...manifest, files: [...manifest.files].sort((a, b) => (a.path < b.path ? -1 : 1)) };
-  delete copy.bundle;
-  const text = canonical(copy);
-  return { manifest: copy, text, hash: sha(Buffer.from(text, 'utf8')) };
+let counter = 0;
+/* A unit of `files` ({ path: bytes }); returns { hash, manifest, blobs: Map(sha -> bytes), files }. */
+function makeUnit(files, { kind = 'entity', name = 'entities/thing' + (++counter), game = [], mod = {}, spelled } = {}) {
+  const list = Object.keys(files).sort().map(p => ({ path: p, sha256: sha(files[p]), size: Buffer.from(files[p]).length }));
+  const doc = { files: list, format: 1, game, mod, root: { kind, name } };
+  if (spelled) doc.spelled = spelled;
+  const manifest = Buffer.from(canonical(doc));
+  const blobs = new Map(Object.values(files).map(b => [sha(b), Buffer.from(b)]));
+  return { hash: sha(manifest), manifest, blobs, files: list, doc };
 }
 
-function declFile(id, stem, bytes) {
-  const request = 'generated/decls/entitydef/mods/' + id + '/' + stem + '.decl';
-  return { path: 'assets/' + request, request, blob: sha(bytes), size: bytes.byteLength,
-    provides: { type: 'entityDef', name: 'mods/' + id + '/' + stem } };
+/* entries: [{ name, data, crc? }] as modzip.c writes them: stored, sizes in the local header. */
+function zip(entries) {
+  const parts = [];
+  let offset = 0;
+  const records = [];
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, 'utf8');
+    const data = Buffer.from(entry.data);
+    const crc = entry.crc ?? zlib.crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    records.push({ name, crc, size: data.length, offset });
+    parts.push(local, name, data);
+    offset += 30 + name.length + data.length;
+  }
+  const cd = offset;
+  for (const r of records) {
+    const c = Buffer.alloc(46);
+    c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6);
+    c.writeUInt32LE(r.crc, 16); c.writeUInt32LE(r.size, 20); c.writeUInt32LE(r.size, 24);
+    c.writeUInt16LE(r.name.length, 28); c.writeUInt32LE(r.offset, 42);
+    parts.push(c, r.name);
+    offset += 46 + r.name.length;
+  }
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(records.length, 8); end.writeUInt16LE(records.length, 10);
+  end.writeUInt32LE(offset - cd, 12); end.writeUInt32LE(cd, 16);
+  parts.push(end);
+  return Buffer.concat(parts);
 }
 
-function sampleManifest(files, extra = {}) {
-  return { format: 1, id: 'alex.pink-imp', build: 1, version: '1.0.0', name: 'Pink Imp', author: 'alex', files, ...extra };
+/* The archive of a unit's files the store lacks (`missing`, SHA-256s), unit.json first. */
+function unitZip(unit, missing, edit = e => e) {
+  const want = new Set(missing);
+  const entries = [{ name: 'unit.json', data: unit.manifest }];
+  for (const f of unit.files) if (want.has(f.sha256)) { entries.push({ name: f.path, data: unit.blobs.get(f.sha256) }); want.delete(f.sha256); }
+  return zip(entries.map(edit));
 }
 
-async function storeBlobs(env, ...buffers) {
-  for (const bytes of buffers) {
-    const response = await fetchWorker(env, putBlobRequest(bytes));
-    assert.ok(response.status === 201 || response.status === 200, 'blob store ' + response.status);
+/* Reads a stored ZIP (the store's archive answer): [{ name, data }], checking every CRC. */
+function unzip(bytes) {
+  const b = Buffer.from(bytes);
+  const endAt = b.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  const n = b.readUInt16LE(endAt + 10);
+  let at = b.readUInt32LE(endAt + 16);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    assert.equal(b.readUInt32LE(at), 0x02014b50);
+    const crc = b.readUInt32LE(at + 16), size = b.readUInt32LE(at + 24), nl = b.readUInt16LE(at + 28), xl = b.readUInt16LE(at + 30);
+    const off = b.readUInt32LE(at + 42), name = b.subarray(at + 46, at + 46 + nl).toString('utf8');
+    const lnl = b.readUInt16LE(off + 26), lxl = b.readUInt16LE(off + 28);
+    const data = b.subarray(off + 30 + lnl + lxl, off + 30 + lnl + lxl + size);
+    assert.equal(zlib.crc32(data), crc, 'CRC of ' + name);
+    out.push({ name, data });
+    at += 46 + nl + xl;
   }
+  return out;
 }
 
-function putBundleRequest(text, hash) {
-  return call('PUT', '/mods/bundle/' + hash, { body: text, headers: { 'Content-Type': 'application/json' } });
+/* begin, then the archive of what is missing: the publish of one unit. Returns the begin answer. */
+async function publishUnit(env, key, unit) {
+  const begin = await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + unit.hash + '/begin', unit.manifest));
+  assert.equal(begin.status, 200, await begin.clone().text());
+  const first = await begin.json();
+  if (first.held) return first;
+  const archive = unitZip(unit, first.missing);
+  const put = await fetchWorker(env, signedCall(key, 'PUT', '/mods/unit/' + unit.hash + '/archive', archive,
+    { headers: { 'Content-Type': 'application/zip', 'Content-Length': String(archive.length) } }));
+  assert.equal(put.status, 201, await put.clone().text());
+  return first;
 }
 
-const blobA = Buffer.from('entityDef pink_imp { inherit = "monster/imp"; }\n');
-const blobB = Buffer.from('entityDef pink_imp_boss { inherit = "mods/alex.pink-imp/pink_imp"; }\n');
-const blobC = Buffer.from('third file');
-
-/* ---------------- canonical form ---------------- */
-
-test('canonical text matches a hand-written golden string and its hash', async () => {
-  const { canonicalText } = await modsModule;
-  const manifest = {
-    name: 'Pink Imp', id: 'alex.pink-imp', format: 1, build: 2147483647, version: '1.0.0', bundle: 'ignored',
-    requirements: { cvars: { g_useResourceBlackList: '0' } },
-    files: [
-      { size: 2, request: 'b.json', path: 'assets/b.json', blob: 'b'.repeat(64), provides: { type: 'file', name: 'b.json' } },
-      { size: 1, request: 'a.json', path: 'assets/a.json', blob: 'a'.repeat(64), provides: { name: 'a.json', type: 'file' } },
-    ],
-  };
-  const golden = '{"build":2147483647,"files":[{"blob":"' + 'a'.repeat(64) + '","path":"assets/a.json","provides":{"name":"a.json","type":"file"},' +
-    '"request":"a.json","size":1},{"blob":"' + 'b'.repeat(64) + '","path":"assets/b.json","provides":{"name":"b.json","type":"file"},' +
-    '"request":"b.json","size":2}],"format":1,"id":"alex.pink-imp","name":"Pink Imp",' +
-    '"requirements":{"cvars":{"g_useResourceBlackList":"0"}},"version":"1.0.0"}';
-  assert.equal(canonicalText(manifest), golden);
-  assert.equal(canonicalText(manifest, true), golden.replace('"build":2147483647,', '"build":2147483647,"bundle":"ignored",'));
-  assert.equal(bundleOf(manifest).text, golden);
-});
-
-/* ---------------- number spelling ---------------- */
-
-/* The product keeps fixed decimals as written (companion transforms such as -1.0 and
- * -0.7071), so the store hashes the received lexemes and never re-spells a number. */
-function companionManifest() {
-  return sampleManifest([declFile('alex.pink-imp', 'pink_imp', blobA)], { extra: { companions: { 'mods/alex.pink-imp/pink_imp': [{
-    activate: false, axis: [[0, 1, 0], [-1, 0, 0], [0, 0, 1]], bind: true, entityDef: 'mods/alex.pink-imp/pink_imp', origin: [0, 0, 7] }] } } });
-}
-const INTEGER_TRANSFORM = '"axis":[[0,1,0],[-1,0,0],[0,0,1]],"bind":true,"entityDef":"mods/alex.pink-imp/pink_imp","origin":[0,0,7]';
-const DECIMAL_TRANSFORM = '"axis":[[0.0,1.0,0.0],[-1.0,0.0,0.0],[0.0,0.0,1.0]],"bind":true,"entityDef":"mods/alex.pink-imp/pink_imp","origin":[0.0,-0.7071,7]';
-
-test('fixed decimals hash as written at the bundle PUT and at missing', async () => {
-  const { canonicalSource } = await modsModule;
-  const env = await modsEnv();
-  await storeBlobs(env, blobA);
-  const integers = bundleOf(companionManifest());
-  assert.ok(integers.text.includes(INTEGER_TRANSFORM));
-  const text = integers.text.replace(INTEGER_TRANSFORM, DECIMAL_TRANSFORM);
-  const hash = sha(Buffer.from(text, 'utf8'));
-  assert.equal(canonicalSource(text).text, text, 'the canonical form keeps every lexeme');
-  const ask = async (manifest, bundle = sha(Buffer.from(manifest))) => {
-    const response = await fetchWorker(env, postJson('/mods/missing', { bundle, manifest }));
-    return [response.status, await response.json()];
-  };
-  assert.deepEqual(await ask(text), [200, { missing: [], bundle: hash }]);
-  const created = await fetchWorker(env, putBundleRequest(text, hash));
-  assert.equal(created.status, 201, await created.clone().text());
-  assert.equal(await (await fetchWorker(env, call('GET', '/mods/bundle/' + hash))).text(), text, 'served verbatim');
-
-  /* The integer spelling is a different, equally canonical text with its own hash. */
-  assert.notEqual(integers.hash, hash);
-  assert.deepEqual(await ask(integers.text), [200, { missing: [], bundle: integers.hash }]);
-  assert.equal((await fetchWorker(env, putBundleRequest(integers.text, integers.hash))).status, 201);
-  assert.deepEqual([(await fetchWorker(env, putBundleRequest(text, integers.hash))).status], [422], 'a re-spelled text is not the hashed one');
-
-  /* Whitespace or unsorted keys around decimals are still non-canonical. */
-  const pretty = text.replace('"axis":', '"axis": ');
-  const prettyResponse = await fetchWorker(env, putBundleRequest(pretty, hash));
-  assert.deepEqual([prettyResponse.status, (await prettyResponse.json()).error], [422, 'body is not the canonical manifest text']);
-  const unsorted = text.replace('"bind":true,"entityDef":"mods/alex.pink-imp/pink_imp"', '"entityDef":"mods/alex.pink-imp/pink_imp","bind":true');
-  assert.deepEqual(await ask(unsorted, hash), [422, { error: 'body is not the canonical manifest text' }]);
-  const withBundle = text.replace('"build":1,', '"build":1,"bundle":"' + hash + '",');
-  assert.equal((await fetchWorker(env, putBundleRequest(withBundle, hash))).status, 200, 'a bundle key may ride along');
-});
-
-test('a number with an exponent or outside the JSON integer and decimal grammar is refused', async () => {
-  const { canonicalSource } = await modsModule;
-  const env = await modsEnv();
-  const text = bundleOf(companionManifest()).text.replace(INTEGER_TRANSFORM, DECIMAL_TRANSFORM);
-  for (const spelling of ['-7.071e-1', '-7071E-4', '1e0']) {
-    const bad = text.replace('-0.7071', spelling);
-    assert.deepEqual(canonicalSource(bad), { error: 'number is not a plain integer or fixed decimal' });
-    const response = await fetchWorker(env, postJson('/mods/missing', { bundle: sha(Buffer.from(bad)), manifest: bad }));
-    assert.deepEqual([response.status, await response.json()], [422, { error: 'number is not a plain integer or fixed decimal' }]);
-    const put = await fetchWorker(env, putBundleRequest(bad, sha(Buffer.from(bad))));
-    assert.deepEqual([put.status, (await put.json()).error], [422, 'number is not a plain integer or fixed decimal']);
-  }
-  const exponentBuild = bundleOf(companionManifest()).text.replace('"build":1,', '"build":1e0,');
-  assert.deepEqual(canonicalSource(exponentBuild), { error: 'number is not a plain integer or fixed decimal' });
-  for (const spelling of ['-0', '0.0', '-1.000', '12.5']) assert.equal(canonicalSource(text.replace('-0.7071', spelling)).error, undefined, spelling);
-  assert.deepEqual(canonicalSource('{"a":1,"a":2}'), { error: 'duplicate key: a' });
-});
-
-test('the real campaign-interactables-progression manifest hashes to its path at missing', async () => {
-  const { canonicalSource, canonicalText } = await modsModule;
-  const text = fs.readFileSync(path.join(__dirname, 'fixtures', 'campaign-interactables-progression.canon.json'), 'utf8');
-  const hash = sha(Buffer.from(text, 'utf8'));
-  assert.equal(hash, '3f3a5b8e2ad1d1e3aded5fa3a529af5a0fff97dba4120d4b1497ce493ca8f87c');
-  assert.ok(text.includes('"axis":[[0.0,1.0,0.0],[-1.0,0.0,0.0],[0.0,0.0,1.0]]'), 'the fixture carries fixed decimals');
-  assert.equal(canonicalSource(text).text, text);
-  assert.notEqual(canonicalText(JSON.parse(text)), text, 'JSON.stringify re-spells the decimals (defect B7)');
-  const env = await modsEnv();
-  const carried = [...new Set(JSON.parse(text).files.filter(file => file.blob !== undefined).map(file => file.blob))];
-  const response = await fetchWorker(env, postJson('/mods/missing', { bundle: hash, manifest: text }));
-  assert.equal(response.status, 200, await response.clone().text());
-  assert.deepEqual(await response.json(), { missing: carried, bundle: hash });
-});
-
-/* ---------------- blobs ---------------- */
-
-test('blob PUT creates, re-PUT is idempotent, GET and HEAD serve immutable bytes', async () => {
-  const env = await modsEnv();
-  const hash = sha(blobA);
-  const created = await fetchWorker(env, putBlobRequest(blobA));
-  assert.equal(created.status, 201);
-  assert.deepEqual(await created.json(), { blob: hash, size: blobA.byteLength });
-  assert.deepEqual([...env.MODS.objects.keys()], ['blob/' + hash]);
-  const again = await fetchWorker(env, putBlobRequest(blobA));
-  assert.equal(again.status, 200);
-  assert.equal(env.MODS.log.filter(([op]) => op === 'put').length, 1);
-
-  const got = await fetchWorker(env, call('GET', '/mods/blob/' + hash));
-  assert.equal(got.status, 200);
-  assert.deepEqual(Buffer.from(await got.arrayBuffer()), blobA);
-  for (const response of [got, await fetchWorker(env, call('HEAD', '/mods/blob/' + hash))]) {
-    assert.equal(response.headers.get('Content-Type'), 'application/octet-stream');
-    assert.equal(response.headers.get('Cache-Control'), 'public, max-age=31536000, immutable');
-    assert.equal(response.headers.get('X-Content-Type-Options'), 'nosniff');
-    assert.equal(response.headers.get('ETag'), '"' + hash + '"');
-    assert.equal(response.headers.get('Content-Length'), String(blobA.byteLength));
-  }
-  const head = await fetchWorker(env, call('HEAD', '/mods/blob/' + hash));
-  assert.equal((await head.arrayBuffer()).byteLength, 0);
-  assert.equal((await fetchWorker(env, call('GET', '/mods/blob/' + 'f'.repeat(64)))).status, 404);
-  assert.equal((await fetchWorker(env, call('HEAD', '/mods/blob/' + 'f'.repeat(64)))).status, 404);
-});
-
-test('blob PUT refuses hash mismatch, oversize, wrong type, missing length and malformed hashes', async () => {
-  const env = await modsEnv();
-  const wrong = sha(Buffer.from('other bytes'));
-  const mismatch = await fetchWorker(env, putBlobRequest(blobA, wrong));
-  assert.equal(mismatch.status, 422);
-  assert.equal(env.MODS.objects.size, 0);
-  assert.deepEqual(env.registryStorage.sql.exec('SELECT hash FROM mod_blob').toArray(), []);
-
-  const huge = await fetchWorker(env, call('PUT', '/mods/blob/' + sha(blobA), { body: blobA, headers: {
-    'Content-Type': 'application/octet-stream', 'Content-Length': String(64 * MIB + 1) } }));
-  assert.equal(huge.status, 413);
-  const typed = await fetchWorker(env, putBlobRequest(blobA, sha(blobA), { 'Content-Type': 'text/plain' }));
-  assert.equal(typed.status, 415);
-  const unlengthed = await fetchWorker(env, call('PUT', '/mods/blob/' + sha(blobA), {
-    body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(blobA)); c.close(); } }),
-    headers: { 'Content-Type': 'application/octet-stream' } }));
-  assert.equal(unlengthed.status, 411);
-  assert.equal((await fetchWorker(env, putBlobRequest(blobA, sha(blobA).toUpperCase()))).status, 400);
-  assert.equal((await fetchWorker(env, call('PUT', '/mods/blob/abc', { body: blobA }))).status, 404);
-  assert.equal((await fetchWorker(env, call('DELETE', '/mods/blob/' + sha(blobA)))).status, 405);
-  assert.equal((await fetchWorker(env, call('GET', '/mods/elsewhere'))).status, 404);
-  assert.equal(env.MODS.objects.size, 0);
-
-  const empty = new Uint8Array(0);
-  assert.equal((await fetchWorker(env, putBlobRequest(empty))).status, 201);
-  assert.equal(env.MODS.objects.get('blob/' + sha(empty)).bytes.byteLength, 0);
-});
-
-test('a storage layer that ignored the checksum still never keeps mismatched bytes', async () => {
-  const env = await modsEnv();
-  const put = env.MODS.put;
-  env.MODS.put = (key, value, options) => put(key, value, { ...options, sha256: undefined });
-  const response = await fetchWorker(env, putBlobRequest(blobA, sha(blobB)));
-  assert.equal(response.status, 422);
-  assert.equal(env.MODS.objects.size, 0);
-});
-
-/* ---------------- bundles ---------------- */
-
-test('bundle PUT validates, stores the canonical body and serves it immutable', async () => {
-  const env = await modsEnv();
-  await storeBlobs(env, blobA, blobB);
-  const { text, hash } = bundleOf(sampleManifest([declFile('alex.pink-imp', 'pink_imp_boss', blobB), declFile('alex.pink-imp', 'pink_imp', blobA)]));
-  const created = await fetchWorker(env, putBundleRequest(text, hash));
-  assert.equal(created.status, 201, await created.clone().text());
-  assert.deepEqual(await created.json(), { bundle: hash });
-  assert.equal(Buffer.from(env.MODS.objects.get('bundle/' + hash).bytes).toString(), text);
-  assert.equal((await fetchWorker(env, putBundleRequest(text, hash))).status, 200);
-
-  const got = await fetchWorker(env, call('GET', '/mods/bundle/' + hash));
-  assert.equal(got.status, 200);
-  assert.equal(await got.text(), text);
-  assert.equal(got.headers.get('Cache-Control'), 'public, max-age=31536000, immutable');
-  assert.equal(got.headers.get('X-Content-Type-Options'), 'nosniff');
-  assert.equal(got.headers.get('Content-Type'), 'application/json; charset=utf-8');
-  const head = await fetchWorker(env, call('HEAD', '/mods/bundle/' + hash));
-  assert.equal(head.status, 200);
-  assert.equal((await head.arrayBuffer()).byteLength, 0);
-  assert.equal((await fetchWorker(env, call('GET', '/mods/bundle/' + 'e'.repeat(64)))).status, 404);
-
-  const withField = bundleOf(sampleManifest([declFile('alex.pink-imp', 'pink_imp', blobA)]));
-  const stored = canonical({ ...withField.manifest, bundle: withField.hash });
-  assert.equal((await fetchWorker(env, putBundleRequest(stored, withField.hash))).status, 201);
-});
-
-test('bundle PUT refuses mismatch, non-canonical text, missing blobs and every manifest rule', async () => {
-  const env = await modsEnv();
-  await storeBlobs(env, blobA);
-  const good = sampleManifest([declFile('alex.pink-imp', 'pink_imp', blobA)]);
-  const ok = bundleOf(good);
-  const status = async (text, hash) => {
-    const response = await fetchWorker(env, putBundleRequest(text, hash));
-    return [response.status, (await response.json()).error];
-  };
-  const expectRule = async (manifest, pattern) => {
-    const { text, hash } = bundleOf(manifest);
-    const [code, error] = await status(text, hash);
-    assert.equal(code, 422, JSON.stringify(manifest).slice(0, 200));
-    assert.match(error, pattern);
-  };
-
-  assert.deepEqual(await status(ok.text, sha(Buffer.from('x'))), [422, 'canonical manifest does not hash to the path']);
-  assert.deepEqual(await status(JSON.stringify(ok.manifest, null, 2), ok.hash), [422, 'body is not the canonical manifest text']);
-  const dup = ok.text.replace('"format":1', '"format":1,"format":1');
-  assert.equal((await status(dup, ok.hash))[0], 422);
-  assert.deepEqual(await status(canonical({ ...ok.manifest, bundle: 'a'.repeat(64) }), ok.hash), [422, 'bundle field does not match the path']);
-  assert.equal((await status('{', ok.hash))[0], 400);
-
-  const file = declFile('alex.pink-imp', 'pink_imp', blobA);
-  const withRequest = (request, extra = {}) => ({ ...file, path: 'assets/' + request, request, provides: { type: 'file', name: request }, ...extra });
-  await expectRule({ ...good, format: 2 }, /unsupported format/);
-  for (const id of ['Alex', '.alex', 'alex..imp', 'a/b', 'x'.repeat(65), '']) await expectRule({ ...good, id }, /bad id/);
-  await expectRule({ ...good, version: '../1' }, /bad version/);
-  await expectRule({ ...good, version: '' }, /bad version/);
-  for (const build of [0, -1, 2147483648, 1.5, '1', null]) await expectRule({ ...good, build }, /bad build/);
-  const unbuilt = { ...good };
-  delete unbuilt.build;
-  await expectRule(unbuilt, /bad build/);
-  const unversioned = { ...good };
-  delete unversioned.version;
-  const noVersion = bundleOf(unversioned);
-  assert.ok(!noVersion.text.includes('"version"'));
-  assert.equal((await fetchWorker(env, putBundleRequest(noVersion.text, noVersion.hash))).status, 201, 'version is optional');
-  const rebuilt = bundleOf({ ...good, build: 2 });
-  assert.notEqual(rebuilt.hash, ok.hash, 'build is part of the canonical text');
-  await expectRule({ ...good, homepage: 'javascript:alert(1)' }, /bad homepage/);
-  await expectRule({ ...good, extra: 1 }, /bad extra/);
-  await expectRule({ ...good, extra: {} }, /bad extra/);
-  await expectRule({ ...good, extra: { 'Bad Key': 1 } }, /bad extra key/);
-  await expectRule({ ...good, extra: { legacy: 'x' } }, /bad extra legacy/);
-  const commands = { activate: ['echo hi', 'bind x "say hi"'], deactivate: ['echo bye'] };
-  const { manifestError } = await modsModule;
-  assert.equal(manifestError({ ...good, requirements: { cvars: { com_maxFps: '120' }, commands } }), null, 'requirements may carry any cvar and console commands');
-  for (const bad of [{ activate: ['echo hi; quit'] }, { activate: [' echo hi'] }, { later: ['echo hi'] },
-                    { activate: Array(17).fill('echo hi') }, { activate: [1] }, ['echo hi']]) {
-    assert.equal(manifestError({ ...good, requirements: { cvars: {}, commands: bad } }), 'bad requirements');
-  }
-  await expectRule({ ...good, extra: { big: 'x'.repeat(256 * 1024) } }, /extra too large/);
-  await expectRule({ ...good, unknown: 1 }, /unknown manifest key/);
-  const withExtra = bundleOf({ ...good, extra: { legacy: { digest: '856c0b308aaa62e5' }, strings: { greet: 'hi' } } });
-  assert.notEqual(withExtra.hash, ok.hash, 'extra is part of the canonical text');
-  assert.equal((await fetchWorker(env, putBundleRequest(withExtra.text, withExtra.hash))).status, 201, 'extra is accepted');
-  await expectRule({ ...good, files: [] }, /no files/);
-  await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/../../x.json')] }, /path traversal/);
-  await expectRule({ ...good, files: [withRequest('/mods/alex.pink-imp/x.json')] }, /absolute/);
-  await expectRule({ ...good, files: [withRequest('mods\\alex.pink-imp\\x.json')] }, /backslash/);
-  await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/X.json')] }, /lowercase/);
-  await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.exe')] }, /extension not allowed/);
-  await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.bswf')] }, /extension not allowed/);
-  {
-    /* A virtual-texture family member is carried only in the form the product's builder writes
-     * (checked through manifestError: the PUT budget above is shared). */
-    const { manifestError } = await modsModule;
-    for (const member of ['mods/alex.pink-imp/fam_sq1.mega2', 'virtualtextures/mods/alex.pink-imp/fam_sq17.mega2',
-                          'virtualtextures/mods/alex.pink-imp/fam_sq01.mega2', 'virtualtextures/mods/alex.pink-imp/_vmtr_sq1.mega2',
-                          'virtualtextures/mods/alex.pink-imp/fam_sq1.mega'])
-      assert.match(manifestError({ ...good, files: [withRequest(member)] }) || '', /extension not allowed/, member);
-    for (const member of ['virtualtextures/mods/alex.pink-imp/fam_sq1.mega2', 'virtualtextures/mods/alex.pink-imp/deep/fam_sq16.mega2'])
-      assert.equal(manifestError({ ...good, files: [withRequest(member)] }), null, member);
-  }
-  {
-    /* One accepted PUT covers the newer kinds: the per-address upload budget is shared with the rules below. */
-    const kinds = ['generated/swf/mods/alex.pink-imp/x.bswf', 'generated/spirv/mods/alex.pink-imp/x.cspv', 'generated/discreteanimation/mods/alex.pink-imp/x.dmodel'];
-    /* A movie is named the way the product names it: type swf, swf/<stem>.swf. */
-    const movie = { ...withRequest(kinds[0]), provides: { type: 'swf', name: 'swf/mods/alex.pink-imp/x.swf' } };
-    const b = bundleOf({ ...good, files: [file, movie, ...kinds.slice(1).map(request => withRequest(request)),
-      { path: 'assets/mods/alex.pink-imp/pointer.tome', request: 'mods/alex.pink-imp/pointer.tome', provides: { type: 'file', name: 'mods/alex.pink-imp/pointer.tome' },
-        stock: { source: 'generated/decls/entitydef/ai/demon/imp.decl', sha256: 'ab'.repeat(32) } }] });
-    assert.equal((await fetchWorker(env, putBundleRequest(b.text, b.hash))).status, 201, 'movies, compute stages, dmodels and a stock pointer are accepted');
-  }
-  await expectRule({ ...good, files: [withRequest('mods/alex.pink-imp/x.json', { path: 'mods/alex.pink-imp/x.json' })] }, /path does not match/);
-  await expectRule({ ...good, files: [{ ...file, provides: { type: 'entityDef', name: 'mods/alex.pink-imp/other' } }] }, /provides does not match/);
-  {
-    /* A movie's logical name is the product's: no request spent, the budget below is shared. */
-    const { logicalName } = await modsModule;
-    assert.deepEqual(logicalName('generated/swf/mods/alex.pink-imp/x.bswf'), { type: 'swf', name: 'swf/mods/alex.pink-imp/x.swf' });
-    assert.deepEqual(logicalName('generated/swf/minigames/demoncrush.bswf'), { type: 'swf', name: 'swf/minigames/demoncrush.swf' });
-  }
-  await expectRule({ ...good, files: [{ ...file, extra: true }] }, /unknown file key/);
-  const pointer = (request, stock, extra = {}) => ({ path: 'assets/' + request, request, provides: { type: 'file', name: request }, stock, ...extra });
-  const goodStock = { source: 'generated/decls/entitydef/ai/demon/imp.decl', sha256: 'ab'.repeat(32) };
-  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', goodStock, { blob: 'cd'.repeat(32) })] }, /unknown file key blob/);
-  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', goodStock, { size: 1 })] }, /unknown file key size/);
-  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', { source: goodStock.source })] }, /bad stock pointer/);
-  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', { ...goodStock, extra: 1 })] }, /bad stock pointer/);
-  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', { ...goodStock, sha256: 'zz' })] }, /bad stock hash/);
-  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', { ...goodStock, source: '/abs/path.decl' })] }, /bad stock source/);
-  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', { ...goodStock, source: 'Upper/Case.decl' })] }, /bad stock source/);
-  await expectRule({ ...good, files: [pointer('mods/alex.pink-imp/p.decl', goodStock, { extra: true })] }, /unknown file key/);
-  await expectRule({ ...good, files: [{ ...file, size: 64 * MIB + 1 }] }, /file too large/);
-
-  const stock = 'generated/decls/entitydef/monster/imp.decl';
-  const stockFile = { ...file, path: 'assets/' + stock, request: stock, provides: { type: 'entityDef', name: 'monster/imp' } };
-  await expectRule({ ...good, files: [stockFile] }, /namespace/);
-  await expectRule({ ...good, files: [withRequest('generated/image/models/monsters/imp/skin.bimage', { provides: { type: 'image', name: 'models/monsters/imp/skin' } })] }, /namespace/);
-  await expectRule({ ...good, files: [withRequest('mods/other.mod/x.json')] }, /namespace/);
-  await expectRule({ ...good, files: [{ ...file, provides: { type: 'entityDef2', name: file.provides.name } }] }, /provides does not match/);
-  const material = 'generated/decls/material/mods/alex.pink-imp/skin.decl';
-  const materialFile = { ...file, path: 'assets/' + material, request: material, provides: { type: 'material', name: 'mods/alex.pink-imp/skin' } };
-  await expectRule({ ...good, files: [{ ...materialFile, provides: { type: 'material2', name: 'mods/alex.pink-imp/skin' } }] }, /provides does not match/);
-  const materialBundle = bundleOf({ ...good, files: [materialFile] });
-  assert.equal((await fetchWorker(env, putBundleRequest(materialBundle.text, materialBundle.hash))).status, 201, 'decl type is the folder name');
-  await expectRule({ ...good, shadows: ['generated/decls/entitydef/monster/cacodemon.decl'] }, /shadow names no file/);
-  await expectRule({ ...good, shadows: ['../x.decl'] }, /shadow: path traversal/);
-
-  const shadowed = bundleOf({ ...good, shadows: [stock], files: [stockFile] });
-  assert.equal((await fetchWorker(env, putBundleRequest(shadowed.text, shadowed.hash))).status, 201);
-
-  const many = Array.from({ length: 4097 }, (_, i) => withRequest('mods/alex.pink-imp/f' + i + '.json', { size: 1 }));
-  await expectRule({ ...good, files: many }, /too many files/);
-  const heavy = Array.from({ length: 5 }, (_, i) => withRequest('mods/alex.pink-imp/h' + i + '.bin', { size: 64 * MIB }));
-  await expectRule({ ...good, files: heavy }, /bundle too large/);
-  await expectRule({ ...good, files: [{ ...file, size: blobA.byteLength + 1 }] }, /size does not match/);
-
-  const absent = Array.from({ length: 150 }, (_, i) => withRequest('mods/alex.pink-imp/m' + i + '.json',
-    { blob: sha(Buffer.from('absent ' + i)), size: 7 }));
-  const gap = bundleOf({ ...good, files: [file, ...absent] });
-  const conflict = await fetchWorker(env, putBundleRequest(gap.text, gap.hash));
-  assert.equal(conflict.status, 409);
-  const body = await conflict.json();
-  assert.equal(body.missing.length, 100);
-  assert.equal(body.missingCount, 150);
-  assert.ok(!body.missing.includes(sha(blobA)));
-  assert.equal(env.MODS.objects.has('bundle/' + gap.hash), false);
-
-  const big = await fetchWorker(env, call('PUT', '/mods/bundle/' + ok.hash, { body: new Uint8Array(MIB + 1) }));
-  assert.equal(big.status, 413);
-});
-
-test('raw files of a dashed id may use the engine underscore spelling; decls keep the exact id', async () => {
-  const env = await modsEnv();
-  const mesh = Buffer.from('bmd6model bytes'), skin = Buffer.from('bimage bytes'), anim = Buffer.from('bmd6anim bytes');
-  await storeBlobs(env, blobA, mesh, skin, anim);
-  const raw = (request, bytes, type, name) => ({ path: 'assets/' + request, request, blob: sha(bytes), size: bytes.byteLength, provides: { type, name } });
-  const files = [
-    declFile('alex.r2-imp', 'r2_imp', blobA),
-    raw('generated/basemodel/md6/mods/alex.r2_imp/imp.bmd6model', mesh, 'baseModel', 'md6/mods/alex.r2_imp/imp.md6mesh'),
-    raw('generated/image/models/mods/alex.r2_imp/skin.bimage', skin, 'image', 'models/mods/alex.r2_imp/skin'),
-    raw('cooked/anim/md6/mods/alex.r2-imp/idle.bmd6anim', anim, 'anim', 'md6/mods/alex.r2-imp/idle.md6anim'),
-  ];
-  const manifest = { format: 1, id: 'alex.r2-imp', build: 1, name: 'R2 Imp', files };
-  const ok = bundleOf(manifest);
-  const stored = await fetchWorker(env, putBundleRequest(ok.text, ok.hash));
-  assert.equal(stored.status, 201, await stored.clone().text());
-
-  const refused = async (changed, pattern) => {
-    const { text, hash } = bundleOf({ ...manifest, files: changed });
-    const response = await fetchWorker(env, putBundleRequest(text, hash));
-    assert.equal(response.status, 422);
-    assert.match((await response.json()).error, pattern);
-  };
-  const underscoredDecl = 'generated/decls/entitydef/mods/alex.r2_imp/r2_imp.decl';
-  await refused([{ ...files[0], path: 'assets/' + underscoredDecl, request: underscoredDecl,
-    provides: { type: 'entityDef', name: 'mods/alex.r2_imp/r2_imp' } }], /namespace/);
-  await refused([raw('generated/basemodel/md6/mods/alex.r2.imp/imp.bmd6model', mesh, 'baseModel', 'md6/mods/alex.r2.imp/imp.md6mesh')], /namespace/);
-  await refused([raw('generated/basemodel/md6/mods/alex_r2_imp/imp.bmd6model', mesh, 'baseModel', 'md6/mods/alex_r2_imp/imp.md6mesh')], /namespace/);
-});
-
-test('stock pointers may sit at any game path; carried files there must be declared shadows', async () => {
-  const env = await modsEnv();
-  await storeBlobs(env, blobA);
-  const file = declFile('alex.pink-imp', 'pink_imp', blobA);
-  const put = async manifest => {
-    const { text, hash } = bundleOf(manifest);
-    const response = await fetchWorker(env, putBundleRequest(text, hash));
-    return [response.status, (await response.json()).error];
-  };
-  /* A surface as the additive builder writes it: request and source are the game's own path. */
-  const anim = 'cooked/anim/md6/characters/humans/mp_male/motion/mechanics/manual_override/pull_lever_finish.bmd6anim';
-  const surface = { path: 'assets/' + anim, request: anim, provides: { type: 'anim', name: anim.slice('cooked/anim/'.length).replace(/\.bmd6anim$/, '.md6anim') },
-    stock: { source: anim, sha256: 'ab'.repeat(32) } };
-  const decl = 'generated/decls/entitydef/monster/imp.decl';
-  const declSurface = { path: 'assets/' + decl, request: decl, provides: { type: 'entityDef', name: 'monster/imp' },
-    stock: { source: decl, sha256: 'cd'.repeat(32) } };
-  /* A pointer whose request names a game path and whose source is another installed file. */
-  const image = 'generated/image/models/monsters/imp/skin.bimage';
-  const moved = { path: 'assets/' + image, request: image, provides: { type: 'image', name: 'models/monsters/imp/skin' },
-    stock: { source: 'generated/image/models/monsters/imp/skin_b.bimage', sha256: 'ef'.repeat(32) } };
-  assert.deepEqual(await put(sampleManifest([file, surface, declSurface, moved], { shadows: [] })), [201, undefined],
-    'pointers outside mods/<id>/ need no shadow');
-  assert.deepEqual(await put(sampleManifest([file, surface])), [201, undefined], 'shadows may be absent');
-
-  const carried = { ...file, path: 'assets/' + decl, request: decl, provides: { type: 'entityDef', name: 'monster/imp' } };
-  const [code, error] = await put(sampleManifest([file, carried], { shadows: [] }));
-  assert.equal(code, 422);
-  assert.equal(error, 'outside the mods/alex.pink-imp/ namespace and not a declared shadow: ' + decl);
-  assert.deepEqual(await put(sampleManifest([file, carried], { shadows: [decl] })), [201, undefined], 'a declared shadow is carried');
-  assert.equal((await put(sampleManifest([file, surface], { shadows: [decl] })))[1], 'shadow names no file: ' + decl);
-  assert.equal((await put(sampleManifest([file, surface, { ...surface }])))[1], 'duplicate path: assets/' + anim);
-  const many = Array.from({ length: 4096 }, (_, i) => ({ path: 'assets/s/' + i, request: 's/' + i, provides: { type: 'file', name: 's/' + i },
-    stock: { source: 's/' + i, sha256: 'ab'.repeat(32) } }));
-  assert.equal((await put(sampleManifest([file, ...many])))[1], 'too many files');
-});
-
-/* ---------------- missing ---------------- */
-
-test('missing answers present and absent blobs and bounds the list', async () => {
-  const env = await modsEnv();
-  await storeBlobs(env, blobA);
-  const empty = await fetchWorker(env, postJson('/mods/missing', { blobs: [] }));
-  assert.equal(empty.status, 200);
-  assert.deepEqual(await empty.json(), { missing: [] });
-  const absent = sha(blobB);
-  const mixed = await fetchWorker(env, postJson('/mods/missing', { blobs: [absent, sha(blobA), absent] }));
-  assert.deepEqual(await mixed.json(), { missing: [absent] });
-  const full = Array.from({ length: 4096 }, (_, i) => sha(Buffer.from('n' + i)));
-  const many = await fetchWorker(env, postJson('/mods/missing', { blobs: full }));
-  assert.equal(many.status, 200);
-  assert.equal((await many.json()).missing.length, 4096);
-  const over = await fetchWorker(env, postJson('/mods/missing', { blobs: [...full, sha(Buffer.from('extra'))] }));
-  assert.equal(over.status, 400);
-  assert.equal((await fetchWorker(env, postJson('/mods/missing', { blobs: ['nothex'] }))).status, 400);
-  assert.equal((await fetchWorker(env, postJson('/mods/missing', {}))).status, 400);
-  assert.equal((await fetchWorker(env, call('GET', '/mods/missing'))).status, 405);
-});
-
-test('missing with a manifest refuses a bundle the store would refuse before any blob is uploaded', async () => {
-  const env = await modsEnv();
-  await storeBlobs(env, blobA);
-  const file = declFile('alex.pink-imp', 'pink_imp', blobA);
-  const second = declFile('alex.pink-imp', 'pink_imp_boss', blobB);
-  const decl = 'generated/decls/entitydef/monster/imp.decl';
-  const carried = { ...file, path: 'assets/' + decl, request: decl, provides: { type: 'entityDef', name: 'monster/imp' } };
-  const ask = async (value, raw) => {
-    const response = await fetchWorker(env, raw ? call('POST', '/mods/missing', { body: raw, headers: { 'Content-Type': 'application/json' } })
-      : postJson('/mods/missing', value));
-    return [response.status, await response.json()];
-  };
-  const objects = () => [...env.MODS.objects.keys()].sort();
-  const before = objects();
-
-  /* The same refusal, status and wording as the bundle PUT, with nothing stored. */
-  const bad = bundleOf(sampleManifest([file, carried, second], { shadows: [] }));
-  const early = await ask({ blobs: [sha(blobA), sha(blobB)], bundle: bad.hash, manifest: bad.text });
-  const late = await fetchWorker(env, putBundleRequest(bad.text, bad.hash));
-  assert.deepEqual(early, [422, { error: 'outside the mods/alex.pink-imp/ namespace and not a declared shadow: ' + decl }]);
-  assert.deepEqual([late.status, await late.json()], early);
-  assert.deepEqual(objects(), before);
-
-  /* An accepted manifest echoes its hash; blobs default to the ones it carries. */
-  const anim = 'cooked/anim/md6/characters/humans/mp_male/motion/mechanics/manual_override/pull_lever_finish.bmd6anim';
-  const surface = { path: 'assets/' + anim, request: anim, provides: { type: 'anim', name: anim.slice('cooked/anim/'.length).replace(/\.bmd6anim$/, '.md6anim') },
-    stock: { source: anim, sha256: 'ab'.repeat(32) } };
-  const good = bundleOf(sampleManifest([file, second, surface], { shadows: [] }));
-  assert.deepEqual(await ask({ bundle: good.hash, manifest: good.text }), [200, { missing: [sha(blobB)], bundle: good.hash }]);
-  assert.deepEqual(await ask({ blobs: [sha(blobA)], bundle: good.hash, manifest: good.text }), [200, { missing: [], bundle: good.hash }]);
-  const onlySurfaces = bundleOf(sampleManifest([surface]));
-  assert.deepEqual(await ask({ bundle: onlySurfaces.hash, manifest: onlySurfaces.text }), [200, { missing: [], bundle: onlySurfaces.hash }]);
-  await storeBlobs(env, blobB);
-  assert.equal((await fetchWorker(env, putBundleRequest(good.text, good.hash))).status, 201, 'the PUT accepts what missing accepted');
-
-  /* Every other bundle PUT refusal arrives early too. */
-  assert.deepEqual(await ask({ bundle: sha(Buffer.from('x')), manifest: good.text }), [422, { error: 'canonical manifest does not hash to the path' }]);
-  assert.deepEqual(await ask({ bundle: good.hash, manifest: JSON.stringify(good.manifest, null, 2) }), [422, { error: 'body is not the canonical manifest text' }]);
-  assert.deepEqual(await ask({ bundle: good.hash, manifest: '{' }), [400, { error: 'bad json' }]);
-  env.MODS_BLOCKED = JSON.stringify([sha(blobB)]);
-  assert.deepEqual(await ask({ bundle: good.hash, manifest: good.text }), [451, { error: 'blocked by takedown', blocked: [sha(blobB)] }]);
-  env.MODS_BLOCKED = JSON.stringify([good.hash]);
-  assert.deepEqual(await ask({ bundle: good.hash, manifest: good.text }), [451, { error: 'blocked by takedown', blocked: [good.hash] }]);
-  env.MODS_BLOCKED = '[]';
-
-  /* Malformed manifest members and the size caps. */
-  assert.equal((await ask({ manifest: good.text }))[0], 400);
-  assert.equal((await ask({ bundle: 'nothex', manifest: good.text }))[0], 400);
-  assert.equal((await ask({ bundle: good.hash, manifest: good.manifest }))[0], 400);
-  assert.equal((await ask({ bundle: good.hash }))[0], 400);
-  assert.equal((await ask({ bundle: good.hash, manifest: 'x'.repeat(MIB + 1) }))[0], 413);
-  assert.equal((await ask({ blobs: [sha(blobA)], pad: 'x'.repeat(512 * 1024) }))[0], 413, 'a plain query keeps its 512 KiB cap');
-  assert.equal((await ask(null, '[]'))[0], 400);
-  assert.equal((await ask(null, '{'))[0], 400);
-});
-
-/* ---------------- takedown ---------------- */
-
-test('blocked hashes are refused with 451 on every route', async () => {
-  const env = await modsEnv();
-  await storeBlobs(env, blobA, blobB);
-  const blob = sha(blobA);
-  const { text, hash } = bundleOf(sampleManifest([declFile('alex.pink-imp', 'pink_imp', blobA)]));
-  const clean = bundleOf(sampleManifest([declFile('alex.pink-imp', 'pink_imp_boss', blobB)]));
-  assert.equal((await fetchWorker(env, putBundleRequest(clean.text, clean.hash))).status, 201);
-  env.MODS_BLOCKED = JSON.stringify([blob.toUpperCase(), clean.hash]);
-  assert.equal((await fetchWorker(env, call('GET', '/mods/blob/' + blob))).status, 451);
-  assert.equal((await fetchWorker(env, call('HEAD', '/mods/blob/' + blob))).status, 451);
-  assert.equal((await fetchWorker(env, putBlobRequest(blobA))).status, 451);
-  const refused = await fetchWorker(env, putBundleRequest(text, hash));
-  assert.equal(refused.status, 451);
-  assert.deepEqual((await refused.json()).blocked, [blob]);
-  assert.equal((await fetchWorker(env, call('GET', '/mods/bundle/' + clean.hash))).status, 451);
-  assert.equal((await fetchWorker(env, putBundleRequest(clean.text, clean.hash))).status, 451);
-  assert.equal((await fetchWorker(env, postJson('/mods/claim', { ref: 'item-1', bundles: [clean.hash] }))).status, 451);
-  assert.deepEqual(await (await fetchWorker(env, postJson('/mods/missing', { blobs: [blob, sha(blobB)] }))).json(), { missing: [blob] });
-  env.MODS_BLOCKED = '{"not":"a list"}';
-  assert.equal((await fetchWorker(env, call('GET', '/mods/blob/' + sha(blobB)))).status, 503);
-});
-
-/* ---------------- quotas ---------------- */
-
-test('per-address limits exhaust with 429, use hashed names and leave other addresses alone', async () => {
-  const env = await modsEnv();
-  await storeBlobs(env, blobA);
-  const { text, hash } = bundleOf(sampleManifest([declFile('alex.pink-imp', 'pink_imp', blobA)]));
-  for (let i = 0; i < 64; i++) assert.notEqual((await fetchWorker(env, putBundleRequest(text, hash))).status, 429, 'put ' + i);
-  const limited = await fetchWorker(env, putBundleRequest(text, hash));
-  assert.equal(limited.status, 429);
-  assert.match(limited.headers.get('Retry-After'), /^\d+$/);
-  const elsewhere = call('PUT', '/mods/bundle/' + hash, { body: text, headers: { 'CF-Connecting-IP': '198.51.100.9' } });
-  assert.equal((await fetchWorker(env, elsewhere)).status, 200);
-  assert.ok(env.names.length > 0);
-  for (const name of env.names) {
-    assert.match(name, /^mods-address:[0-9a-f]{64}$/);
-    assert.ok(!name.includes(ADDRESS));
-  }
-  const keyed = await modsEnv({ MODS_ADDRESS_KEY: 'local-test-key' });
-  await fetchWorker(keyed, call('GET', '/mods/blob/' + hash));
-  assert.notEqual(keyed.names[0], env.names[0]);
-
-  const failing = await modsEnv();
-  failing.WRITE_QUOTAS = { idFromName: () => 'x', get: () => ({ consumeMods: async () => { throw new Error('down'); } }) };
-  assert.equal((await fetchWorker(failing, putBlobRequest(blobA))).status, 503);
-  assert.equal((await fetchWorker(failing, call('GET', '/mods/blob/' + sha(blobA)))).status, 404, 'reads fail open');
-});
-
-test('blob byte quota refuses an upload that would exceed the hourly bytes', async () => {
-  const env = await modsEnv();
-  const { MOD_LIMITS } = await quotaModule;
-  let first = true;
-  const original = env.WRITE_QUOTAS.get;
-  env.WRITE_QUOTAS.get = name => {
-    const stub = original(name);
-    if (first) { first = false; stub.consumeMods([['mod_bytes', MOD_LIMITS.mod_bytes - 4]]); }
-    return stub;
-  };
-  const response = await fetchWorker(env, putBlobRequest(blobA));
-  assert.equal(response.status, 429);
-  assert.equal(env.MODS.objects.size, 0);
-});
-
-test('mod quota admits each limit exactly and all-or-nothing across kinds', async () => {
-  const { initializeQuota, consumeModQuota, MOD_LIMITS } = await quotaModule;
-  assert.deepEqual({ ...MOD_LIMITS }, { mod_blob_put: 2048, mod_bytes: 4 * 1024 ** 3, mod_bundle_put: 64, mod_get: 20000, mod_claim: 64 });
-  const storage = sqliteStorage();
-  initializeQuota(storage);
-  const hour = 3600000 * 10;
-  for (const kind of ['mod_blob_put', 'mod_bundle_put', 'mod_claim', 'mod_get']) {
-    for (let i = 0; i < MOD_LIMITS[kind]; i++) assert.equal(consumeModQuota(storage, [[kind, 1]], hour).allowed, true);
-    assert.equal(consumeModQuota(storage, [[kind, 1]], hour + 3599999).allowed, false, kind);
-    assert.equal(consumeModQuota(storage, [[kind, 1]], hour + 3600000).allowed, true, kind);
-  }
-  const fresh = sqliteStorage();
-  initializeQuota(fresh);
-  assert.equal(consumeModQuota(fresh, [['mod_blob_put', 1], ['mod_bytes', MOD_LIMITS.mod_bytes]], hour).allowed, true);
-  assert.deepEqual(consumeModQuota(fresh, [['mod_blob_put', 1], ['mod_bytes', 1]], hour + 1), { allowed: false, kind: 'mod_bytes' });
-  assert.equal(fresh.sql.exec("SELECT used FROM mod_quota WHERE kind = 'mod_blob_put'").toArray()[0].used, 1, 'refusal spent nothing');
-  assert.equal(consumeModQuota(fresh, [['mod_blob_put', 1]], hour + 2).allowed, true);
-  for (const bad of [[], [['post', 1]], [['mod_get', 0]], [['mod_get', 1], ['mod_get', 1]], [['mod_get', 1.5]]]) {
-    assert.throws(() => consumeModQuota(storage, bad, hour));
-  }
-});
-
-test('addresses normalize to IPv4 or an IPv6 /64', async () => {
-  const { normalizeAddress } = await modsModule;
-  assert.equal(normalizeAddress('203.0.113.7'), '203.0.113.7');
-  assert.equal(normalizeAddress('2001:db8:1:2:3:4:5:6'), '2001:db8:1:2::/64');
-  assert.equal(normalizeAddress('2001:DB8:1:2::9'), '2001:db8:1:2::/64');
-  assert.equal(normalizeAddress('2001:db8::'), '2001:db8:0:0::/64');
-  assert.equal(normalizeAddress('::ffff:198.51.100.4'), '198.51.100.4');
-  for (const junk of [null, '', 'example', '1::2::3', '1:2:3:4:5:6:7:8:9']) assert.equal(normalizeAddress(junk), 'unknown');
-});
-
-/* ---------------- claims, serving window and purge ---------------- */
-
-async function publishTwoBundles(env) {
-  await storeBlobs(env, blobA, blobB, blobC);
-  const first = bundleOf(sampleManifest([declFile('alex.pink-imp', 'pink_imp', blobA), declFile('alex.pink-imp', 'shared', blobB)]));
-  const second = bundleOf(sampleManifest([declFile('alex.pink-imp', 'shared', blobB), declFile('alex.pink-imp', 'third', blobC)], { build: 2, version: '2.0.0' }));
-  for (const bundle of [first, second]) assert.equal((await fetchWorker(env, putBundleRequest(bundle.text, bundle.hash))).status, 201);
-  return { first, second };
+async function status(env, hashes) {
+  const res = await fetchWorker(env, call('POST', '/mods/units', { body: JSON.stringify({ units: hashes }) }));
+  assert.equal(res.status, 200);
+  return res.json();
 }
 
-function claims(env, hash) {
-  return env.registryStorage.sql.exec('SELECT claims FROM mod_bundle WHERE hash = ?', hash).toArray()[0]?.claims;
+async function claim(env, key, ref, units, secret, rev) {
+  return fetchWorker(env, signedJson(key, '/mods/map/claim', { ref, units, secret, rev }));
 }
 
-test('claim, re-claim with the secret, and release with wrong and right secrets', async () => {
-  const env = await modsEnv();
-  const { first, second } = await publishTwoBundles(env);
-  const made = await fetchWorker(env, postJson('/mods/claim', { ref: 'item-41', bundles: [first.hash] }));
-  assert.equal(made.status, 201);
-  const { claim, secret } = await made.json();
-  assert.match(claim, /^[0-9a-f]{32}$/);
-  assert.match(secret, /^[0-9a-f]{64}$/);
-  assert.equal(claims(env, first.hash), 1);
-  const stored = env.registryStorage.sql.exec('SELECT secret FROM mod_claim').toArray()[0].secret;
-  assert.notEqual(stored, secret);
-  assert.equal(stored, sha(Buffer.from(secret)));
+const SECRET_A = 'a'.repeat(64), SECRET_B = 'b'.repeat(64);
 
-  const other = await fetchWorker(env, postJson('/mods/claim', { ref: 'item-41', bundles: [first.hash] }));
-  assert.equal(other.status, 201, 'a second claimant holds its own claim');
-  const second_ = await other.json();
-  assert.notEqual(second_.claim, claim);
-  assert.equal(claims(env, first.hash), 2);
+function assertSentence(text, what) {
+  assert.ok(typeof text === 'string' && /^[\x20-\x7e]+$/.test(text) && /[.?]$/.test(text), what + ': ' + text);
+}
 
-  const again = await fetchWorker(env, postJson('/mods/claim', { ref: 'item-41', bundles: [second.hash, second.hash], secret }));
-  assert.equal(again.status, 200);
-  assert.deepEqual(await again.json(), { claim, secret });
-  assert.equal(claims(env, first.hash), 1);
-  assert.equal(claims(env, second.hash), 1);
+function admin(env, route, value) {
+  return fetchWorker(env, call('POST', '/mods/admin/' + route, { body: JSON.stringify(value || {}), headers: { Authorization: 'Bearer admin-token' } }));
+}
 
-  assert.equal((await fetchWorker(env, postJson('/mods/claim', { ref: 'item-41', bundles: [first.hash], secret: 'a'.repeat(64) }))).status, 403);
-  assert.equal((await fetchWorker(env, postJson('/mods/claim', { ref: 'item-42', bundles: [first.hash], secret }))).status, 403);
-  const unknown = await fetchWorker(env, postJson('/mods/claim', { ref: 'item-43', bundles: ['d'.repeat(64)] }));
-  assert.equal(unknown.status, 409);
-  assert.deepEqual((await unknown.json()).missing, ['d'.repeat(64)]);
-  for (const body of [{ ref: '', bundles: [first.hash] }, { ref: 'x'.repeat(65), bundles: [first.hash] }, { ref: 'a', bundles: [] },
-    { ref: 'a', bundles: [first.hash], secret: 'short' }, { ref: 'a', bundles: Array(257).fill(first.hash) }]) {
-    assert.equal((await fetchWorker(env, postJson('/mods/claim', body))).status, 400, JSON.stringify(body).slice(0, 80));
+/* ---------------- tests ---------------- */
+
+test('an archive mask names files in the manifest\'s order, bit i of byte i >> 3, and is refused when it does not fit', async () => {
+  const { wantedFiles } = await modsModule;
+  const files = Array.from({ length: 10 }, (_, i) => ({ path: 'f' + i }));
+  const mask = Buffer.from([0b10000101, 0b00000010]).toString('base64url');   /* files 0, 2, 7 and 9 */
+  assert.deepEqual(wantedFiles(files, mask).map(f => f.path), ['f0', 'f2', 'f7', 'f9']);
+  assert.equal(wantedFiles(files, null), files);
+  assert.equal(wantedFiles(files, Buffer.from([1]).toString('base64url')), 'bad');      /* one byte for ten files */
+  assert.equal(wantedFiles(files, 'not+base64url'), 'bad');
+  assert.deepEqual(wantedFiles(files, Buffer.from([0, 0]).toString('base64url')), []);
+});
+
+test('crc32 is the IEEE CRC-32 of any bytes, in any number of pieces', async () => {
+  const { crc32 } = await packModule;
+  for (const n of [0, 1, 7, 8, 9, 63, 4096, 100003]) {
+    const bytes = new Uint8Array(n).map((_, i) => (i * 131 + 7) & 255);
+    assert.equal(crc32(bytes), zlib.crc32(bytes));
+    assert.equal(crc32(bytes.subarray(Math.floor(n / 3)), crc32(bytes.subarray(0, Math.floor(n / 3)))), zlib.crc32(bytes));
   }
-
-  assert.equal((await fetchWorker(env, postJson('/mods/release', { claim, secret: 'b'.repeat(64) }))).status, 403);
-  assert.equal(claims(env, second.hash), 1);
-  assert.equal((await fetchWorker(env, postJson('/mods/release', { claim: 'c'.repeat(32), secret }))).status, 404);
-  assert.equal((await fetchWorker(env, postJson('/mods/release', { claim: 'nothex', secret }))).status, 400);
-  const released = await fetchWorker(env, postJson('/mods/release', { claim, secret }));
-  assert.equal(released.status, 204);
-  assert.equal(claims(env, second.hash), undefined, 'its last release removes the bundle from the index');
-  assert.equal(claims(env, first.hash), 1);
-  assert.equal((await fetchWorker(env, postJson('/mods/release', { claim, secret }))).status, 404);
 });
 
-test('serving is gated by claim count once the one-hour upload window has passed', async () => {
+test('a unit is begun, its missing files sent in one archive, and served: status, manifest, blob with ranges, archive', async () => {
   const env = await modsEnv();
-  const { first, second } = await publishTwoBundles(env);
-  const get = route => fetchWorker(env, call('GET', route));
-  assert.equal((await get('/mods/bundle/' + first.hash)).status, 200, 'fresh bundle serves unclaimed');
-  assert.equal((await get('/mods/blob/' + sha(blobA))).status, 200, 'fresh blob serves unclaimed');
+  const key = makeKey();
+  const unit = makeUnit({ 'entities/tyrant.decl': 'entityDef {}', 'images/skin.bimage': Buffer.alloc(70000, 3), 'virtual-textures/t_sq1.mega2': 'sq1' });
+  assert.deepEqual(await status(env, [unit.hash]), { [unit.hash]: 'missing' });
+  const begin = await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + unit.hash + '/begin', unit.manifest));
+  const first = await begin.json();
+  assert.deepEqual(first.missing.sort(), [...unit.blobs.keys()].sort());
+  assert.equal(first.partSize, 16 * 1024 * 1024);
+  assert.deepEqual(await status(env, [unit.hash]), { [unit.hash]: 'missing' });
+  const archive = unitZip(unit, first.missing);
+  const put = await fetchWorker(env, signedCall(key, 'PUT', '/mods/unit/' + unit.hash + '/archive', archive,
+    { headers: { 'Content-Type': 'application/zip', 'Content-Length': String(archive.length) } }));
+  assert.equal(put.status, 201);
+  assert.deepEqual(await put.json(), { held: true });
+  assert.deepEqual(await status(env, [unit.hash]), { [unit.hash]: 'held' });
 
-  env.clock.offset = 2 * HOUR;
-  for (const object of env.MODS.objects.values()) object.uploaded = new Date(Date.now() - 2 * HOUR);
-  assert.equal((await get('/mods/bundle/' + first.hash)).status, 404);
-  assert.equal((await fetchWorker(env, call('HEAD', '/mods/bundle/' + first.hash))).status, 404);
-  assert.equal((await get('/mods/blob/' + sha(blobA))).status, 404);
+  const manifest = await fetchWorker(env, call('GET', '/mods/unit/' + unit.hash));
+  assert.equal(manifest.status, 200);
+  assert.equal(manifest.headers.get('Content-Type'), 'application/json');
+  assert.ok(manifest.headers.get('Cache-Control').includes('immutable'));
+  assert.equal(sha(Buffer.from(await manifest.arrayBuffer())), unit.hash);
 
-  const { claim, secret } = await (await fetchWorker(env, postJson('/mods/claim', { ref: 'item-7', bundles: [second.hash] }))).json();
-  assert.equal((await get('/mods/bundle/' + second.hash)).status, 200);
-  assert.equal((await get('/mods/blob/' + sha(blobB))).status, 200, 'shared blob served through the claimed bundle');
-  assert.equal((await get('/mods/blob/' + sha(blobC))).status, 200);
-  assert.equal((await get('/mods/blob/' + sha(blobA))).status, 404, 'blob named only by the unclaimed bundle');
-  assert.equal((await fetchWorker(env, call('HEAD', '/mods/blob/' + sha(blobC)))).status, 200);
+  const skin = sha(Buffer.alloc(70000, 3));
+  const blob = await fetchWorker(env, call('GET', '/mods/blob/' + skin));
+  assert.equal(blob.status, 200);
+  assert.deepEqual(Buffer.from(await blob.arrayBuffer()), Buffer.alloc(70000, 3));
+  const tail = await fetchWorker(env, call('GET', '/mods/blob/' + skin, { headers: { Range: 'bytes=69990-' } }));
+  assert.equal(tail.status, 206);
+  assert.equal(tail.headers.get('Content-Range'), 'bytes 69990-69999/70000');
+  assert.equal((await tail.arrayBuffer()).byteLength, 10);
+  assert.equal((await fetchWorker(env, call('GET', '/mods/blob/' + skin, { headers: { Range: 'bytes=70000-' } }))).status, 416);
 
-  env.MODS.log.length = 0;
-  assert.equal((await fetchWorker(env, postJson('/mods/release', { claim, secret }))).status, 204);
-  assert.equal((await get('/mods/bundle/' + second.hash)).status, 404);
-  assert.equal((await get('/mods/blob/' + sha(blobC))).status, 404);
-  const gone = env.MODS.log.filter(([op]) => op === 'delete').map(([, key]) => key);
-  assert.ok(gone.includes('bundle/' + second.hash), 'the last release deletes the bundle object at once');
-  assert.ok(gone.includes('blob/' + sha(blobC)), 'and sweeps the blob only it named');
-  assert.ok(!env.MODS.objects.has('bundle/' + second.hash));
-  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM mod_bundle WHERE hash = ?', second.hash).toArray()[0].n, 0);
-
-  assert.equal((await fetchWorker(env, putBundleRequest(first.text, first.hash))).status, 200);
-  assert.equal((await get('/mods/bundle/' + first.hash)).status, 200, 're-upload reopens the claim window');
+  const zipRes = await fetchWorker(env, call('GET', '/mods/unit/' + unit.hash + '/archive'));
+  assert.equal(zipRes.status, 200);
+  const whole = Buffer.from(await zipRes.arrayBuffer());
+  const entries = unzip(whole);
+  assert.deepEqual(entries.map(e => e.name), ['unit.json', ...unit.files.map(f => f.path)]);
+  assert.deepEqual(entries[0].data, unit.manifest);
+  for (const f of unit.files) assert.equal(sha(entries.find(e => e.name === f.path).data), f.sha256);
+  /* The store's archive is the form its own upload check reads. */
+  const { ArchiveWalker } = await modsModule;
+  const w = new ArchiveWalker(whole.length, { hash: false });
+  w.push(new Uint8Array(whole)); w.finish();
+  assert.equal(w.error, null);
+  /* Any range of it is that range of the whole. */
+  const part = await fetchWorker(env, call('GET', '/mods/unit/' + unit.hash + '/archive', { headers: { Range: 'bytes=100-70100' } }));
+  assert.equal(part.status, 206);
+  assert.deepEqual(Buffer.from(await part.arrayBuffer()), whole.subarray(100, 70101));
 });
 
-test('purge deletes unclaimed bundles before blobs and keeps blobs a claimed bundle names', async () => {
+test('a second unit sharing files sends only the files the store lacks, and each file is stored once', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const shared = Buffer.alloc(5000, 9);
+  const a = makeUnit({ 'entities/a.decl': 'a', 'images/gore.bimage': shared });
+  const b = makeUnit({ 'entities/b.decl': 'b', 'images/gore.bimage': shared });
+  await publishUnit(env, key, a);
+  const first = await publishUnit(env, key, b);
+  assert.deepEqual(first.missing, [sha(Buffer.from('b'))]);
+  const stats = await (await admin(env, 'stats')).json();
+  assert.equal(stats.blobs, 3);
+  assert.equal(stats.units, 2);
+  /* A begin of a unit the store holds says so and sends nothing. */
+  const again = await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + a.hash + '/begin', a.manifest));
+  assert.deepEqual(await again.json(), { held: true });
+  /* A unit of files the store already holds is held at its begin. */
+  const c = makeUnit({ 'entities/c.decl': 'a', 'images/gore.bimage': shared });
+  assert.deepEqual(await publishUnit(env, key, c), { held: true });
+});
+
+test('the begin checks the manifest against its hash and SPEC 3.4, and needs a signature', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const good = makeUnit({ 'entities/x.decl': 'x' });
+  const begin = (hash, bytes, headers) => fetchWorker(env, call('POST', '/mods/unit/' + hash + '/begin', { body: bytes, headers }));
+  let res = await begin(good.hash, good.manifest, {});
+  assert.equal(res.status, 403);
+  assertSentence((await res.json()).error, 'unsigned');
+  res = await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + 'f'.repeat(64) + '/begin', good.manifest));
+  assert.equal(res.status, 422);
+  /* A signature over other bytes. */
+  const other = makeKey();
+  res = await begin(good.hash, good.manifest, { ...signed(other, 'POST', '/mods/unit/' + good.hash + '/begin', Buffer.from('x')), 'X-Publisher-Key': other.pub });
+  assert.equal(res.status, 403);
+  const bad = async (doc, why) => {
+    const bytes = Buffer.from(typeof doc === 'string' ? doc : canonical(doc));
+    const r = await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + sha(bytes) + '/begin', bytes));
+    assert.equal(r.status, 422, why);
+    assertSentence((await r.json()).error, why);
+  };
+  const doc = good.doc;
+  await bad('not json', 'not JSON');
+  await bad({ ...doc, extra: 1 }, 'an unknown key');
+  await bad({ ...doc, format: 2 }, 'an unknown format');
+  await bad({ ...doc, files: [{ path: '../x.decl', sha256: 'a'.repeat(64), size: 1 }] }, 'a climbing path');
+  await bad({ ...doc, files: [{ path: 'Entities/x.decl', sha256: 'a'.repeat(64), size: 1 }] }, 'upper case');
+  await bad({ ...doc, files: [{ path: 'assets/x.decl', sha256: 'a'.repeat(64), size: 1 }] }, 'no mod folder');
+  await bad({ ...doc, files: [{ path: 'entities/a\u0001.decl', sha256: 'a'.repeat(64), size: 1 }] }, 'a control byte');
+  await bad({ ...doc, files: [{ path: 'entities/b.decl', sha256: 'a'.repeat(64), size: 1 }, { path: 'entities/a.decl', sha256: 'b'.repeat(64), size: 1 }] }, 'out of order');
+  await bad({ ...doc, files: [{ path: 'entities/a.decl', sha256: 'a'.repeat(64), size: 1 }, { path: 'entities/b.decl', sha256: 'a'.repeat(64), size: 2 }] }, 'one sha two sizes');
+  await bad({ ...doc, root: { kind: 'weapon', name: 'x' } }, 'a root kind');
+  await bad({ ...doc, game: [{ path: 'generated/x.decl', sha256: 'a'.repeat(64) }] }, 'a pointer without source');
+  await bad({ ...doc, spelled: 'BAD' }, 'a bad namespace');
+});
+
+test('the archive check refuses anything the begun manifest does not say, and keeps nothing it refused', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const unit = makeUnit({ 'entities/x.decl': 'x', 'images/x.bimage': 'pixels', 'scripts/x.lua': 'return 1' });
+  const first = await (await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + unit.hash + '/begin', unit.manifest))).json();
+  const put = (bytes, k = key) => fetchWorker(env, signedCall(k, 'PUT', '/mods/unit/' + unit.hash + '/archive', bytes,
+    { headers: { 'Content-Type': 'application/zip', 'Content-Length': String(bytes.length) } }));
+  const refused = async (bytes, why, code = 422) => {
+    const res = await put(bytes);
+    assert.equal(res.status, code, why);
+    assertSentence((await res.json()).error, why);
+  };
+  await refused(unitZip(unit, first.missing, e => e.name === 'images/x.bimage' ? { ...e, name: 'images/y.bimage' } : e), 'a file not listed');
+  await refused(unitZip(unit, first.missing, e => e.name === 'images/x.bimage' ? { ...e, data: 'pixelz' } : e), 'other bytes');
+  await refused(unitZip(unit, first.missing, e => e.name === 'images/x.bimage' ? { ...e, crc: 1234 } : e), 'a wrong CRC');
+  await refused(unitZip(unit, first.missing, e => e.name === 'unit.json' ? { ...e, data: 'x' } : e), 'another unit.json');
+  await refused(zip(unitZip(unit, []).length ? [{ name: 'entities/x.decl', data: 'x' }] : []), 'no unit.json');
+  /* A forged signature: the archive's hash is not what was signed. */
+  const archive = unitZip(unit, first.missing);
+  const forged = signed(key, 'PUT', '/mods/unit/' + unit.hash + '/archive', Buffer.from('other'));
+  const res = await fetchWorker(env, call('PUT', '/mods/unit/' + unit.hash + '/archive', { body: archive,
+    headers: { ...forged, 'Content-Type': 'application/zip', 'Content-Length': String(archive.length) } }));
+  assert.equal(res.status, 403);
+  assert.equal([...env.MODS.objects.keys()].filter(k => k.startsWith('pack/')).length, 0, 'every refused archive deleted');
+  assert.deepEqual(await status(env, [unit.hash]), { [unit.hash]: 'missing' });
+  /* Lua bytecode is refused (a script is source text). */
+  const compiled = makeUnit({ 'scripts/c.lua': Buffer.from([0x1b, 0x4c, 0x75, 0x61, 0x54, 0]) });
+  const cb = await (await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + compiled.hash + '/begin', compiled.manifest))).json();
+  const cz = unitZip(compiled, cb.missing);
+  const cr = await fetchWorker(env, signedCall(key, 'PUT', '/mods/unit/' + compiled.hash + '/archive', cz, { headers: { 'Content-Type': 'application/zip', 'Content-Length': String(cz.length) } }));
+  assert.equal(cr.status, 422);
+  assertSentence((await cr.json()).error, 'bytecode');
+  /* An archive of only some of the missing files leaves the rest missing; complete says which. */
+  const some = unitZip(unit, [first.missing[0]]);
+  const partial = await put(some);
+  assert.equal(partial.status, 200);
+  assert.equal((await partial.json()).missing.length, first.missing.length - 1);
+  const complete = await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + unit.hash + '/complete', ''));
+  assert.equal(complete.status, 409);
+  assert.equal((await put(unitZip(unit, first.missing.slice(1)))).status, 201);
+  assert.equal((await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + unit.hash + '/complete', ''))).status, 201);
+});
+
+test('a file over one request goes up in parts, resumes, is checked whole and completes its unit', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const big = Buffer.alloc(16 * 1024 * 1024 + 5, 0);
+  for (let i = 0; i < big.length; i += 4096) big[i] = i & 255;
+  const unit = makeUnit({ 'entities/x.decl': 'x', 'virtual-textures/big_sq1.mega2': big });
+  const first = await (await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + unit.hash + '/begin', unit.manifest))).json();
+  const bigSha = sha(big);
+  assert.ok(first.missing.includes(bigSha));
+  /* Parts of a file no begun unit needs are refused. */
+  let res = await fetchWorker(env, signedJson(key, '/mods/blob/' + 'c'.repeat(64) + '/parts', { size: 100 }));
+  assert.equal(res.status, 409);
+  res = await fetchWorker(env, signedJson(key, '/mods/blob/' + bigSha + '/parts', { size: big.length }));
+  assert.equal(res.status, 201);
+  const session = await res.json();
+  assert.equal(session.parts, 2);
+  const sendPart = n => {
+    const bytes = big.subarray((n - 1) * session.partSize, n * session.partSize);
+    return fetchWorker(env, call('PUT', '/mods/blob/' + bigSha + '/parts/' + n, { body: bytes,
+      headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(bytes.length), 'X-Blob-Size': String(big.length) } }));
+  };
+  assert.equal((await sendPart(1)).status, 200);
+  res = await fetchWorker(env, signedJson(key, '/mods/blob/' + bigSha + '/parts', { size: big.length }));
+  assert.deepEqual((await res.json()).have, [1]);
+  assert.equal((await fetchWorker(env, signedJson(key, '/mods/blob/' + bigSha + '/complete', { size: big.length }))).status, 409);
+  assert.equal((await sendPart(2)).status, 200);
+  res = await fetchWorker(env, signedJson(key, '/mods/blob/' + bigSha + '/complete', { size: big.length }));
+  assert.equal(res.status, 201, await res.clone().text());
+  const rest = first.missing.filter(s => s !== bigSha);
+  assert.equal((await fetchWorker(env, signedCall(key, 'PUT', '/mods/unit/' + unit.hash + '/archive', unitZip(unit, rest),
+    { headers: { 'Content-Type': 'application/zip', 'Content-Length': String(unitZip(unit, rest).length) } }))).status, 201);
+  assert.deepEqual(await status(env, [unit.hash]), { [unit.hash]: 'held' });
+  const blob = await fetchWorker(env, call('GET', '/mods/blob/' + bigSha, { headers: { Range: 'bytes=16777215-16777220' } }));
+  assert.deepEqual(Buffer.from(await blob.arrayBuffer()), big.subarray(16777215, 16777221));
+  const zipRes = await fetchWorker(env, call('GET', '/mods/unit/' + unit.hash + '/archive'));
+  const entries = unzip(Buffer.from(await zipRes.arrayBuffer()));
+  assert.equal(sha(entries.find(e => e.name === 'virtual-textures/big_sq1.mega2').data), bigSha);
+});
+
+test('claims: rev 1 makes, rev + 1 replaces, a stale rev and a missing unit change nothing; release', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const a = makeUnit({ 'entities/a.decl': 'a' }), b = makeUnit({ 'entities/b.decl': 'b' });
+  await publishUnit(env, key, a);
+  let res = await claim(env, key, 'item-1', [a.hash, b.hash], SECRET_A, 1);
+  assert.equal(res.status, 409);
+  assert.deepEqual((await res.json()).missing, [b.hash]);
+  await publishUnit(env, key, b);
+  res = await claim(env, key, 'item-1', [a.hash, b.hash], SECRET_A, 2);
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).rev, 0);
+  res = await claim(env, key, 'item-1', [a.hash, b.hash], SECRET_A, 1);
+  assert.equal(res.status, 201);
+  assert.equal((await res.json()).rev, 1);
+  res = await claim(env, key, 'item-1', [a.hash], SECRET_A, 1);
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).rev, 1);
+  /* An unsigned claim is refused. */
+  res = await fetchWorker(env, call('POST', '/mods/map/claim', { body: JSON.stringify({ ref: 'item-1', units: [a.hash], secret: SECRET_A, rev: 2 }) }));
+  assert.equal(res.status, 403);
+  /* The republish leaves b out: b starts its deletion delay and is still served during it. */
+  res = await claim(env, key, 'item-1', [a.hash], SECRET_A, 2);
+  assert.equal(res.status, 200);
+  assert.equal(env.storage.sql.exec('SELECT claims, unclaimed_at FROM unit WHERE hash = ?', b.hash).toArray()[0].claims, 0);
+  assert.deepEqual(await status(env, [b.hash]), { [b.hash]: 'held' });
+  /* A release needs the secret and rev + 1. */
+  res = await fetchWorker(env, signedJson(key, '/mods/map/release', { ref: 'item-1', secret: SECRET_B, rev: 3 }));
+  assert.equal(res.status, 404);
+  res = await fetchWorker(env, signedJson(key, '/mods/map/release', { ref: 'item-1', secret: SECRET_A, rev: 2 }));
+  assert.equal(res.status, 409);
+  res = await fetchWorker(env, signedJson(key, '/mods/map/release', { ref: 'item-1', secret: SECRET_A, rev: 3 }));
+  assert.equal(res.status, 204);
+});
+
+test('the deletion delay: an unclaimed unit is kept and served 24 hours, a claim within it keeps it, then purge deletes it', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const shared = Buffer.from('shared bytes');
+  const a = makeUnit({ 'entities/a.decl': 'a', 'images/s.bimage': shared });
+  const b = makeUnit({ 'entities/b.decl': 'b', 'images/s.bimage': shared });
+  await publishUnit(env, key, a);
+  await publishUnit(env, key, b);
+  assert.equal((await claim(env, key, 'map-b', [b.hash], SECRET_B, 1)).status, 201);
   const { purgeMods } = await modsModule;
-  const env = await modsEnv();
-  const { first, second } = await publishTwoBundles(env);
-  const { claim, secret } = await (await fetchWorker(env, postJson('/mods/claim', { ref: 'item-9', bundles: [second.hash] }))).json();
-  const orphan = Buffer.from('orphan blob');
-  await storeBlobs(env, orphan);
-
-  assert.deepEqual(await purgeMods(env), { bundles: 0, blobs: 0 }, 'nothing is purged inside the window');
-  env.clock.offset = 2 * HOUR;
-  env.MODS.log.length = 0;
-  assert.deepEqual(await purgeMods(env), { bundles: 1, blobs: 2 });
-  const deletes = env.MODS.log.filter(([op]) => op === 'delete').map(([, key]) => key);
-  assert.deepEqual(deletes.slice(0, 1), ['bundle/' + first.hash]);
-  assert.deepEqual(deletes.slice(1).sort(), ['blob/' + sha(blobA), 'blob/' + sha(orphan)].sort());
-  assert.deepEqual([...env.MODS.objects.keys()].sort(),
-    ['blob/' + sha(blobB), 'blob/' + sha(blobC), 'bundle/' + second.hash].sort());
-  assert.deepEqual(await (await fetchWorker(env, postJson('/mods/missing', { blobs: [sha(blobA), sha(blobB)] }))).json(),
-    { missing: [sha(blobA)] });
-
-  env.MODS.log.length = 0;
-  assert.equal((await fetchWorker(env, postJson('/mods/release', { claim, secret }))).status, 204);
-  const order = env.MODS.log.filter(([op]) => op === 'delete').map(([, key]) => key.split('/')[0]);
-  assert.deepEqual(order, ['bundle', 'blob', 'blob'], 'the release itself deletes the bundle, then the blobs nothing names');
-  assert.equal(env.MODS.objects.size, 0);
-  assert.deepEqual(await purgeMods(env), { bundles: 0, blobs: 0 }, 'nothing is left for the purge');
-  assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM mod_blob').toArray()[0].n, 0);
+  env.clock.offset = 23 * HOUR;
+  await purgeMods(env);
+  assert.deepEqual(await status(env, [a.hash]), { [a.hash]: 'held' }, 'kept within the delay');
+  /* A claim within the delay clears it. */
+  assert.equal((await claim(env, key, 'map-a', [a.hash], SECRET_A, 1)).status, 201);
+  env.clock.offset = 49 * HOUR;
+  await purgeMods(env);
+  assert.deepEqual(await status(env, [a.hash, b.hash]), { [a.hash]: 'held', [b.hash]: 'held' });
+  /* Unpublish map-a: a is deleted at the first purge after 24 hours; the shared file stays for b. */
+  assert.equal((await fetchWorker(env, signedJson(key, '/mods/map/release', { ref: 'map-a', secret: SECRET_A, rev: 2 }))).status, 204);
+  env.clock.offset = 49 * HOUR + DAY - 1000;
+  await purgeMods(env);
+  assert.deepEqual(await status(env, [a.hash]), { [a.hash]: 'held' });
+  env.clock.offset = 49 * HOUR + DAY + 1000;
+  const purged = await purgeMods(env);
+  assert.equal(purged.units, 1);
+  assert.deepEqual(await status(env, [a.hash, b.hash]), { [a.hash]: 'missing', [b.hash]: 'held' });
+  assert.equal((await fetchWorker(env, call('GET', '/mods/unit/' + a.hash))).status, 404);
+  assert.equal((await fetchWorker(env, call('GET', '/mods/blob/' + sha(shared)))).status, 200);
+  assert.equal((await fetchWorker(env, call('GET', '/mods/blob/' + sha(Buffer.from('a'))))).status, 404);
+  /* A unit begun and never claimed goes the same way. */
+  const c = makeUnit({ 'entities/c.decl': 'c' });
+  await publishUnit(env, key, c);
+  env.clock.offset += DAY + 1000;
+  await purgeMods(env);
+  assert.deepEqual(await status(env, [c.hash]), { [c.hash]: 'missing' });
+  /* Packs nothing names any more are deleted. */
+  const stats = await (await admin(env, 'stats')).json();
+  assert.equal(stats.units, 1);
+  assert.equal(stats.blobs, 2);
 });
 
-test('blobs marked for purge read missing, refuse new bundles and ask uploads to retry', async () => {
-  const registry = await registryModule;
-  const env = await modsEnv();
-  await storeBlobs(env, blobA);
-  env.clock.offset = 2 * HOUR;
-  assert.deepEqual(registry.purgeBlobs(env.registryStorage, env.clock.now(), 10), [sha(blobA)]);
-  assert.deepEqual(await (await fetchWorker(env, postJson('/mods/missing', { blobs: [sha(blobA)] }))).json(), { missing: [sha(blobA)] });
-  const { text, hash } = bundleOf(sampleManifest([declFile('alex.pink-imp', 'pink_imp', blobA)]));
-  const refused = await fetchWorker(env, putBundleRequest(text, hash));
-  assert.equal(refused.status, 409);
-  assert.deepEqual((await refused.json()).missing, [sha(blobA)]);
-  const retry = await fetchWorker(env, putBlobRequest(blobA));
-  assert.equal(retry.status, 503);
-  assert.equal(retry.headers.get('Retry-After'), '60');
-  assert.deepEqual(registry.purgeBlobs(env.registryStorage, env.clock.now(), 10), [sha(blobA)], 'interrupted purge is retried');
-  registry.finishBlobs(env.registryStorage, [sha(blobA)]);
-  env.MODS.objects.delete('blob/' + sha(blobA));
-  assert.equal((await fetchWorker(env, putBlobRequest(blobA))).status, 201);
-  assert.equal((await fetchWorker(env, putBundleRequest(text, hash))).status, 201);
+test('compaction: slack is counted where blobs leave or arrive twice; a switch checks what was copied; the old object waits a delay', async () => {
+  const r = await registryModule;
+  const s = sqliteStorage();
+  r.initializeRegistry(s);
+  const h = c => c.repeat(64);
+  const S = h('5'), A1 = h('a'), C1 = h('c');
+  const unit = (hash, files) => ({ hash, manifest: '{}', mlen: 2, size: 0, files, rootKind: 'entity', rootName: 'x' });
+  const blob = (sha, at, size) => ({ sha, size, crc: 1, at, hlen: 40, hdr: '' });
+  const packA = 'pack/' + h('1') + '/' + '0'.repeat(32), packC = 'pack/' + h('3') + '/' + '0'.repeat(32);
+  r.beginUnit(s, unit(h('1'), [[A1, 10], [S, 100]]), 0);
+  assert.equal(r.commitUnitArchive(s, h('1'), packA, 500, [blob(A1, 60, 10), blob(S, 110, 100)], 0).held, true);
+  r.beginUnit(s, unit(h('2'), [[S, 100]]), 0);
+  /* A blob that arrives twice is slack in the later pack. */
+  r.beginUnit(s, unit(h('3'), [[C1, 7], [S, 100]]), 0);
+  r.commitUnitArchive(s, h('3'), packC, 400, [blob(C1, 60, 7), blob(S, 107, 100)], 0);
+  assert.equal(r.storeStats(s).slackBytes, 140);
+  /* Unit 1 purged: A1's header and bytes are slack in packA, which S keeps. */
+  r.claimUnits(s, { ref: 'm', units: [h('2'), h('3')], secretHash: h('e'), rev: 1, id: 'f'.repeat(32) }, 0);
+  assert.equal(r.purgeUnits(s, DAY + 1, 10).units, 1);
+  assert.equal(r.storeStats(s).slackBytes, 140 + 50);
+  const plan = r.compactionPlan(s, 10);
+  const a = plan.find(p => p.object === packA);
+  assert.deepEqual(a.blobs, [{ sha: S, at: 110, hlen: 40, size: 100 }]);
+  const newA = packA + '.' + 'b'.repeat(32);
+  /* A copy of what the pack no longer holds is not switched in: it is queued for deletion. */
+  const stale = packA + '.' + 'd'.repeat(32);
+  assert.deepEqual(r.switchPack(s, { pack: a.pack, object: packA, newObject: stale, newSize: 140, blobs: [{ sha: S, at: 999, newAt: 0 }] }, DAY, 1000),
+    { switched: false, freed: 0, discard: [stale] });
+  assert.equal(r.blobLocation(s, S).object, packA);
+  const done = r.switchPack(s, { pack: a.pack, object: packA, newObject: newA, newSize: 140, blobs: [{ sha: S, at: 110, newAt: 0 }] }, DAY, 1000);
+  assert.deepEqual(done, { switched: true, freed: 360, discard: [] });
+  assert.deepEqual(r.blobLocation(s, S), { object: newA, at: 40, size: 100, crc: 1 });
+  assert.deepEqual(r.unnamedObjects(s, [packA, newA]), [], 'the old object is named while it waits');
+  assert.equal(r.dueDead(s, DAY + 999, 10), 0);
+  assert.equal(r.dueDead(s, DAY + 1000, 10), 1);
+  assert.ok(r.deadObjects(s, 10).includes(packA));
+  assert.equal(r.storeStats(s).slackBytes, 140, "packC's copy of S is still slack until it is compacted");
 });
 
-/* ---------------- CORS and configuration ---------------- */
-
-test('mod routes keep the site CORS allowlist and need no Origin', async () => {
-  const env = await modsEnv();
-  const native = await fetchWorker(env, putBlobRequest(blobA));
-  assert.equal(native.status, 201);
-  assert.equal(native.headers.get('Access-Control-Allow-Origin'), null);
-  const site = await fetchWorker(env, call('GET', '/mods/blob/' + sha(blobA), { headers: { Origin: 'https://www.snapmapplus.com' } }));
-  assert.equal(site.headers.get('Access-Control-Allow-Origin'), 'https://www.snapmapplus.com');
-  const foreign = await fetchWorker(env, call('GET', '/mods/blob/' + sha(blobA), { headers: { Origin: 'https://evil.example' } }));
-  assert.equal(foreign.status, 200);
-  assert.equal(foreign.headers.get('Access-Control-Allow-Origin'), null);
-  const unconfigured = await modsEnv();
-  delete unconfigured.MODS;
-  assert.equal((await fetchWorker(unconfigured, call('GET', '/mods/blob/' + sha(blobA)))).status, 503);
-});
-
-test('the maintainer reset route is hidden without the secret and empties the store with it', async () => {
-  const env = await modsEnv();
-  await publishTwoBundles(env);
-  await (await fetchWorker(env, postJson('/mods/claim', { ref: 'item-3', bundles: [[...env.MODS.objects.keys()].find(k => k.startsWith('bundle/')).slice(7)] }))).json();
-  assert.equal((await fetchWorker(env, call('POST', '/mods/admin/reset'))).status, 404, 'no secret configured');
-  env.MODS_ADMIN_TOKEN = 'correct horse battery staple';
-  assert.equal((await fetchWorker(env, call('POST', '/mods/admin/reset'))).status, 403);
-  assert.equal((await fetchWorker(env, call('POST', '/mods/admin/reset', { headers: { Authorization: 'Bearer nope' } }))).status, 403);
-  assert.equal((await fetchWorker(env, call('GET', '/mods/admin/reset'))).status, 405);
-  const response = await fetchWorker(env, call('POST', '/mods/admin/reset', { headers: { Authorization: 'Bearer correct horse battery staple' } }));
-  assert.equal(response.status, 200);
-  const body = await response.json();
-  assert.deepEqual(body.deleted, { blobs: 3, bundles: 2 });
-  assert.equal(body.index.mod_claim, 1);
-  assert.equal(env.MODS.objects.size, 0);
-  for (const table of ['mod_blob', 'mod_bundle', 'mod_bundle_blob', 'mod_claim', 'mod_claim_bundle']) {
-    assert.equal(env.registryStorage.sql.exec('SELECT count(*) AS n FROM ' + table).toArray()[0].n, 0, table);
+test('the deletion delay is MODS_DELETE_DELAY_MS only when it is a positive whole number, else 24 hours', async () => {
+  const { deleteDelayMs, DELETE_DELAY_MS } = await registryModule;
+  assert.equal(DELETE_DELAY_MS, DAY);
+  for (const unset of [undefined, {}, { MODS_DELETE_DELAY_MS: '' }, { MODS_DELETE_DELAY_MS: '0' }, { MODS_DELETE_DELAY_MS: '-5' },
+    { MODS_DELETE_DELAY_MS: '1.5' }, { MODS_DELETE_DELAY_MS: '60s' }, { MODS_DELETE_DELAY_MS: 0 }, { MODS_DELETE_DELAY_MS: NaN }]) {
+    assert.equal(deleteDelayMs(unset), DAY, JSON.stringify(unset));
   }
+  assert.equal(deleteDelayMs({ MODS_DELETE_DELAY_MS: '60000' }), 60000);
+  assert.equal(deleteDelayMs({ MODS_DELETE_DELAY_MS: ' 60000\n' }), 60000);
+  assert.equal(deleteDelayMs({ MODS_DELETE_DELAY_MS: 60000 }), 60000);
+});
+
+test('a remix by another publisher claims the same unit; each claim keeps it; a deleted unit is uploaded again', async () => {
+  const env = await modsEnv();
+  const author = makeKey(), player = makeKey();
+  const tyrant = makeUnit({ 'entities/tyrant.decl': 'tyrant', 'images/t.bimage': Buffer.alloc(3000, 1) });
+  await publishUnit(env, author, tyrant);
+  assert.equal((await claim(env, author, 'original', [tyrant.hash], SECRET_A, 1)).status, 201);
+  /* The remix: the store holds the unit, so nothing uploads. */
+  assert.deepEqual(await publishUnit(env, player, tyrant), { held: true });
+  assert.equal((await claim(env, player, 'remix', [tyrant.hash], SECRET_B, 1)).status, 201);
+  assert.equal(env.storage.sql.exec('SELECT claims FROM unit WHERE hash = ?', tyrant.hash).toArray()[0].claims, 2);
+  assert.equal((await fetchWorker(env, signedJson(author, '/mods/map/release', { ref: 'original', secret: SECRET_A, rev: 2 }))).status, 204);
+  const { purgeMods } = await modsModule;
+  env.clock.offset = 2 * DAY;
+  await purgeMods(env);
+  assert.deepEqual(await status(env, [tyrant.hash]), { [tyrant.hash]: 'held' });
+  assert.equal((await fetchWorker(env, signedJson(player, '/mods/map/release', { ref: 'remix', secret: SECRET_B, rev: 2 }))).status, 204);
+  env.clock.offset = 4 * DAY;
+  await purgeMods(env);
+  assert.deepEqual(await status(env, [tyrant.hash]), { [tyrant.hash]: 'missing' });
+  /* Someone who kept the map republishes it: the unit uploads again from their copy. */
+  const first = await publishUnit(env, player, tyrant);
+  assert.equal(first.missing.length, 2);
+  assert.equal((await claim(env, player, 'remix-2', [tyrant.hash], SECRET_B, 1)).status, 201);
+});
+
+test('moderation removes a unit: 451 everywhere, no upload puts it back, a claim keeps the rest; unblock', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const bad = makeUnit({ 'entities/bad.decl': 'bad' }), good = makeUnit({ 'entities/good.decl': 'good' });
+  await publishUnit(env, key, bad);
+  await publishUnit(env, key, good);
+  assert.equal((await claim(env, key, 'm', [bad.hash, good.hash], SECRET_A, 1)).status, 201);
+  assert.equal((await fetchWorker(env, call('POST', '/mods/admin/block', { body: JSON.stringify({ unit: bad.hash }) }))).status, 403, 'refused without the token');
+  const blocked = await admin(env, 'block', { unit: bad.hash, reason: 'test' });
+  assert.equal(blocked.status, 200);
+  assert.deepEqual(await status(env, [bad.hash, good.hash]), { [bad.hash]: 'removed', [good.hash]: 'held' });
+  assert.equal((await fetchWorker(env, call('GET', '/mods/unit/' + bad.hash))).status, 451);
+  assert.equal((await fetchWorker(env, call('GET', '/mods/unit/' + bad.hash + '/archive'))).status, 451);
+  assert.equal((await fetchWorker(env, call('GET', '/mods/blob/' + sha(Buffer.from('bad'))))).status, 404);
+  const again = await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + bad.hash + '/begin', bad.manifest));
+  assert.equal(again.status, 451);
+  assertSentence((await again.json()).error, 'blocked begin');
+  const res = await claim(env, key, 'm', [bad.hash, good.hash], SECRET_A, 2);
+  assert.equal(res.status, 451);
+  const body = await res.json();
+  assert.deepEqual(body.removed, [bad.hash]);
+  assert.equal(body.rev, 2);
+  assert.equal((await admin(env, 'unblock', { unit: bad.hash })).status, 200);
+  assert.deepEqual(await status(env, [bad.hash]), { [bad.hash]: 'missing' });
+  /* release-ref: every claim of one item. */
+  assert.deepEqual(await (await admin(env, 'release-ref', { ref: 'm' })).json(), { claims: 1 });
+});
+
+test('the account name binds first come, first served; forget-key frees it', async () => {
+  const env = await modsEnv();
+  const alice = makeKey(), other = makeKey();
+  const u = makeUnit({ 'entities/n.decl': 'n' });
+  await fetchWorker(env, signedCall(alice, 'POST', '/mods/unit/' + u.hash + '/begin', u.manifest, { name: 'Ålice' }));
+  const row = k => env.storage.sql.exec('SELECT display FROM publisher_name WHERE key = ?', k.pub).toArray()[0]?.display ?? null;
+  assert.equal(row(alice), 'Ålice');
+  await fetchWorker(env, signedCall(other, 'POST', '/mods/unit/' + u.hash + '/begin', u.manifest, { name: 'ålice' }));
+  assert.equal(row(other), null, 'a name another key holds is not bound');
+  /* A key presenting a new free name binds it and releases its old one. */
+  await fetchWorker(env, signedCall(alice, 'POST', '/mods/unit/' + u.hash + '/begin', u.manifest, { name: 'Alice2' }));
+  assert.equal(row(alice), 'Alice2');
+  await fetchWorker(env, signedCall(other, 'POST', '/mods/unit/' + u.hash + '/begin', u.manifest, { name: 'ålice' }));
+  assert.equal(row(other), 'ålice');
+  /* The owner forgets a key: its name is free; its claims stay. */
+  await publishUnit(env, other, u);
+  assert.equal((await claim(env, other, 'x', [u.hash], SECRET_A, 1)).status, 201);
+  const forgot = await (await admin(env, 'forget-key', { key: other.pub })).json();
+  assert.deepEqual(forgot, { forgotten: true, name: 'ålice' });
+  assert.equal(env.storage.sql.exec('SELECT count(*) AS n FROM map_claim').toArray()[0].n, 1);
+  await fetchWorker(env, signedCall(alice, 'POST', '/mods/unit/' + u.hash + '/begin', u.manifest, { name: 'Ålice' }));
+  assert.equal(row(alice), 'Ålice');
+  /* Signed out: no name, nothing changes. */
+  await fetchWorker(env, signedCall(other, 'POST', '/mods/unit/' + u.hash + '/begin', u.manifest));
+  assert.equal(row(other), null);
+});
+
+test('asked paths: a well-formed path the unit lacks, at most 256 per unit; the publisher reads them by claim', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const u = makeUnit({ 'entities/a.decl': 'a' }, { name: 'entities/a' });
+  await publishUnit(env, key, u);
+  let from = 0;
+  const ask = p => fetchWorker(env, call('POST', '/mods/unit/' + u.hash + '/asked', { body: JSON.stringify({ path: p }), headers: { 'CF-Connecting-IP': '192.0.2.' + (from++ % 250) } }));
+  assert.equal((await ask('materials/a_skin.decl')).status, 204);
+  assert.equal((await ask('entities/a.decl')).status, 400, 'the unit holds it');
+  assert.equal((await ask('../x')).status, 400);
+  assert.equal((await ask('generated/decls/x.decl')).status, 400, 'not a mod path');
+  assert.equal((await fetchWorker(env, call('POST', '/mods/unit/' + 'e'.repeat(64) + '/asked', { body: JSON.stringify({ path: 'images/x.bimage' }) }))).status, 404);
+  for (let i = 0; i < 300; i++) await ask('images/m' + i + '.bimage');
+  assert.equal(env.storage.sql.exec('SELECT count(*) AS n FROM asked').toArray()[0].n, 256);
+  assert.equal((await claim(env, key, 'm', [u.hash], SECRET_A, 1)).status, 201);
+  const list = await fetchWorker(env, signedJson(key, '/mods/asked', { claims: [{ ref: 'm', secret: SECRET_A }, { ref: 'other', secret: SECRET_B }] }));
+  const got = await list.json();
+  assert.equal(got.asked.length, 256);
+  assert.deepEqual(got.asked[0], { unit: u.hash, root: 'entities/a', path: 'materials/a_skin.decl' });
+});
+
+test('per-key and per-address limits: a key that spent its hour is refused with Retry-After, another is not', async () => {
+  const env = await modsEnv();
+  const a = makeKey(), b = makeKey();
+  for (let i = 0; i < 256; i++) {
+    const res = await fetchWorker(env, signedJson(a, '/mods/map/release', { ref: 'r' + i, secret: SECRET_A, rev: 1 }));
+    assert.equal(res.status, 404);
+  }
+  const over = await fetchWorker(env, signedJson(a, '/mods/map/release', { ref: 'r', secret: SECRET_A, rev: 1 }));
+  assert.equal(over.status, 429);
+  assert.ok(Number(over.headers.get('Retry-After')) > 0);
+  /* The address spent its 256 too; from another address the second key goes through. */
+  const res = await fetchWorker(env, signedJson(b, '/mods/map/release', { ref: 'r', secret: SECRET_A, rev: 1 }, { headers: { 'CF-Connecting-IP': '198.51.100.9' } }));
+  assert.equal(res.status, 404);
+  assert.ok(env.names.some(n => n.startsWith('mods-key:')) && env.names.every(n => !n.includes(a.pub)), 'keys are hashed in quota names');
+});
+
+test('the retired routes answer 410 with the sentence for an old Snapmap+', async () => {
+  const env = await modsEnv();
+  const { RETIRED } = await modsModule;
+  for (const [method, route] of [['GET', '/mods/build/' + 'a'.repeat(64)], ['PUT', '/mods/build/' + 'a'.repeat(64)], ['POST', '/mods/claim'],
+    ['POST', '/mods/release'], ['PUT', '/mods/blob/' + 'a'.repeat(64)], ['GET', '/mods/bundle/x'], ['POST', '/mods/missing'],
+    ['POST', '/mods/author/x/key']]) {
+    const res = await fetchWorker(env, call(method, route, { body: method === 'GET' ? undefined : '{}' }));
+    assert.equal(res.status, 410, route);
+    assert.equal((await res.json()).error, RETIRED);
+  }
+});
+
+test('every refusal on the unit routes is one plain sentence', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const h = 'd'.repeat(64);
+  const cases = [
+    call('GET', '/mods/unit/' + h), call('GET', '/mods/unit/' + h + '/archive'), call('GET', '/mods/blob/' + h),
+    call('POST', '/mods/units', { body: '{"units":"x"}' }), call('POST', '/mods/units', { body: JSON.stringify({ units: Array(4097).fill(h) }) }),
+    call('GET', '/mods/unit/' + h.toUpperCase()), call('DELETE', '/mods/unit/' + h), call('POST', '/mods/unit/' + h + '/complete'),
+    signedCall(key, 'PUT', '/mods/unit/' + h + '/archive', 'x', { headers: { 'Content-Type': 'text/plain' } }),
+    signedCall(key, 'POST', '/mods/unit/' + h + '/complete', ''),
+    signedJson(key, '/mods/map/claim', { ref: '', units: [], secret: 'x', rev: 0 }),
+    signedJson(key, '/mods/map/claim', { ref: 'r', units: ['x'], secret: SECRET_A, rev: 1 }),
+    signedJson(key, '/mods/map/release', { ref: 'r', secret: 'short', rev: 1 }),
+    signedJson(key, '/mods/asked', { claims: 'x' }), call('POST', '/mods/admin/stats', { headers: { Authorization: 'Bearer wrong' } }),
+    call('GET', '/mods/nothing'),
+  ];
+  for (const req of cases) {
+    const res = await fetchWorker(env, req);
+    assert.ok(res.status >= 400, req.url);
+    assertSentence((await res.json()).error, req.method + ' ' + req.url);
+  }
+});
+
+test('the oldest product version the store serves rides on every answer when it is set (D41)', async () => {
+  const { MINIMUM_HEADER } = await modsModule;
+  const plain = await modsEnv();
+  const none = await fetchWorker(plain, call('POST', '/mods/units', { body: '{"units":[]}' }));
+  assert.equal(none.headers.get(MINIMUM_HEADER), null);
+  const env = await modsEnv({ MODS_MINIMUM_VERSION: '1.0.2' });
+  const ok = await fetchWorker(env, call('POST', '/mods/units', { body: JSON.stringify({ units: ['d'.repeat(64)] }) }));
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get(MINIMUM_HEADER), '1.0.2');
+  const missing = await fetchWorker(env, call('GET', '/mods/unit/' + 'd'.repeat(64)));
+  assert.equal(missing.status, 404);
+  assert.equal(missing.headers.get(MINIMUM_HEADER), '1.0.2');
+  const retired = await fetchWorker(env, call('POST', '/mods/claim', { body: '{}' }));
+  assert.equal(retired.status, 410);
+  assert.equal(retired.headers.get(MINIMUM_HEADER), '1.0.2');
+  const bad = await modsEnv({ MODS_MINIMUM_VERSION: 'soon' });
+  assert.equal((await fetchWorker(bad, call('POST', '/mods/units', { body: '{"units":[]}' }))).headers.get(MINIMUM_HEADER), null);
+});
+
+test('a request its key did not sign spends nothing of that key\'s hour (B10)', async () => {
+  const env = await modsEnv();
+  const a = makeKey(), forger = makeKey();
+  /* Signed by another key, under a's name: refused, and a's quota object is never charged. */
+  for (let i = 0; i < 300; i++) {
+    const req = signedJson(forger, '/mods/map/claim', { ref: 'r' + i, units: [], secret: SECRET_A, rev: 1 });
+    req.headers.set('X-Publisher-Key', a.pub);
+    const res = await fetchWorker(env, req);
+    assert.equal(res.status, 403);
+    assertSentence((await res.json()).error, 'forged claim');
+  }
+  const res = await fetchWorker(env, signedJson(a, '/mods/map/release', { ref: 'r', secret: SECRET_A, rev: 1 },
+    { headers: { 'CF-Connecting-IP': '198.51.100.10' } }));
+  assert.equal(res.status, 404, 'a\'s own release still has its hour');
+});
+
+test('a claim the registry made is answered as made though recording its publisher failed (B10)', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const unit = makeUnit({ 'entities/b10.decl': 'b10' });
+  await publishUnit(env, key, unit);
+  const stub = env.UNIT_REGISTRY.get();
+  const original = stub.publisherSeen;
+  stub.publisherSeen = async () => { throw new Error('storage unavailable'); };
+  try {
+    const res = await fetchWorker(env, signedJson(key, '/mods/map/claim', { ref: 'map-b10', units: [unit.hash], secret: SECRET_A, rev: 1 }));
+    assert.equal(res.status, 201);
+    const rel = await fetchWorker(env, signedJson(key, '/mods/map/release', { ref: 'map-b10', secret: SECRET_A, rev: 2 }));
+    assert.equal(rel.status, 204);
+  } finally { stub.publisherSeen = original; }
+});
+
+test('the body reader\'s refusals reach a publisher as sentences, and a completion body is small', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const h = 'e'.repeat(64);
+  const big = Buffer.alloc(70000, 32);
+  const complete = await fetchWorker(env, signedCall(key, 'POST', '/mods/unit/' + h + '/complete', big));
+  assert.equal(complete.status, 413);
+  assertSentence((await complete.json()).error, 'a large completion body');
+  const badLength = call('POST', '/mods/map/claim', { body: '{}', headers: { 'Content-Length': 'many' } });
+  const res = await fetchWorker(env, badLength);
+  assert.ok(res.status >= 400);
+  assertSentence((await res.json()).error, 'a bad Content-Length');
+});
+
+test('a pack found missing breaks its files until an upload repairs them', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const u = makeUnit({ 'entities/r.decl': 'r', 'images/r.bimage': 'rr' });
+  await publishUnit(env, key, u);
+  assert.equal((await claim(env, key, 'r', [u.hash], SECRET_A, 1)).status, 201);
+  const packKey = [...env.MODS.objects.keys()].find(k => k.startsWith('pack/'));
+  env.MODS.objects.delete(packKey);
+  assert.equal((await fetchWorker(env, call('GET', '/mods/blob/' + sha(Buffer.from('rr'))))).status, 404);
+  assert.deepEqual(await status(env, [u.hash]), { [u.hash]: 'missing' });
+  const first = await publishUnit(env, key, u);
+  assert.equal(first.missing.length, 2);
+  assert.deepEqual(await status(env, [u.hash]), { [u.hash]: 'held' });
+  assert.equal((await claim(env, key, 'r', [u.hash], SECRET_A, 2)).status, 200);
+});
+
+test('the unit registry refuses an incompatible database without changing its rows or version', async () => {
+  const r = await registryModule;
+  for (const version of [null, '3', '6']) {
+    const storage = sqliteStorage();
+    try {
+      storage.sql.exec('CREATE TABLE mod_claim (id TEXT PRIMARY KEY)');
+      storage.sql.exec("INSERT INTO mod_claim VALUES ('old-claim')");
+      if (version !== null) {
+        storage.sql.exec('CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+        storage.sql.exec("INSERT INTO store_meta VALUES ('schema', ?)", version);
+      }
+      const schema = () => storage.sql.exec("SELECT * FROM sqlite_master ORDER BY name").toArray();
+      const before = schema();
+      assert.throws(() => r.initializeRegistry(storage), /unexpected unit registry schema/i);
+      assert.deepEqual(schema(), before);
+      assert.equal(storage.sql.exec('SELECT id FROM mod_claim').toArray()[0].id, 'old-claim');
+      if (version !== null) assert.equal(storage.sql.exec('SELECT value FROM store_meta').toArray()[0].value, version);
+    } finally { storage.db.close(); }
+  }
+});
+
+test('bulk reset and manual purge are unavailable even with the maintainer token', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const unit = makeUnit({ 'entities/z.decl': 'z' });
+  await publishUnit(env, key, unit);
+  await claim(env, key, 'published', [unit.hash], SECRET_A, 1);
+  const snapshot = async () => (await admin(env, 'stats')).json();
+  const before = await snapshot();
+  assert.equal(before.claims, 1);
+  assert.equal(before.publishers, 1);
+  const objects = [...env.MODS.objects.keys()];
+  for (const route of ['reset', 'purge']) assert.equal((await admin(env, route)).status, 404);
+  assert.deepEqual(await snapshot(), before);
+  assert.deepEqual([...env.MODS.objects.keys()], objects);
+});
+
+test('a unit archive is read in a few long ranges of its packs, whatever its number of files', async () => {
+  const env = await modsEnv();
+  const key = makeKey();
+  const files = {};
+  for (let i = 0; i < 300; i++) files['images/f' + String(i).padStart(3, '0') + '.bimage'] = Buffer.alloc(1000 + i, i & 255);
+  const u = makeUnit(files);
+  await publishUnit(env, key, u);
+  const { archivePlanIn } = await modsModule;
+  const made = await archivePlanIn(env, u.hash);
+  const packRanges = made.plan.filter(p => p[0] !== null).length;
+  assert.ok(packRanges <= 2, 'pack ranges: ' + packRanges);
+  const before = env.MODS.log.filter(l => l[0] === 'get').length;
+  const whole = Buffer.from(await (await fetchWorker(env, call('GET', '/mods/unit/' + u.hash + '/archive'))).arrayBuffer());
+  assert.ok(env.MODS.log.filter(l => l[0] === 'get').length - before <= 3, 'R2 reads for one archive answer');
+  const entries = unzip(whole);
+  assert.equal(entries.length, 301);
+  for (const f of u.files) assert.equal(sha(entries.find(e => e.name === f.path).data), f.sha256);
+  const { ArchiveWalker } = await modsModule;
+  const w = new ArchiveWalker(whole.length, { hash: false });
+  w.push(new Uint8Array(whole)); w.finish();
+  assert.equal(w.error, null);
 });

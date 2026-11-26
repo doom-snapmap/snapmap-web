@@ -16,9 +16,9 @@ per month at plausible scale.
 | Workers KV | Sessions and OAuth state | `SESSIONS` binding | Sign-in and authenticated routes fail. |
 | SQLite Durable Objects | Per-account write quotas | `WRITE_QUOTAS` binding and its migration | Authenticated writes fail closed with HTTP 503. |
 | R2 | Screenshot uploads | `MEDIA` binding | Uploads and media retrieval fail. |
-| R2 (mod store) | Anonymous Snapmap+ mod blobs and bundle manifests, bucket `snapmap-plus-mods`; billed per use for storage, Class A writes and Class B reads, with free egress | `MODS` binding | Players cannot fetch the mods a map needs; installed mods and vanilla maps are unaffected. |
-| SQLite Durable Object (mod index) | Index of stored mod objects and their anonymous claims; per-address limits use `WRITE_QUOTAS` | `MOD_REGISTRY` binding and its `v2-mod-registry` migration; optional secret `MODS_ADDRESS_KEY` | Mod store routes fail closed with HTTP 503. |
-| Workers Cron Trigger | Daily purge of mod objects nothing ever claimed (released bundles are deleted at release) | `[triggers]` in `api/wrangler.toml` | Unclaimed objects stay stored and unserved. |
+| R2 (mod store) | Published map units, file packs and unit manifests in `snapmap-plus-mods`; billed per use for storage, Class A writes and Class B reads, with free egress | `MODS` binding | Players cannot fetch the mods a map needs; installed mods and vanilla maps are unaffected. |
+| SQLite Durable Object (mod index) | Units, map claims, publishing keys and moderation. Per-address and per-key limits use `WRITE_QUOTAS`. | `UNIT_REGISTRY` and `MOD_CHECKER`. The original `MOD_REGISTRY` retains its bundle records. Optional secrets include `MODS_ADDRESS_KEY` and `MODS_ADMIN_TOKEN`. | Mod store routes fail closed with HTTP 503. |
+| Workers Cron Trigger | Daily purge of unclaimed units after 24 hours and of unused mod objects | `[triggers]` in `api/wrangler.toml` | Unclaimed units and their files stay stored longer. |
 | Turnstile | Optional write challenge | Worker secret `TURNSTILE_SECRET` and matching site setup | The Worker skips the challenge when the secret is absent. |
 
 ## DNS

@@ -4,6 +4,13 @@ name = "snapmap-plus-community"
 main = "worker.js"
 compatibility_date = "2026-07-01"
 routes = [{ pattern = "api.snapmapplus.com", custom_domain = true }]
+# Workers plan. The store runs on Workers Free and on Workers Paid from the same code: the Worker
+# only moves bytes, and the work that reads every byte runs in Durable Objects, which have 30 s of
+# CPU a request on either plan. After subscribing to Workers Paid, uncomment these two lines and
+# deploy: they give each request (Worker or Durable Object) up to 5 minutes of CPU. Nothing else
+# changes.
+# [limits]
+# cpu_ms = 300000
 
 # Session store (opaque session id -> GitHub user token, server-side only)
 [[kv_namespaces]]
@@ -23,13 +30,13 @@ class_name = "CommunityQuota"
 tag = "v1-write-quotas"
 new_sqlite_classes = ["CommunityQuota"]
 
-# Anonymous mod asset store: blob/<sha256> and bundle/<hash>, served through /mods/*.
+# The mod store (README.md, "Mod store"): units of published maps, their files once each in packs, served through /mods/*.
 # Provisioned by the maintainer (npx wrangler r2 bucket create snapmap-plus-mods).
 [[r2_buckets]]
 bucket_name = "snapmap-plus-mods"
 binding = "MODS"
 
-# Single index of stored blobs and bundles plus their anonymous claims.
+# Retain the original bundle registry and its records.
 [[durable_objects.bindings]]
 name = "MOD_REGISTRY"
 class_name = "ModRegistry"
@@ -38,11 +45,30 @@ class_name = "ModRegistry"
 tag = "v2-mod-registry"
 new_sqlite_classes = ["ModRegistry"]
 
-# Takedown list: JSON array of blocked blob and bundle hashes; edit and redeploy to block.
+# The check of each unit's uploads, one object per unit hash (mods_registry.js ModChecker): it
+# reads an upload back and hashes every byte, which needs a Durable Object's CPU time.
+[[durable_objects.bindings]]
+name = "MOD_CHECKER"
+class_name = "ModChecker"
+
+[[migrations]]
+tag = "v3-mod-checker"
+new_sqlite_classes = ["ModChecker"]
+
+# New namespace for unit files, map claims and publishing keys.
+[[durable_objects.bindings]]
+name = "UNIT_REGISTRY"
+class_name = "UnitRegistry"
+
+[[migrations]]
+tag = "v4-unit-registry"
+new_sqlite_classes = ["UnitRegistry"]
+
+# Historical bundle takedowns. Unit moderation is recorded in UnitRegistry.
 [vars]
 MODS_BLOCKED = "[]"
 
-# Daily purge of mod objects nothing ever claimed, older than one hour (scheduled handler in worker.js);
-# a released bundle is deleted at its release, not here.
+# Daily purge of units no claim has named for 24 hours, of uploads in parts abandoned
+# for a day and of objects no row names (scheduled handler in worker.js).
 [triggers]
 crons = ["23 4 * * *"]

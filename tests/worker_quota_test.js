@@ -67,3 +67,19 @@ test('failed storage transaction rolls back admission instead of returning succe
     assert.equal(db.prepare('SELECT count(*) AS n FROM quota').get().n, 0);
   } finally { db.close(); }
 });
+
+test('upgrading the quota object preserves earlier mod counters and existing Community quotas', async () => {
+  const { initializeQuota, consumeQuota, consumeModQuota } = await quotaModule;
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec("CREATE TABLE quota (kind TEXT PRIMARY KEY, window INTEGER NOT NULL, used INTEGER NOT NULL);" +
+      "INSERT INTO quota VALUES ('post', 0, 10);" +
+      "CREATE TABLE mod_quota (kind TEXT PRIMARY KEY, window INTEGER NOT NULL, used INTEGER NOT NULL);" +
+      "INSERT INTO mod_quota VALUES ('mod_get', 0, 15);");
+    const storage = immediateStorage(db);
+    initializeQuota(storage);
+    assert.equal(consumeQuota(storage, 'post', 1).allowed, false);
+    assert.equal(consumeModQuota(storage, [['mod_get', 1]], 1).allowed, true);
+    assert.equal(db.prepare("SELECT used FROM mod_quota WHERE kind = 'mod_get'").get().used, 15);
+  } finally { db.close(); }
+});

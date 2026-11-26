@@ -30,6 +30,8 @@ jobs:
         run: |
           npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0
           node tests/worker_runtime_test.js build/worker-tests/node_modules/miniflare
+          node tests/worker_contract_test.js build/worker-tests/node_modules/miniflare
+          node tests/worker_purge_test.js build/worker-tests/node_modules/miniflare
       - name: Secret scan (gitleaks)
         run: |
           VER=8.30.1
